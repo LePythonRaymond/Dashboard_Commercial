@@ -3387,6 +3387,85 @@ def main():
 
     if df.empty:
         st.warning(f"Aucune donnée disponible pour {selected_year}")
+        # Helpful diagnostics for Streamlit Cloud deployments
+        with st.expander("🛠️ Debug Google Sheets (why no data?)", expanded=False):
+            try:
+                view_type_map = {
+                    "Signé (Won)": "signe",
+                    "Envoyé (Sent)": "envoye",
+                    "État actuel (Snapshot)": "etat",
+                }
+                vt = view_type_map.get(view_type, "signe")
+                st.write("**Selected**:", {"year": selected_year, "view_type": vt})
+
+                # What spreadsheet ID we think we should use
+                try:
+                    spreadsheet_id = settings.get_spreadsheet_id(vt, int(selected_year))
+                except Exception:
+                    spreadsheet_id = ""
+                st.write("**Spreadsheet ID (from secrets)**:", spreadsheet_id or "(empty / missing)")
+
+                # Are OAuth secrets present? (never print their values)
+                has_google_oauth_block = False
+                has_oauth_cred_json = False
+                has_oauth_token_json = False
+                try:
+                    if hasattr(st, "secrets"):
+                        has_google_oauth_block = "google_oauth" in st.secrets
+                        if has_google_oauth_block:
+                            block = st.secrets["google_oauth"]
+                            if isinstance(block, dict):
+                                has_oauth_cred_json = bool(block.get("credentials_json") or block.get("credentials"))
+                                has_oauth_token_json = bool(block.get("token_json") or block.get("token"))
+                            else:
+                                # If the block is not dict-like, we can't introspect safely
+                                has_oauth_cred_json = True
+                                has_oauth_token_json = True
+                        has_oauth_cred_json = has_oauth_cred_json or ("GOOGLE_OAUTH_CREDENTIALS_JSON" in st.secrets)
+                        has_oauth_token_json = has_oauth_token_json or ("GOOGLE_OAUTH_TOKEN_JSON" in st.secrets)
+                except Exception:
+                    pass
+
+                st.write(
+                    "**OAuth secrets present**:",
+                    {
+                        "google_oauth_block": has_google_oauth_block,
+                        "credentials_json": has_oauth_cred_json,
+                        "token_json": has_oauth_token_json,
+                    },
+                )
+
+                # Do file paths exist? (useful to detect “still using paths on Cloud”)
+                try:
+                    st.write(
+                        "**Credentials path exists?**",
+                        str(Path(getattr(settings, "google_oauth_credentials_path", ""))).strip()
+                        + " => "
+                        + str(Path(getattr(settings, "google_oauth_credentials_path", "")).exists()),
+                    )
+                except Exception:
+                    pass
+                try:
+                    st.write(
+                        "**Token path exists?**",
+                        str(Path(getattr(settings, "google_oauth_token_path", ""))).strip()
+                        + " => "
+                        + str(Path(getattr(settings, "google_oauth_token_path", "")).exists()),
+                    )
+                except Exception:
+                    pass
+
+                # Try listing worksheets to surface immediate failures
+                try:
+                    _client = get_sheets_client()
+                    sheets = _client.list_worksheets(view_type=vt, year=int(selected_year))
+                    st.write("**Worksheets found**:", len(sheets))
+                    if sheets:
+                        st.write(sheets[:50])
+                except Exception as e:
+                    st.error(f"Listing worksheets failed: {e}")
+            except Exception as e:
+                st.error(f"Debug panel failed: {e}")
         return
 
     # Debug info (expandable in sidebar)

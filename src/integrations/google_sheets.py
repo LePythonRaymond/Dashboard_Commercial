@@ -11,6 +11,9 @@ import pandas as pd
 from typing import Dict, List, Any, Optional
 from pathlib import Path
 import traceback
+import json
+import os
+import tempfile
 from gspread.utils import ValueRenderOption
 
 from config.settings import settings
@@ -106,6 +109,115 @@ class GoogleSheetsClient:
         Returns:
             Authenticated gspread client
         """
+        # ---------------------------------------------------------------------
+        # Streamlit Cloud / Secrets support for OAuth JSON (no JSON files in repo)
+        #
+        # If you use OAuth (installed app) with a refresh token, you can store the
+        # JSON contents of both files in Streamlit secrets and we will write them
+        # to temporary files at runtime, then pass those paths to gspread.oauth().
+        #
+        # Supported secrets (preferred):
+        # - [google_oauth]
+        #     credentials_json = """{...}"""  # content of oauth_credentials.json
+        #     token_json       = """{...}"""  # content of oauth_token.json
+        #
+        # Also supported:
+        # - GOOGLE_OAUTH_CREDENTIALS_JSON = """{...}"""
+        # - GOOGLE_OAUTH_TOKEN_JSON       = """{...}"""
+        # ---------------------------------------------------------------------
+        try:
+            import streamlit as st  # type: ignore
+
+            oauth_credentials: Optional[str] = None
+            oauth_token: Optional[str] = None
+
+            if hasattr(st, "secrets"):
+                if "google_oauth" in st.secrets:
+                    oauth_block = st.secrets["google_oauth"]
+                    # block can be dict-like (TOML table) or a JSON string
+                    if isinstance(oauth_block, str):
+                        oauth_block = json.loads(oauth_block)
+                    oauth_credentials = oauth_block.get("credentials_json") or oauth_block.get("credentials")
+                    oauth_token = oauth_block.get("token_json") or oauth_block.get("token")
+                oauth_credentials = oauth_credentials or st.secrets.get("GOOGLE_OAUTH_CREDENTIALS_JSON")
+                oauth_token = oauth_token or st.secrets.get("GOOGLE_OAUTH_TOKEN_JSON")
+
+            if oauth_credentials and oauth_token:
+                # Write temp files (Streamlit Cloud FS is ephemeral; /tmp is fine)
+                tmp_dir = Path(tempfile.gettempdir()) / "myrium_gspread_oauth"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+
+                cred_path = tmp_dir / "oauth_credentials.json"
+                token_path = tmp_dir / "oauth_token.json"
+
+                # If secrets were provided as a dict-like object, convert to JSON
+                if not isinstance(oauth_credentials, str):
+                    oauth_credentials = json.dumps(oauth_credentials)
+                if not isinstance(oauth_token, str):
+                    oauth_token = json.dumps(oauth_token)
+
+                cred_path.write_text(oauth_credentials, encoding="utf-8")
+                token_path.write_text(oauth_token, encoding="utf-8")
+
+                return gspread.oauth(
+                    credentials_filename=str(cred_path),
+                    authorized_user_filename=str(token_path),
+                )
+        except Exception:
+            # If anything goes wrong here, fall through to other auth methods.
+            pass
+
+        # ---------------------------------------------------------------------
+        # Streamlit Cloud / Secrets support (no JSON files committed to git)
+        #
+        # Preferred for Streamlit Community Cloud: Service Account credentials,
+        # because the OAuth browser flow is not practical in a hosted environment.
+        #
+        # Supported secrets:
+        # - TOML table: [google_service_account] ... (dict-like)
+        # - Stringified JSON: GOOGLE_SERVICE_ACCOUNT_JSON = """{...}"""
+        # ---------------------------------------------------------------------
+        service_account_info: Optional[dict] = None
+
+        # 1) Try Streamlit secrets (safe when not running under Streamlit)
+        try:
+            import streamlit as st  # type: ignore
+
+            if hasattr(st, "secrets"):
+                if "google_service_account" in st.secrets:
+                    raw = st.secrets["google_service_account"]
+                    # `raw` can be a mapping (TOML table) or a JSON string
+                    if isinstance(raw, str):
+                        service_account_info = json.loads(raw)
+                    else:
+                        service_account_info = dict(raw)
+                elif "GOOGLE_SERVICE_ACCOUNT_JSON" in st.secrets:
+                    service_account_info = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
+        except Exception:
+            service_account_info = None
+
+        # 2) Fallback: allow service account JSON via environment variable too
+        if service_account_info is None:
+            env_sa = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+            if env_sa:
+                try:
+                    service_account_info = json.loads(env_sa)
+                except Exception:
+                    service_account_info = None
+
+        if service_account_info:
+            try:
+                return gspread.service_account_from_dict(service_account_info, scopes=self.SCOPES)
+            except Exception as e:
+                raise RuntimeError(
+                    "Failed to authenticate Google Sheets using service account from secrets/env. "
+                    "Double-check that the secret contains a valid service account key JSON and that "
+                    "the target spreadsheets are shared with the service account email."
+                ) from e
+
+        # ---------------------------------------------------------------------
+        # Legacy local/VPS flow: OAuth client credentials file + cached token file
+        # ---------------------------------------------------------------------
         if not Path(self.credentials_path).exists():
             raise FileNotFoundError(
                 f"OAuth credentials file not found: {self.credentials_path}\n"
