@@ -5,13 +5,59 @@ Loads environment variables and defines application constants.
 """
 
 import os
+import sys
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict
-from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+
+def _running_in_streamlit() -> bool:
+    """
+    Best-effort detection for Streamlit runtime.
+
+    We specifically want the Streamlit dashboard to *not* depend on python-dotenv,
+    because Streamlit Community Cloud uses `st.secrets` / TOML.
+    """
+    return "streamlit" in sys.modules
+
+
+def _load_dotenv_if_available() -> None:
+    """
+    Load variables from .env for non-Streamlit scripts (VPS / CLI runs).
+
+    Important: This is skipped when running under Streamlit so the dashboard does
+    not depend on python-dotenv.
+    """
+    if _running_in_streamlit():
+        return
+    try:
+        from dotenv import load_dotenv  # type: ignore
+    except Exception:
+        return
+    load_dotenv()
+
+
+def get_secret(key: str, default: str = "") -> str:
+    """
+    Return secret value from Streamlit secrets when available; otherwise from env.
+
+    - Streamlit dashboard: uses `st.secrets` (from TOML / Cloud secrets)
+    - Non-Streamlit scripts: uses `.env` (via os.environ, optionally loaded by dotenv)
+    """
+    try:
+        import streamlit as st  # type: ignore
+
+        # st.secrets behaves like a mapping
+        if hasattr(st, "secrets") and key in st.secrets:
+            val = st.secrets.get(key)
+            return "" if val is None else str(val)
+    except Exception:
+        pass
+    return os.getenv(key, default)
+
+
+# Load environment variables from .env file for non-Streamlit usage
+_load_dotenv_if_available()
 
 # Resolve paths relative to the `myrium/` package root so scripts work regardless of cwd.
 MYRIUM_ROOT = Path(__file__).resolve().parent.parent
@@ -35,24 +81,28 @@ class Settings:
 
     # Furious API
     furious_api_url: str = field(
-        default_factory=lambda: os.getenv("FURIOUS_API_URL", "https://merciraymond.furious-squad.com/api/v2")
+        default_factory=lambda: get_secret("FURIOUS_API_URL", "https://merciraymond.furious-squad.com/api/v2")
     )
-    furious_username: str = field(default_factory=lambda: os.getenv("FURIOUS_USERNAME", ""))
-    furious_password: str = field(default_factory=lambda: os.getenv("FURIOUS_PASSWORD", ""))
+    furious_username: str = field(default_factory=lambda: get_secret("FURIOUS_USERNAME", ""))
+    furious_password: str = field(default_factory=lambda: get_secret("FURIOUS_PASSWORD", ""))
 
     # Google Sheets - OAuth 2.0
     google_oauth_credentials_path: str = field(
         default_factory=lambda: _resolve_path(
-            os.getenv("GOOGLE_OAUTH_CREDENTIALS_PATH", "config/credentials/oauth_credentials.json")
+            get_secret(
+                "GOOGLE_OAUTH_CREDENTIALS_PATH",
+                # Backwards-compat alias seen in some environments
+                get_secret("GOOGLE_SERVICE_ACCOUNT_PATH", "config/credentials/oauth_credentials.json"),
+            )
         )
     )
     google_oauth_token_path: str = field(
         default_factory=lambda: _resolve_path(
-            os.getenv("GOOGLE_OAUTH_TOKEN_PATH", "config/credentials/oauth_token.json")
+            get_secret("GOOGLE_OAUTH_TOKEN_PATH", "config/credentials/oauth_token.json")
         )
     )
     # Legacy single spreadsheet (deprecated, use get_spreadsheet_id instead)
-    spreadsheet_id: str = field(default_factory=lambda: os.getenv("SPREADSHEET_ID", ""))
+    spreadsheet_id: str = field(default_factory=lambda: get_secret("SPREADSHEET_ID", ""))
 
     def get_spreadsheet_id(self, view_type: str, year: int) -> str:
         """
@@ -68,7 +118,7 @@ class Settings:
             Spreadsheet ID from environment variable
         """
         env_var = f"SPREADSHEET_{view_type.upper()}_{year}"
-        spreadsheet_id = os.getenv(env_var, "")
+        spreadsheet_id = get_secret(env_var, "")
 
         # Fallback to legacy single spreadsheet if new format not found
         if not spreadsheet_id and self.spreadsheet_id:
@@ -77,19 +127,21 @@ class Settings:
         return spreadsheet_id
 
     # SMTP Email
-    smtp_host: str = field(default_factory=lambda: os.getenv("SMTP_HOST", "smtp.gmail.com"))
-    smtp_port: int = field(default_factory=lambda: int(os.getenv("SMTP_PORT", "587")))
-    smtp_user: str = field(default_factory=lambda: os.getenv("SMTP_USER", ""))
-    smtp_password: str = field(default_factory=lambda: os.getenv("SMTP_PASSWORD", ""))
+    smtp_host: str = field(default_factory=lambda: get_secret("SMTP_HOST", "smtp.gmail.com"))
+    smtp_port: int = field(default_factory=lambda: int(get_secret("SMTP_PORT", "587")))
+    smtp_user: str = field(default_factory=lambda: get_secret("SMTP_USER", ""))
+    smtp_password: str = field(default_factory=lambda: get_secret("SMTP_PASSWORD", ""))
 
     # Notion
-    notion_api_key: str = field(default_factory=lambda: os.getenv("NOTION_API_KEY", ""))
-    notion_database_id: str = field(default_factory=lambda: os.getenv("NOTION_DATABASE_ID", ""))
+    notion_api_key: str = field(default_factory=lambda: get_secret("NOTION_API_KEY", ""))
+    notion_database_id: str = field(default_factory=lambda: get_secret("NOTION_DATABASE_ID", ""))
     # Notion databases for alerts
-    notion_weird_database_id: str = field(default_factory=lambda: os.getenv("NOTION_WEIRD_DATABASE_ID", ""))
-    notion_followup_database_id: str = field(default_factory=lambda: os.getenv("NOTION_FOLLOWUP_DATABASE_ID", ""))
+    notion_weird_database_id: str = field(default_factory=lambda: get_secret("NOTION_WEIRD_DATABASE_ID", ""))
+    notion_followup_database_id: str = field(default_factory=lambda: get_secret("NOTION_FOLLOWUP_DATABASE_ID", ""))
     # Notion database for TRAVAUX projection
-    notion_travaux_projection_database_id: str = field(default_factory=lambda: os.getenv("NOTION_TRAVAUX_PROJECTION_DATABASE_ID", ""))
+    notion_travaux_projection_database_id: str = field(
+        default_factory=lambda: get_secret("NOTION_TRAVAUX_PROJECTION_DATABASE_ID", "")
+    )
 
     # API Request Settings
     api_timeout: int = 30

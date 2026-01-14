@@ -1,5 +1,7 @@
 # Environment
 .env
+.streamlit/secrets.toml
+.streamlit/*.toml
 .venv/
 venv/
 env/
