@@ -73,6 +73,64 @@ class NotionTravauxSync:
             self._client = Client(auth=self.api_key)
         return self._client
 
+    def _get_data_source_id_for_database(self) -> str:
+        """
+        Resolve a Notion `data_source_id` from this sync's `database_id`.
+
+        Newer Notion API versions introduce `data_sources` under a database; querying is done
+        via `client.data_sources.query(data_source_id=...)` in newer SDK versions.
+        """
+        if not self.database_id:
+            raise RuntimeError("Database ID is empty; cannot resolve data source id.")
+        db = self.client.databases.retrieve(database_id=self.database_id)
+        data_sources = db.get("data_sources") or []
+        if not data_sources or not isinstance(data_sources, list) or not isinstance(data_sources[0], dict):
+            raise RuntimeError(
+                "Notion database has no `data_sources` field; cannot query pages safely "
+                f"(database_id={self.database_id[:8]}...)."
+            )
+        ds_id = str(data_sources[0].get("id") or "").strip()
+        if not ds_id:
+            raise RuntimeError(
+                "Notion database `data_sources[0].id` is empty; cannot query pages safely "
+                f"(database_id={self.database_id[:8]}...)."
+            )
+        return ds_id
+
+    def _query_pages(self, start_cursor: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Query pages for this database, compatible with both old and new Notion SDK styles.
+
+        - Old style: `client.databases.query(database_id=...)`
+        - New style (Data sources): `client.data_sources.query(data_source_id=...)`
+        """
+        if not self.database_id:
+            raise RuntimeError("Database ID is empty; cannot query pages.")
+
+        page_size = 100
+
+        databases_ep = getattr(self.client, "databases", None)
+        if databases_ep is not None and hasattr(databases_ep, "query"):
+            params: Dict[str, Any] = {"database_id": self.database_id, "page_size": page_size}
+            if start_cursor:
+                params["start_cursor"] = start_cursor
+            return databases_ep.query(**params)
+
+        data_sources_ep = getattr(self.client, "data_sources", None)
+        if data_sources_ep is not None and hasattr(data_sources_ep, "query"):
+            data_source_id = self._get_data_source_id_for_database()
+            params = {"data_source_id": data_source_id, "page_size": page_size}
+            if start_cursor:
+                params["start_cursor"] = start_cursor
+            return data_sources_ep.query(**params)
+
+        raise RuntimeError(
+            "Notion SDK does not expose a supported query method. "
+            "Refusing to sync to avoid duplicate page creation. "
+            f"(has_databases_query={hasattr(databases_ep, 'query') if databases_ep is not None else False}, "
+            f"has_data_sources_query={hasattr(data_sources_ep, 'query') if data_sources_ep is not None else False})"
+        )
+
     def _get_database_schema(self) -> Dict[str, Any]:
         """
         Get the database schema to check which properties exist.
@@ -336,24 +394,15 @@ class NotionTravauxSync:
             return mapping
 
         while has_more:
-            try:
-                params = {"database_id": self.database_id, "page_size": 100}
-                if start_cursor:
-                    params["start_cursor"] = start_cursor
+            response = self._query_pages(start_cursor=start_cursor)
+            for page in response.get("results", []):
+                proposal_id = self._extract_id_devis_from_page(page)
+                if not proposal_id:
+                    continue
+                mapping.setdefault(proposal_id, page["id"])
 
-                response = self.client.databases.query(**params)
-                for page in response.get("results", []):
-                    proposal_id = self._extract_id_devis_from_page(page)
-                    if not proposal_id:
-                        continue
-                    mapping.setdefault(proposal_id, page["id"])
-
-                has_more = response.get("has_more", False)
-                start_cursor = response.get("next_cursor")
-
-            except Exception as e:
-                print(f"    Warning: Could not query database: {e}")
-                break
+            has_more = response.get("has_more", False)
+            start_cursor = response.get("next_cursor")
 
         return mapping
 

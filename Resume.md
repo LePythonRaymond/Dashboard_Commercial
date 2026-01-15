@@ -233,7 +233,6 @@ For each proposal, the system generates:
 #### Weird Proposals Alert
 - **Scope**: Only proposals appearing in one of the 3 active views
 - **Triggers**:
-  - Amount < 1,000€
   - Missing `projet_start` date
   - Missing `projet_stop` date
   - `projet_start` > `projet_stop` (invalid range)
@@ -1264,7 +1263,7 @@ The system is ready for production use and can be easily extended with new featu
 3. **Notion Database Schema**:
    - **Weird Proposals**: Name (title), ID Devis (text), Client (text), Montant (number), Statut (status), Date (date), Début projet (date), Fin projet (date), Responsable (people), Lien Furious (url), Probleme (multi-select)
    - **Follow-ups**: Same as Weird except Probabilite (number) instead of Probleme
-   - Probleme multi-select options: "Montant faible (<1000€)", "Date début manquante", "Date fin manquante", "Date début > Date fin", "Probabilité 0%"
+   - Probleme multi-select options: "Date début manquante", "Date fin manquante", "Date début > Date fin", "Probabilité 0%" (Note: "Montant faible (<1000€)" option removed in section 18.26)
 
 4. **Excluded Owners Filter**:
    - Added `EXCLUDED_OWNERS` configuration in settings
@@ -1941,9 +1940,45 @@ The system is ready for production use and can be easily extended with new featu
 
 **Impact**: Objectives email now provides Guillaume with the exact same data and calculations as the dashboard Objectifs tab, ensuring consistency across all reporting channels. Production-year forecasting with full carryover visibility enables accurate planning. Email recipients can click through to dashboard for detailed analysis. Order change (Signé first) prioritizes signed revenue visibility.
 
+### 18.26 Weird Proposals Amount Threshold Removal (January 2026)
+
+**Business Logic Change**: Removed the < 1,000€ amount threshold from weird proposals alert system to simplify alert criteria and reduce noise.
+
+**Key Changes**:
+
+1. **Alert Generation Logic**:
+   - Removed amount < 1,000€ check from `_get_weird_reason()` method in `alerts.py`
+   - Weird proposals now only flagged for: missing dates, invalid date ranges, or 0% probability
+   - Simplified alert criteria focuses on data quality issues rather than amount thresholds
+
+2. **Email Template Updates**:
+   - Removed "montant <1,000€" mention from email criteria description
+   - Updated filtering criteria text to reflect new alert triggers
+
+3. **Configuration Cleanup**:
+   - Deprecated `ALERT_AMOUNT_THRESHOLD` constant in `settings.py` (commented out)
+   - Removed unused import from `alerts.py`
+
+4. **Notion Tags Cleanup**:
+   - Existing Notion pages with "Montant faible (<1000€)" tags automatically cleaned up on next pipeline run
+   - `_build_probleme_multi_select()` rebuilds multi-select from current reason string (no longer includes amount check)
+   - Old tags removed when pages are updated during sync
+
+**Code Changes**:
+- `src/processing/alerts.py`:
+  - Removed amount threshold check from `_get_weird_reason()` method
+  - Updated class docstring to remove "Amount < 1k" from triggers list
+  - Removed `ALERT_AMOUNT_THRESHOLD` import
+- `src/integrations/email_sender.py`:
+  - Updated email template criteria description to remove amount threshold mention
+- `config/settings.py`:
+  - Deprecated `ALERT_AMOUNT_THRESHOLD` constant (commented with deprecation note)
+
+**Impact**: Weird proposals alerts now focus exclusively on data quality issues (missing/invalid dates, zero probability) rather than amount-based filtering. This reduces alert noise and allows sales teams to focus on actionable data quality problems. Existing Notion tags are automatically cleaned up on next pipeline run when pages are updated.
+
 ---
 
-**Document Version**: 1.18
+**Document Version**: 1.19
 **Last Updated**: January 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System

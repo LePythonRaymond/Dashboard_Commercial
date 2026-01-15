@@ -29,7 +29,7 @@ class EmailSender:
     """
 
     # Email domain for owner lookup (modify as needed)
-    EMAIL_DOMAIN = "@merciraymond.com"
+    EMAIL_DOMAIN = "@merciraymond.fr"
 
     # Test mode: redirect all emails to this address
     TEST_EMAIL = "taddeo.carpinelli@merciraymond.fr"
@@ -37,7 +37,7 @@ class EmailSender:
     # Dashboard URL for objectives email link
     # TODO: Update this URL once the dashboard is publicly accessible
     # Example: "https://your-dashboard.streamlit.app" or "https://dashboard.merciraymond.com"
-    DASHBOARD_URL = "https://dashboard.merciraymond.com"  # PLACEHOLDER - Update when dashboard is public
+    DASHBOARD_URL = "https://dashboardcommercial-2tczxjdpubas3gpssijsd6.streamlit.app/?tab=globale"  # PLACEHOLDER - Update when dashboard is public
 
     def __init__(
         self,
@@ -265,7 +265,7 @@ class EmailSender:
                     • {len(weird_items)} proposition(s) nécessitent une vérification<br>
                     • {len(followup_items)} proposition(s) nécessitent un suivi<br><br>
                     <strong>Critères de filtrage:</strong><br>
-                    • <strong>Vérification:</strong> Propositions avec anomalies (montant &lt;1,000€, dates manquantes/invalides, probabilité 0%)<br>
+                    • <strong>Vérification:</strong> Propositions avec anomalies (dates manquantes/invalides, probabilité 0%)<br>
                     • <strong>Suivi:</strong> Statut = En attente, fenêtre: 1er du mois précédent → Aujourd'hui + 60 jours<br>
                     &nbsp;&nbsp;&nbsp;&nbsp;CONCEPTION: date proposition dans la fenêtre<br>
                     &nbsp;&nbsp;&nbsp;&nbsp;TRAVAUX/MAINTENANCE: date proposition OU début projet dans la fenêtre

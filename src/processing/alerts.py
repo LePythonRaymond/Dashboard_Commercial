@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 
 from config.settings import (
     STATUS_WAITING,
-    ALERT_AMOUNT_THRESHOLD,
     ALERT_FOLLOWUP_DAYS_FORWARD
 )
 from .views import ViewGenerator
@@ -53,7 +52,7 @@ class AlertsGenerator:
 
     Weird Proposals:
     - Only proposals in active views (Snapshot/Sent/Won)
-    - Triggers: Amount < 1k, Missing dates, Start > End, Probability = 0%
+    - Triggers: Missing dates, Start > End, Probability = 0%
 
     Commercial Follow-up:
     - Status must be WAITING
@@ -100,10 +99,6 @@ class AlertsGenerator:
             Pipe-separated string of reasons, or empty if not weird
         """
         reasons = []
-
-        # Amount check
-        if row['amount'] < ALERT_AMOUNT_THRESHOLD:
-            reasons.append(f"Montant faible (<{ALERT_AMOUNT_THRESHOLD}€)")
 
         # Date checks
         if pd.isna(row.get('projet_start')):

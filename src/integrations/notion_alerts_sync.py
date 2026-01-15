@@ -71,6 +71,62 @@ class NotionAlertsSync:
             self._client = Client(auth=self.api_key)
         return self._client
 
+    def _get_data_source_id_for_database(self, database_id: str) -> str:
+        """
+        Resolve a Notion `data_source_id` from a `database_id`.
+
+        Notion introduced "Data sources" (API 2025-09-03). In newer SDK versions,
+        database querying can be done via `client.data_sources.query(data_source_id=...)`.
+        """
+        db = self.client.databases.retrieve(database_id=database_id)
+        data_sources = db.get("data_sources") or []
+        if not data_sources or not isinstance(data_sources, list) or not isinstance(data_sources[0], dict):
+            raise RuntimeError(
+                "Notion database has no `data_sources` field; cannot query pages safely "
+                f"(database_id={database_id[:8]}...)."
+            )
+        ds_id = str(data_sources[0].get("id") or "").strip()
+        if not ds_id:
+            raise RuntimeError(
+                "Notion database `data_sources[0].id` is empty; cannot query pages safely "
+                f"(database_id={database_id[:8]}...)."
+            )
+        return ds_id
+
+    def _query_pages(self, database_id: str, start_cursor: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Query pages for a database, compatible with both old and new Notion SDK styles.
+
+        - Old style: `client.databases.query(database_id=...)`
+        - New style (Data sources): `client.data_sources.query(data_source_id=...)`
+        """
+        page_size = 100
+
+        # 1) Prefer databases.query if available (older SDKs)
+        databases_ep = getattr(self.client, "databases", None)
+        if databases_ep is not None and hasattr(databases_ep, "query"):
+            params: Dict[str, Any] = {"database_id": database_id, "page_size": page_size}
+            if start_cursor:
+                params["start_cursor"] = start_cursor
+            return databases_ep.query(**params)
+
+        # 2) Fallback to data_sources.query (newer SDKs / Notion API 2025-09-03)
+        data_sources_ep = getattr(self.client, "data_sources", None)
+        if data_sources_ep is not None and hasattr(data_sources_ep, "query"):
+            data_source_id = self._get_data_source_id_for_database(database_id)
+            params = {"data_source_id": data_source_id, "page_size": page_size}
+            if start_cursor:
+                params["start_cursor"] = start_cursor
+            return data_sources_ep.query(**params)
+
+        # 3) Fail closed: never "assume empty DB" if we can't query
+        raise RuntimeError(
+            "Notion SDK does not expose a supported query method. "
+            "Refusing to sync to avoid duplicate page creation. "
+            f"(has_databases_query={hasattr(databases_ep, 'query') if databases_ep is not None else False}, "
+            f"has_data_sources_query={hasattr(data_sources_ep, 'query') if data_sources_ep is not None else False})"
+        )
+
     def _build_furious_url(self, proposal_id: str) -> str:
         """Build Furious URL from proposal ID."""
         if not proposal_id:
@@ -295,24 +351,16 @@ class NotionAlertsSync:
         start_cursor = None
 
         while has_more:
-            try:
-                params = {"database_id": database_id, "page_size": 100}
-                if start_cursor:
-                    params["start_cursor"] = start_cursor
+            response = self._query_pages(database_id=database_id, start_cursor=start_cursor)
+            for page in response.get("results", []):
+                proposal_id = self._extract_id_devis_from_page(page)
+                if not proposal_id:
+                    continue
+                # If duplicates exist, keep the first and ignore the rest to avoid oscillation
+                mapping.setdefault(proposal_id, page["id"])
 
-                response = self.client.databases.query(**params)
-                for page in response.get("results", []):
-                    proposal_id = self._extract_id_devis_from_page(page)
-                    if not proposal_id:
-                        continue
-                    # If duplicates exist, keep the first and ignore the rest to avoid oscillation
-                    mapping.setdefault(proposal_id, page["id"])
-
-                has_more = response.get("has_more", False)
-                start_cursor = response.get("next_cursor")
-            except Exception as e:
-                print(f"    Warning: Could not query database for existing pages: {e}")
-                break
+            has_more = response.get("has_more", False)
+            start_cursor = response.get("next_cursor")
 
         return mapping
 
@@ -340,21 +388,12 @@ class NotionAlertsSync:
         start_cursor = None
 
         while has_more:
-            try:
-                params = {"database_id": database_id, "page_size": 100}
-                if start_cursor:
-                    params["start_cursor"] = start_cursor
+            response = self._query_pages(database_id=database_id, start_cursor=start_cursor)
+            for page in response.get("results", []):
+                page_ids.append(page["id"])
 
-                response = self.client.databases.query(**params)
-                for page in response.get("results", []):
-                    page_ids.append(page["id"])
-
-                has_more = response.get("has_more", False)
-                start_cursor = response.get("next_cursor")
-
-            except Exception as e:
-                print(f"    Warning: Could not query database: {e}")
-                break
+            has_more = response.get("has_more", False)
+            start_cursor = response.get("next_cursor")
 
         return page_ids
 

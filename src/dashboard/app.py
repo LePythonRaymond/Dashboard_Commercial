@@ -3369,12 +3369,30 @@ def main():
         current_year = datetime.now().year
         client = get_sheets_client()
         snapshot_sheets = client.list_worksheets(view_type="etat", year=current_year)
-        snapshot_sheets = [s for s in snapshot_sheets if "État au" in s]
-        if snapshot_sheets:
-            snapshot_sheets.sort(reverse=True)
-            df = load_worksheet_data(snapshot_sheets[0], view_type="etat", year=current_year)
+
+        # Prefer the stable daily snapshot sheet (overwritten daily)
+        if "État actuel" in snapshot_sheets:
+            df = load_worksheet_data("État actuel", view_type="etat", year=current_year)
         else:
-            df = pd.DataFrame()
+            # Fallback to the most recent "État au DD-MM-YYYY" snapshot.
+            # Important: do NOT rely on lexicographic sort (DD-MM-YYYY doesn't sort correctly).
+            etat_au_sheets = [s for s in snapshot_sheets if "État au" in s]
+            best_name = None
+            best_dt = None
+            for name in etat_au_sheets:
+                try:
+                    # Expected format: "État au DD-MM-YYYY"
+                    dt = datetime.strptime(name.replace("État au ", "").strip(), "%d-%m-%Y")
+                except Exception:
+                    continue
+                if best_dt is None or dt > best_dt:
+                    best_dt = dt
+                    best_name = name
+
+            if best_name:
+                df = load_worksheet_data(best_name, view_type="etat", year=current_year)
+            else:
+                df = pd.DataFrame()
 
     # #region agent log
     debug_log("main:DATA_LOAD:DONE", f"Loaded {len(df)} rows in {time.time()-data_load_start:.2f}s",
@@ -3387,85 +3405,6 @@ def main():
 
     if df.empty:
         st.warning(f"Aucune donnée disponible pour {selected_year}")
-        # Helpful diagnostics for Streamlit Cloud deployments
-        with st.expander("🛠️ Debug Google Sheets (why no data?)", expanded=False):
-            try:
-                view_type_map = {
-                    "Signé (Won)": "signe",
-                    "Envoyé (Sent)": "envoye",
-                    "État actuel (Snapshot)": "etat",
-                }
-                vt = view_type_map.get(view_type, "signe")
-                st.write("**Selected**:", {"year": selected_year, "view_type": vt})
-
-                # What spreadsheet ID we think we should use
-                try:
-                    spreadsheet_id = settings.get_spreadsheet_id(vt, int(selected_year))
-                except Exception:
-                    spreadsheet_id = ""
-                st.write("**Spreadsheet ID (from secrets)**:", spreadsheet_id or "(empty / missing)")
-
-                # Are OAuth secrets present? (never print their values)
-                has_google_oauth_block = False
-                has_oauth_cred_json = False
-                has_oauth_token_json = False
-                try:
-                    if hasattr(st, "secrets"):
-                        has_google_oauth_block = "google_oauth" in st.secrets
-                        if has_google_oauth_block:
-                            block = st.secrets["google_oauth"]
-                            if isinstance(block, dict):
-                                has_oauth_cred_json = bool(block.get("credentials_json") or block.get("credentials"))
-                                has_oauth_token_json = bool(block.get("token_json") or block.get("token"))
-                            else:
-                                # If the block is not dict-like, we can't introspect safely
-                                has_oauth_cred_json = True
-                                has_oauth_token_json = True
-                        has_oauth_cred_json = has_oauth_cred_json or ("GOOGLE_OAUTH_CREDENTIALS_JSON" in st.secrets)
-                        has_oauth_token_json = has_oauth_token_json or ("GOOGLE_OAUTH_TOKEN_JSON" in st.secrets)
-                except Exception:
-                    pass
-
-                st.write(
-                    "**OAuth secrets present**:",
-                    {
-                        "google_oauth_block": has_google_oauth_block,
-                        "credentials_json": has_oauth_cred_json,
-                        "token_json": has_oauth_token_json,
-                    },
-                )
-
-                # Do file paths exist? (useful to detect “still using paths on Cloud”)
-                try:
-                    st.write(
-                        "**Credentials path exists?**",
-                        str(Path(getattr(settings, "google_oauth_credentials_path", ""))).strip()
-                        + " => "
-                        + str(Path(getattr(settings, "google_oauth_credentials_path", "")).exists()),
-                    )
-                except Exception:
-                    pass
-                try:
-                    st.write(
-                        "**Token path exists?**",
-                        str(Path(getattr(settings, "google_oauth_token_path", ""))).strip()
-                        + " => "
-                        + str(Path(getattr(settings, "google_oauth_token_path", "")).exists()),
-                    )
-                except Exception:
-                    pass
-
-                # Try listing worksheets to surface immediate failures
-                try:
-                    _client = get_sheets_client()
-                    sheets = _client.list_worksheets(view_type=vt, year=int(selected_year))
-                    st.write("**Worksheets found**:", len(sheets))
-                    if sheets:
-                        st.write(sheets[:50])
-                except Exception as e:
-                    st.error(f"Listing worksheets failed: {e}")
-            except Exception as e:
-                st.error(f"Debug panel failed: {e}")
         return
 
     # Debug info (expandable in sidebar)

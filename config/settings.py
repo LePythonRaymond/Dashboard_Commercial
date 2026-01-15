@@ -180,14 +180,14 @@ VIP_COMMERCIALS: List[str] = [
 # Email mapping: owner identifier -> email address
 # If an owner is not in this mapping, it will use: {owner}@merciraymond.com
 OWNER_EMAIL_MAP: Dict[str, str] = {
-    'clemence': 'clemence@merciraymond.com',
-    'vincent.delavarende': 'vincent.delavarende@merciraymond.com',
-    'anne-valerie': 'anne-valerie@merciraymond.com',
+    'clemence': 'clemence@merciraymond.fr',
+    'vincent.delavarende': 'vincent.delavarende@merciraymond.fr',
+    'anne-valerie': 'anne-valerie@merciraymond.fr',
     'guillaume': 'guillaume@merciraymond.fr',
-    'julien.jonis': 'julien.jonis@merciraymond.com',
-    'zoelie': 'taddeo.carpinelli@merciraymond.com',
-    'adelaide.patureau': 'adelaide.patureau@merciraymond.com',
-    'unassigned': 'taddeo.carpinelli@merciraymond.com',  # Default for unassigned proposals
+    'julien.jonis': 'julien.jonis@merciraymond.fr',
+    'zoelie': 'taddeo.carpinelli@merciraymond.fr',
+    'adelaide.patureau': 'adelaide.patureau@merciraymond.fr',
+    'unassigned': 'taddeo.carpinelli@merciraymond.fr',  # Default for unassigned proposals
 }
 
 # French Month Mapping
@@ -216,7 +216,7 @@ CONCEPTION_THRESHOLD_LOW = 15000
 CONCEPTION_THRESHOLD_HIGH = 30000
 
 # Alert Configuration
-ALERT_AMOUNT_THRESHOLD = 1000  # Flag proposals under 1k
+# ALERT_AMOUNT_THRESHOLD = 1000  # DEPRECATED: Amount threshold rule removed (no longer used)
 ALERT_FOLLOWUP_DAYS_FORWARD = 60  # Look ahead window
 
 # TRAVAUX Projection Configuration
