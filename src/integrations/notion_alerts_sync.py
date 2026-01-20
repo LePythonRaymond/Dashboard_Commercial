@@ -241,15 +241,57 @@ class NotionAlertsSync:
             return {}
         try:
             db_info = self.client.databases.retrieve(database_id=database_id)
-            return db_info.get("properties", {}) or {}
+
+            # Old/standard shape: properties live directly on the database object
+            props = db_info.get("properties") or {}
+            if isinstance(props, dict) and props:
+                return props
+
+            # Newer Notion API can expose properties via "data_sources" attached to the database.
+            # Try to retrieve the first data source and read its properties.
+            data_sources = db_info.get("data_sources") or []
+            if isinstance(data_sources, list) and data_sources and isinstance(data_sources[0], dict):
+                ds_id = str(data_sources[0].get("id") or "").strip()
+                if ds_id:
+                    data_sources_ep = getattr(self.client, "data_sources", None)
+                    if data_sources_ep is not None and hasattr(data_sources_ep, "retrieve"):
+                        ds_info = data_sources_ep.retrieve(data_source_id=ds_id)
+                        ds_props = ds_info.get("properties") or {}
+                        if isinstance(ds_props, dict) and ds_props:
+                            return ds_props
+
+            # If we get here, schema couldn't be determined reliably
+            return {}
         except Exception as e:
             print(f"    Warning: Could not fetch database schema for {database_id[:8]}...: {e}")
             return {}
 
     @staticmethod
     def _schema_allows(schema: Dict[str, Any], prop_name: str) -> bool:
-        """If schema is empty (unknown), allow everything. Otherwise only allow known properties."""
-        return (not schema) or (prop_name in schema)
+        """
+        Decide whether a Notion property should be sent.
+
+        - If schema is known (non-empty): only allow properties that exist in schema.
+        - If schema is unknown/empty: allow a conservative safe list of "core" properties and
+          skip optional ones like Responsable/Commercial/Chef de projet to avoid 400 errors.
+        """
+        if schema:
+            return prop_name in schema
+
+        safe_when_unknown = {
+            "Name",
+            "ID Devis",
+            "Client",
+            "Montant",
+            "Statut",
+            "Probabilite",
+            "Probleme",
+            "Date",
+            "Début projet",
+            "Fin projet",
+            "Lien Furious",
+        }
+        return prop_name in safe_when_unknown
 
     def _build_probleme_multi_select(self, reason: str) -> Dict[str, Any]:
         """
