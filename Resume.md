@@ -55,7 +55,9 @@ The original system was built in **n8n** (workflow automation tool) with Python 
 1. **Automated Data Pipeline**
    - Fetch all proposals from Furious CRM API (with pagination)
    - Process 1,700+ proposals in under 30 seconds
-   - Run bi-monthly (1st and last day of each month) automatically
+   - **Daily**: Google Sheets refresh for real-time dashboard updates
+   - **Bi-monthly**: Full pipeline with alerts and reporting (1st and last day of month)
+   - **Weekly**: TRAVAUX projection for proactive planning (every Sunday)
 
 2. **Financial Forecasting**
    - Calculate revenue spreading across 3 years (Y, Y+1, Y+2)
@@ -105,22 +107,36 @@ The original system was built in **n8n** (workflow automation tool) with Python 
 │ Data Processing │ (cleaner.py, revenue_engine.py, views.py, alerts.py)
 └────────┬────────┘
          │
-         ├──► Google Sheets (Monthly Snapshots)
-         ├──► Email Alerts (SMTP)
-         ├──► Notion (Gantt Sync)
-         └──► Streamlit Dashboard (BI Visualization)
+         ├──► Daily Pipeline (run_sheets_update.py)
+         │    └──► Google Sheets (État actuel + monthly views)
+         │
+         ├──► Bi-Monthly Pipeline (run_pipeline_scheduled.py)
+         │    ├──► Google Sheets (Dated snapshots + monthly views)
+         │    ├──► Email Alerts (SMTP)
+         │    └──► Notion (Alerts sync)
+         │
+         ├──► Weekly Pipeline (run_travaux_pipeline.py)
+         │    ├──► Email (TRAVAUX projection)
+         │    └──► Notion (TRAVAUX projection DB)
+         │
+         └──► Streamlit Dashboard (BI Visualization - reads from Google Sheets)
 ```
 
 ### 3.2 Data Flow
 
+**Common Processing Steps** (shared by all pipelines):
 1. **Authentication**: JWT token acquisition with auto-refresh
 2. **Data Extraction**: Paginated fetch of all proposals (250 per page)
 3. **Data Cleaning**: Normalization, date parsing, BU assignment
 4. **Revenue Calculation**: Complex spreading logic per BU type
 5. **View Generation**: Filter and aggregate into 3 main views
-6. **Alert Generation**: Identify data quality issues and follow-ups
-7. **Output**: Write to Google Sheets, send emails, sync Notion
-8. **Visualization**: Dashboard reads from Google Sheets
+
+**Pipeline-Specific Outputs**:
+- **Daily Pipeline**: Google Sheets only (État actuel + monthly views)
+- **Bi-Monthly Pipeline**: Google Sheets (dated snapshots) + Email alerts + Notion alerts sync + Objectives email
+- **Weekly Pipeline**: TRAVAUX projection email + Notion TRAVAUX DB sync
+
+**Visualization**: Dashboard reads from Google Sheets (prefers "État actuel" for snapshot view)
 
 ### 3.3 Component Architecture
 
@@ -256,11 +272,11 @@ For each proposal, the system generates:
 ### 4.6 Summary Calculations
 
 Each view includes summaries at the bottom:
-- **By BU**: Aggregated by Business Unit (with split handling)
-- **By Typologie**: Aggregated by `cf_typologie_de_devis` (with split handling)
+- **By BU**: Aggregated by Business Unit
+- **By Typologie**: Aggregated by `cf_typologie_de_devis` (primary allocation - see section 18.29)
 - **TS Total**: Sum of all proposals with "TS" in title
 
-**Split Handling**: If typology is "DV, PAYSAGE", amount is added to both "DV" and "PAYSAGE" totals.
+**Primary Allocation**: If typology is "DV, PAYSAGE", project is counted in both "DV" and "PAYSAGE" counts, but amount goes to primary typologie only (DV in this case, unless TS detected or Animation demotion applies).
 
 ---
 
@@ -423,7 +439,7 @@ myrium/
 - **Robust Date Parsing**: Handles various date formats, invalid dates
 - **TS Rule Override**: Automatic TRAVAUX assignment for TS projects
 - **VIP Routing**: Intelligent owner resolution for alerts
-- **Split Summaries**: Handles comma-separated typologies
+- **Primary Allocation**: Handles comma-separated typologies with primary-tag selection (TS priority, Animation demotion)
 
 ### 7.3 Revenue Forecasting
 
@@ -466,20 +482,21 @@ myrium/
 - **Multi-Sheet Reading**: Reads all worksheets from Google Sheets spreadsheets (not just the first one)
 - **BU Color Theme**: Consistent color coding (CONCEPTION=green, TRAVAUX=yellow, MAINTENANCE=purple, AUTRE=gray)
 - **Project Counts**: Displayed in all charts and KPIs (format: "BU_NAME (X projets)")
-- **Typologie Split**: Multi-typologie projects have amounts divided equally among categories
+- **Typologie Primary Allocation**: Multi-typologie projects are counted in all categories, but amount goes to primary typologie only (TS priority, Animation demotion)
 - **Error Handling**: Graceful handling of individual sheet errors, continues processing other sheets
 - **Column Deduplication**: Automatically handles duplicate column names when combining multiple sheets
 - **Data Ingestion Fix**: Stops reading before summary rows ("Résumé par BU", etc.) to ensure accurate counts
+- **Données Détaillées Tab**: Enhanced with date columns (date, projet_start, projet_stop) and time-based filtering (whole year, by month, by quarter) based on source sheet names
 
-**Recent Improvements (December 2025)**:
+**Recent Improvements (December 2025 - January 2026)**:
 - Complete dashboard redesign with BU color theming and enhanced visualizations
 - Fixed critical data ingestion bug (summary rows excluded from data)
 - Added project counts to all charts and KPIs
 - Enhanced Vue Globale with separate BU and Typologie sections
 - Added monthly stacked bar charts with cumulative and average trend lines
 - Added sent/pondéré comparison charts for Envoyé/État views
-- Implemented typologie split logic for multi-category projects
-- Professional PDF export with high-resolution charts and formatted tables
+- Implemented typologie primary allocation logic (replaced equal-split with deterministic primary-tag selection - see section 18.29)
+- Enhanced Données Détaillées tab with date columns and time-based filtering (by month/quarter) - see section 18.30
 - Fixed Streamlit API deprecation warnings (`use_container_width` → `width='stretch'`)
 - Added unique keys to all plotly_chart calls to prevent duplicate element ID errors
 
@@ -567,9 +584,22 @@ python scripts/run_pipeline.py --output results.json
 
 ### 9.2 Cron Scheduling
 
-**Bi-Monthly Execution** (1st and last day of month at 8 AM):
+**Multi-Pipeline Architecture** (3 independent schedules):
+
+**Daily Google Sheets Refresh** (keeps dashboard data current):
 ```bash
-0 8 1,15 * * cd /path/to/myrium && /path/to/venv/bin/python scripts/run_pipeline.py >> logs/cron.log 2>&1
+10 6 * * * cd /path/to/myrium && /path/to/venv/bin/python3 scripts/run_sheets_update.py >> logs/sheets_update_cron.log 2>&1
+```
+
+**Bi-Monthly Main Pipeline** (1st and last day of month at 8 AM):
+```bash
+0 8 * * * cd /path/to/myrium && /path/to/venv/bin/python3 scripts/run_pipeline_scheduled.py >> logs/cron.log 2>&1
+```
+Note: The wrapper script (`run_pipeline_scheduled.py`) checks if today is the 15th or last day before executing.
+
+**Weekly TRAVAUX Projection** (every Sunday at 11 PM):
+```bash
+0 23 * * 0 cd /path/to/myrium && /path/to/venv/bin/python3 scripts/run_travaux_pipeline.py >> logs/travaux_cron.log 2>&1
 ```
 
 ### 9.3 Dashboard Deployment
@@ -897,6 +927,13 @@ class AlertsOutput:
 - Check worksheet names match expected format
 - Ensure data was written successfully
 
+**Notion Duplicate Pages**:
+- Symptom: Pipeline creates duplicate pages in Notion databases (all pages show as "created" instead of "updated")
+- Check logs for: `'DatabasesEndpoint' object has no attribute 'query'` or `Could not query database for existing pages`
+- Cause: Notion SDK version mismatch - newer SDKs use `data_sources.query()` instead of `databases.query()`
+- Fix: Code now supports both API styles automatically (see section 18.27). If issue persists, verify `notion-client` package is installed and check Notion API version compatibility
+- Prevention: Code uses fail-closed behavior - pipeline will fail loudly if querying is impossible, preventing silent duplicate creation
+
 ### 16.2 Debugging Steps
 
 1. **Check Logs**: `logs/pipeline_{timestamp}.log`
@@ -1054,9 +1091,9 @@ The system is ready for production use and can be easily extended with new featu
    - Donut + bar charts for both BU and Typologie
    - Project counts included in all chart labels
 
-6. **Typologie Split Logic**:
-   - When projects have multiple typologies (e.g., "DV,Animation,Paysage"), amounts are divided equally among all categories
-   - Prevents over-counting while ensuring all typologies are represented
+6. **Typologie Primary Allocation Logic** (replaced in section 18.29):
+   - When projects have multiple typologies (e.g., "DV,Animation,Paysage"), project is counted in all categories, but amount goes to primary typologie only
+   - Primary selection: TS (highest priority) → First non-Animation tag → Animation (if only tag)
    - Applied consistently across all views and charts
 
 7. **Streamlit API Updates**:
@@ -1079,7 +1116,7 @@ The system is ready for production use and can be easily extended with new featu
 1. **Quarterly Data Extraction**:
    - `get_quarterly_totals()`: Extracts quarterly totals from DataFrame columns (`Montant Total Q{1-4}_{year}`, `Montant Pondéré Q{1-4}_{year}`)
    - `get_quarterly_by_bu()`: Extracts quarterly amounts grouped by Business Unit
-   - `get_quarterly_by_typologie()`: Extracts quarterly amounts grouped by Typologie (with split handling)
+   - `get_quarterly_by_typologie()`: Extracts quarterly amounts grouped by Typologie (using primary allocation - see section 18.29)
 
 2. **Quarterly Breakdown Display**:
    - **Overall Section**: Total CA per quarter (Q1-Q4) with pondération support for Envoyé/État views
@@ -1098,7 +1135,7 @@ The system is ready for production use and can be easily extended with new featu
    - Handles missing quarterly columns gracefully
    - Shows appropriate messages when no data available
    - Only displays data for selected year
-   - Uses split typologie logic for accurate multi-typologie project counting
+   - Uses primary allocation logic for accurate multi-typologie project counting (see section 18.29)
 
 **Code Changes**:
 - `src/dashboard/app.py`: Added quarterly extraction functions, `display_quarterly_breakdown()` function, `create_colored_table_html()` helper, and integrated expandable section in Vue Globale tab
@@ -1976,9 +2013,322 @@ The system is ready for production use and can be easily extended with new featu
 
 **Impact**: Weird proposals alerts now focus exclusively on data quality issues (missing/invalid dates, zero probability) rather than amount-based filtering. This reduces alert noise and allows sales teams to focus on actionable data quality problems. Existing Notion tags are automatically cleaned up on next pipeline run when pages are updated.
 
+### 18.27 Notion API Compatibility Fix - Duplicate Page Prevention (January 2026)
+
+**Critical Fix**: Resolved duplicate page creation in Notion databases caused by silent query failures when Notion SDK API changed from `databases.query()` to `data_sources.query()` (Notion API 2025-09-03).
+
+**Problem**:
+- Production pipeline created duplicate pages in all 3 Notion databases (Weird Proposals, Follow-up, TRAVAUX Projection)
+- Root cause: `client.databases.query()` method no longer exists in newer Notion SDK versions
+- Code was "failing open": caught exception, returned empty mapping, then created all pages as new instead of updating existing ones
+- Error in logs: `'DatabasesEndpoint' object has no attribute 'query'`
+
+**Solution**:
+1. **Dual API Support**:
+   - Added `_query_pages()` method that tries both API styles:
+     - Old style: `client.databases.query(database_id=...)` (for older SDKs)
+     - New style: `client.data_sources.query(data_source_id=...)` (for Notion API 2025-09-03+)
+   - Added `_get_data_source_id_for_database()` helper to resolve data source ID from database ID via `databases.retrieve().data_sources[0].id`
+
+2. **Fail-Closed Behavior**:
+   - Replaced silent exception handling with explicit `RuntimeError` if neither query method is available
+   - Prevents duplicate page creation by refusing to sync when querying is impossible
+   - Pipeline step now fails loudly instead of silently creating duplicates
+
+3. **Backward Compatibility**:
+   - Works with both old and new Notion SDK versions
+   - No changes required to `requirements.txt` or dependency versions
+   - Automatic detection of available API method
+
+**Code Changes**:
+- `src/integrations/notion_alerts_sync.py`:
+  - Added `_get_data_source_id_for_database()` method to resolve data source IDs
+  - Added `_query_pages()` method with dual API support (databases.query → data_sources.query fallback)
+  - Updated `_get_existing_pages_by_id()` to use `_query_pages()` instead of direct `client.databases.query()` call
+  - Updated `_get_existing_pages()` to use `_query_pages()` for consistency
+  - Removed silent exception handling that returned empty mapping on query failure
+- `src/integrations/notion_travaux_sync.py`:
+  - Added `_get_data_source_id_for_database()` method (instance method, uses `self.database_id`)
+  - Added `_query_pages()` method with same dual API support
+  - Updated `_get_existing_pages_by_id()` to use `_query_pages()` instead of direct query call
+- `tests/test_notion_query_compat.py` (new):
+  - Added regression tests to verify dual API support works correctly
+  - Tests verify fail-closed behavior when no query method is available
+
+**Technical Details**:
+- Data source ID resolution: `databases.retrieve(database_id).data_sources[0].id`
+- Query method detection: Uses `hasattr()` to check for `databases.query` and `data_sources.query` methods
+- Error handling: Raises `RuntimeError` with descriptive message if neither method is available
+- All three Notion databases (Weird, Follow-up, TRAVAUX) use the same compatibility layer
+
+**Impact**: Pipeline now correctly queries existing Notion pages regardless of Notion SDK version, preventing duplicate page creation. Production runs show "X updated, Y created" instead of "X created, 0 updated". Fail-closed behavior ensures pipeline fails loudly if Notion API is incompatible, preventing silent data corruption. Fix is backward compatible with all Notion SDK versions.
+
+### 18.28 Pipeline Separation: Multi-Schedule Architecture (January 2026)
+
+**Major Architecture Change**: Split monolithic bi-monthly pipeline into three independent pipelines with different schedules to optimize performance and data freshness.
+
+**Key Features**:
+
+1. **Daily Google Sheets Refresh Pipeline** (`run_sheets_update.py`):
+   - Runs daily to keep dashboard data current
+   - Executes: Auth → Fetch → Clean → Revenue → Generate views → Write to Google Sheets
+   - **No emails, no Notion sync, no alerts** (Sheets-only)
+   - Writes snapshot to stable sheet name: **`État actuel`** (overwrites daily)
+   - Updates `Envoyé {Month} {Year}` and `Signé {Month} {Year}` sheets daily
+   - Enables real-time dashboard updates without waiting for bi-monthly runs
+
+2. **Bi-Monthly Main Pipeline** (`run_pipeline_scheduled.py`):
+   - Removed TRAVAUX projection step (now runs separately)
+   - Still writes dated snapshots: `État au {DD-MM-YYYY}` (historical record)
+   - Executes: Full pipeline with alerts, emails, Notion sync, objectives management
+   - Runs on 1st and last day of month (via date-check wrapper)
+
+3. **Weekly TRAVAUX Projection Pipeline** (`run_travaux_pipeline.py`):
+   - Extracted from main pipeline for independent scheduling
+   - Runs every Sunday night (23:00)
+   - Executes: Auth → Fetch → Clean → Revenue → TRAVAUX projection → Email + Notion sync
+   - Focused on high-probability TRAVAUX proposals for calendar planning
+
+4. **Dashboard Snapshot Loading Enhancement**:
+   - Dashboard now prefers stable **`État actuel`** sheet (updated daily)
+   - Falls back to latest dated snapshot (`État au DD-MM-YYYY`) if `État actuel` missing
+   - Improved date parsing for snapshot selection (fixes string-sort bug)
+
+**Code Changes**:
+- `scripts/run_pipeline.py`: Removed TRAVAUX projection step (Step 9), removed unused imports (`TravauxProjectionGenerator`, `NotionTravauxSync`)
+- `scripts/run_travaux_pipeline.py`: New weekly pipeline for TRAVAUX projection only
+- `scripts/run_sheets_update.py`: New daily pipeline for Google Sheets refresh only
+- `src/processing/views.py`: Enhanced `ViewGenerator` to support stable snapshot name "État actuel"
+- `src/dashboard/app.py`: Updated snapshot loading to prefer "État actuel" with fallback to dated snapshots
+
+**Cron Configuration** (3 separate schedules):
+```bash
+# Daily: Google Sheets refresh (6:10 AM)
+10 6 * * * cd /path/to/myrium && /path/to/venv/bin/python3 scripts/run_sheets_update.py >> logs/sheets_update_cron.log 2>&1
+
+# Bi-monthly: Full pipeline (8:00 AM, runs on 1st/15th/last day)
+0 8 * * * cd /path/to/myrium && /path/to/venv/bin/python3 scripts/run_pipeline_scheduled.py >> logs/cron.log 2>&1
+
+# Weekly: TRAVAUX projection (Sunday 11 PM)
+0 23 * * 0 cd /path/to/myrium && /path/to/venv/bin/python3 scripts/run_travaux_pipeline.py >> logs/travaux_cron.log 2>&1
+```
+
+**Technical Details**:
+- All three pipelines share the same core processing logic (auth, fetch, clean, revenue)
+- Each pipeline only executes the steps it needs (no redundant work)
+- Snapshot sheets: `État actuel` (daily overwrite) + `État au DD-MM-YYYY` (historical, bi-monthly)
+- Monthly sheets (`Envoyé`/`Signé`) safely overwritten by both daily and bi-monthly runs (same data source)
+
+**Impact**: Dashboard now provides near-real-time data (updated daily) while maintaining historical snapshots and independent scheduling for different business needs. Pipeline separation improves maintainability, reduces execution time per run, and enables flexible scheduling optimization. TRAVAUX projection runs weekly for proactive planning without waiting for bi-monthly cycles.
+
+### 18.29 Typologie Allocation Refactoring: Primary-Tag Based Logic (January 2026)
+
+**Major Refactoring**: Complete replacement of equal-split typologie allocation with deterministic primary-tag allocation based on `cf_typologie_de_devis` column, ensuring consistent and explainable typologie amounts across dashboard and email reports.
+
+**Problem**:
+- Previous system split amounts equally across multiple typologies (e.g., "DV, Paysage" → 50% to each)
+- Resulted in typologie subtotals that didn't reconcile with BU totals
+- TS detection logic was inconsistent between title-based and tag-based detection
+- Animation typologie received amounts even when other tags were present
+
+**Solution**:
+1. **New Allocation Helper Module** (`src/processing/typologie_allocation.py`):
+   - Centralized typologie parsing, TS detection, and primary selection logic
+   - Reusable across dashboard and email sender for consistency
+   - Functions: `parse_typologie_list()`, `title_has_ts()`, `detect_ts()`, `inject_ts_tag()`, `choose_primary_typologie()`, `allocate_typologie_for_row()`
+
+2. **Primary Typologie Selection Rules**:
+   - **TS Priority**: If TS detected (from tag or title), TS is always primary
+   - **Animation Demotion**: If multiple tags include Animation, amount goes to first non-Animation tag
+   - **Single Tag**: If only one tag, that tag is primary
+   - **Count vs Amount**: Projects counted in all tags, but amount allocated to primary only
+
+3. **TS Special Handling**:
+   - TS card displayed under MAINTENANCE (as before)
+   - TS amount "owned" by TRAVAUX (reconciliation may differ intentionally)
+   - TS detected from either `cf_typologie_de_devis` tag OR project title (no double counting)
+
+**Code Changes**:
+- **New**: `src/processing/typologie_allocation.py` - Core allocation logic module
+- **New**: `tests/test_typologie_allocation.py` - 19 unit tests covering all rules
+- **Refactored**: `src/dashboard/app.py`:
+  - Replaced `split_typologies()` and `get_reporting_typologie()` with new allocation logic
+  - Updated all typologie calculation functions: `get_typologie_amounts()`, `get_typologie_amounts_for_bu()`, `get_monthly_data_by_typologie()`, `get_production_typologie_amounts()`, `get_production_typologie_amounts_for_bu()`, `get_quarterly_by_typologie()`, objectives helpers, chart functions
+- **Refactored**: `src/integrations/email_sender.py`:
+  - Updated `_sum_split_typologie()` and `_calculate_realized_by_month()` to use new allocation logic
+  - Ensures email reports match dashboard calculations exactly
+
+**Behavior Changes**:
+- **Amount Allocation**: Each project amount goes to exactly one primary typologie (no splitting)
+- **Count Allocation**: Projects with multiple tags increment counts for all tags (counts may exceed BU totals by design)
+- **TS Handling**: TS card under MAINTENANCE, but amount "owned" by TRAVAUX (reconciliation may differ)
+- **Animation Demotion**: When multiple tags include Animation, amount goes to first non-Animation tag
+
+**Technical Details**:
+- Primary selection algorithm: TS (highest priority) → First non-Animation tag → Animation (if only tag)
+- Tag deduplication prevents double counting (e.g., "DV, DV" → single DV tag)
+- TS injection: Adds TS to tags if detected in title and not already present
+- All allocation logic centralized in helper module for maintainability
+
+**Impact**: Typologie amounts are now stable, explainable, and consistent across dashboard and email reports. Each project amount lands in exactly one typology, making reconciliation predictable. TS special handling preserves existing display behavior while ensuring correct amount attribution. Animation demotion prevents low-priority typologie from receiving amounts when higher-priority tags exist. All 50 tests pass (19 new + 31 existing), confirming no regressions.
+
+### 18.30 Dashboard Données Détaillées Enhancement: Date Columns & Time-Based Filtering (January 2026)
+
+**Major Enhancement**: Enhanced "Données Détaillées" tab with date column display and time-based filtering based on source sheet names, enabling granular data exploration by month and quarter.
+
+**Key Features**:
+
+1. **Date Columns Display**:
+   - Added `date` (proposal date), `projet_start`, and `projet_stop` columns to the detailed data table
+   - Dates formatted as DD/MM/YYYY for readability
+   - Handles missing dates gracefully (displays empty string for NaT values)
+   - Date columns positioned after amount columns in display order
+
+2. **Time-Based Filtering System**:
+   - **Whole Year**: Shows all data for selected year (default)
+   - **By Month**: Filters rows based on `source_sheet` column (e.g., "Envoyé Janvier 2026" → shows only January data)
+   - **By Quarter**: Filters rows where `source_sheet` month falls within selected quarter (Q1: Jan-Mar, Q2: Apr-Jun, Q3: Jul-Sep, Q4: Oct-Dec)
+   - Filtering based on sheet name ensures accurate time-based selection (projects appear in the month/quarter of their source sheet)
+
+3. **Sheet Name Parsing**:
+   - Handles multiple sheet name formats: "Envoyé {Month} {Year}", "Signé {Month} {Year}", "État au {DD-MM-YYYY}"
+   - Uses `MONTH_MAP` for French month name recognition
+   - Extracts month and year from sheet names for filtering logic
+
+4. **UI Improvements**:
+   - Changed from 2-column to 3-column filter layout
+   - Time period filter uses radio buttons with conditional selectboxes for month/quarter selection
+   - Month selector shows only available months from `source_sheet` for selected year
+   - Quarter selector shows available quarters (Q1-Q4) for selected year
+
+**Code Changes**:
+- `src/dashboard/app.py`:
+  - Added helper functions: `parse_sheet_month_year()`, `get_available_months_from_sheets()`, `get_available_quarters_from_sheets()`
+  - Updated "Données Détaillées" tab (lines 4207-4573):
+    - Added date columns to `display_cols` list
+    - Implemented three-column filter layout with time period selector
+    - Added filtering logic based on `source_sheet` parsing
+    - Added date formatting (DD/MM/YYYY) before display
+    - Updated CSV export to include formatted date columns
+
+**Technical Details**:
+- Filtering uses `source_sheet` column (already populated when loading data from Google Sheets)
+- Month/quarter extraction from sheet names enables accurate time-based filtering
+- Date formatting applied to `display_df` copy (preserves original data for calculations)
+- Quarter mapping: Q1 (1-3), Q2 (4-6), Q3 (7-9), Q4 (10-12)
+- Works with all view types (Signé, Envoyé, État actuel)
+
+**Impact**: Users can now explore detailed proposal data with full date visibility and filter by specific months or quarters based on when proposals were sent/signed. Time-based filtering based on source sheet names ensures accurate data selection matching the sheet organization structure. Date columns provide essential project timeline information for detailed analysis.
+
+### 18.31 Objectifs Coherence: Production-Month Based Calculations + Pure Signature Tracking (January 2026)
+
+**Major Refactoring**: Complete overhaul of Objectifs tab calculations to ensure monthly production values are coherent with quarter/year totals, and addition of pure signature tracking (raw signed/sent amounts) across all views.
+
+**Problem**:
+- Monthly (Période) section used `Montant Total {year}` for current-year signings, while carryover used quarter columns / 3, causing inconsistency
+- Jan + Feb + Mar ≠ Q1 (monthly values didn't sum to quarter totals)
+- No visibility into raw signature amounts (only production-split amounts shown)
+- Line charts used signing-month based logic, potentially including months from previous years
+
+**Solution**:
+1. **Production-Month Based Calculations**:
+   - New `calculate_production_month_with_carryover()`: Uses quarter columns divided by 3 for each production month
+   - New `calculate_production_period_with_carryover()`: Sums production-month amounts for accounting periods
+   - Ensures Jan + Feb + Mar = Q1, and Juil+Août = 2/3 of Q3
+   - All months sum correctly to `Montant Total {year}`
+
+2. **Pure Signature Tracking**:
+   - New helpers: `calculate_pure_signature_for_month/quarter/year()` for raw amounts (no production split)
+   - Filtered to `signed_year == selected_year` to show current-year signatures only
+   - For Signé: shows raw `amount` signed in period
+   - For Envoyé: shows `amount / amount_pondere` format
+   - Added "Pur" column to all Objectifs tables (Période, Trimestre, Année) for both BU and Typologie
+
+3. **Chart Updates**:
+   - `plot_objectives_line_chart()` now uses production-month realized series (Jan-Dec only)
+   - Added pure signature overlay lines: "Pur (brut)" and "Pur (pondéré)" for Envoyé
+   - Added checkbox to show/hide pure signature lines
+   - Charts include carryover in production series while maintaining strict Jan-Dec axis
+
+4. **UI Improvements**:
+   - Period selector now uses all 11 accounting periods (0-10) instead of deriving from source_sheet
+   - Changed Période section title from "Contribution des signatures..." to "Production de {period}"
+   - All tables now show both production amounts (with carryover) and pure signature amounts
+
+**Code Changes**:
+- `src/dashboard/app.py`:
+  - Added `calculate_production_month_with_carryover()` and `calculate_production_period_with_carryover()` (production-month based)
+  - Added `calculate_pure_signature_for_month/quarter/year()` (signing-time based, raw amounts)
+  - Updated Objectifs tab Période section to use new production-period logic
+  - Added "Pur" column to all BU/Typologie tables in Période/Trimestre/Année sections
+  - Updated `plot_objectives_line_chart()` to use production-month series and add pure signature lines
+  - Removed old `calculate_production_period_with_carryover_distribution()` function (replaced by new logic)
+- `src/integrations/email_sender.py`:
+  - Updated `_production_period_with_carryover_distribution()` to use production-month logic (quarter columns / 3)
+  - Added `_pure_signature_for_month/quarter/year()` helpers
+  - Added "Pur" column to all email tables (Période, Trimestre, Année)
+- `tests/test_objectifs_carryover_distribution.py`:
+  - Added 5 new tests: production-month coherence (Jan+Feb+Mar = Q1), Juil+Août = 2/3 Q3, pure signature calculations
+
+**Technical Details**:
+- Production-month calculation: `quarter_col / 3` for each month in the quarter
+- Pure signature: filters to `signed_year == selected_year` and uses raw `amount` column (no production split)
+- Typologie allocation: Uses primary allocation logic (same as other calculations)
+- Email and dashboard now use identical calculation logic for consistency
+
+**Impact**: Objectifs tab now provides coherent monthly production values that correctly sum to quarters and years. Pure signature tracking enables visibility into raw signed/sent amounts per period, independent of production spreading. Charts show accurate production-month progress (Jan-Dec) with optional pure signature overlays. Email reports match dashboard calculations exactly. All tests pass (5 new tests added, all existing tests maintained).
+
+### 18.32 Commercial/Chef de projet Split for Alerts (January 2026)
+
+**Major Enhancement**: Extended alerts system (email + Notion) to support primary owner + all assignees pattern, matching TRAVAUX projection architecture for consistent team visibility.
+
+**Key Features**:
+
+1. **Email Alerts Enhancement**:
+   - Added "Assignés" column to both weird proposals and follow-up tables in combined alert emails
+   - Displays all assignees from Furious `assigned_to` field (shows "-" if missing)
+   - Provides full team visibility alongside primary owner (used for email routing)
+
+2. **Notion Database People Properties**:
+   - Added support for two People properties in both Weird Proposals and Follow-up databases:
+     - **Commercial** (People): VIP commercials + `alienor` + `luana` (same classification as TRAVAUX projection)
+     - **Chef de projet** (People): All other assignees (project managers)
+   - **Schema-aware**: Only sets properties if they exist in database schema (prevents errors if properties not yet created)
+   - Preserves existing "Responsable" property (primary owner) for backward compatibility
+   - Uses same parsing/classification logic as TRAVAUX projection for consistency
+
+3. **Data Pipeline Updates**:
+   - Alert items now include `assigned_to` field from Furious API
+   - Both weird and follow-up alerts carry full assignee information
+   - Primary owner (`alert_owner`) still used for email routing (VIP priority logic unchanged)
+
+**Code Changes**:
+- `src/processing/alerts.py`:
+  - Added `assigned_to` field to both `generate_weird_alerts()` and `generate_followup_alerts()` alert dictionaries
+- `src/integrations/notion_alerts_sync.py`:
+  - Added `_parse_assigned_to()` method for robust identifier parsing (handles whitespace, comma, semicolon separators)
+  - Added `_normalize_identifier()` helper matching `NotionUserMapper` normalization (removes dots/hyphens)
+  - Added `_classify_assignees()` method to split commercials vs chefs de projet (reuses TRAVAUX logic)
+  - Added `_build_people_property()` method for Notion People property building with user ID mapping
+  - Added `_get_database_schema()` method for schema-aware property building
+  - Updated `_build_weird_page_properties()` and `_build_followup_page_properties()` to add Commercial/Chef de projet properties
+  - Properties only set if they exist in database schema (prevents API errors)
+- `src/integrations/email_sender.py`:
+  - Added "Assignés" column header to both weird proposals and follow-up tables in `_generate_combined_html()`
+  - Added assigned_to display in table rows (shows "-" if missing or "N/A")
+
+**Technical Details**:
+- Commercial classification uses `VIP_COMMERCIALS` + `{'alienor', 'luana'}` set (same as TRAVAUX projection)
+- Flexible identifier matching: exact match first, then normalized match (handles variations like `vincent.delavarende` vs `vincentdelavarende`)
+- Notion user mapping gracefully skips unmapped identifiers (logs warning for debugging)
+- Schema fetching happens once per sync operation for performance
+- All property preservation logic maintained (Pris en charge, comments, etc.)
+
+**Impact**: Alerts system now provides complete team visibility with primary owner for email routing and all assignees for full context. Notion databases can display Commercial vs Chef de projet separation (once properties are created in Notion), enabling better filtering and responsibility tracking. Email alerts show all linked people, improving collaboration visibility. Architecture matches TRAVAUX projection pattern for consistency across the system. All tests pass (55 passed, 1 skipped).
+
 ---
 
-**Document Version**: 1.19
+**Document Version**: 1.25
 **Last Updated**: January 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System

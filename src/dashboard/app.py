@@ -66,6 +66,7 @@ from src.processing.objectives import (
     get_accounting_period_for_month, get_accounting_period_label, get_months_for_accounting_period,
     count_unique_accounting_periods, ACCOUNTING_PERIODS
 )
+from src.processing.typologie_allocation import allocate_typologie_for_row
 
 # =============================================================================
 # CONSTANTS
@@ -516,76 +517,26 @@ def normalize_typologie_for_css(typologie: str) -> str:
     return normalized if normalized else 'typologie-default'
 
 
+# DEPRECATED: get_reporting_typologie and split_typologies are replaced by
+# typologie_allocation module. Keeping for backward compatibility during migration.
+# TODO: Remove after full migration
 def get_reporting_typologie(row: pd.Series) -> str:
-    """
-    Get the reporting typology for a row, applying TS title override rule.
-
-    If title contains 'TS' (case-insensitive) and current typology is NOT 'TS',
-    override to 'TS' for reporting purposes. This merges title-based TS detection
-    into the typology TS category without double counting.
-
-    Args:
-        row: DataFrame row with 'title' and 'cf_typologie_de_devis' columns
-
-    Returns:
-        Reporting typology string (original or 'TS' if title-based override applies)
-    """
-    typologie = str(row.get('cf_typologie_de_devis', '')).strip()
-    title = str(row.get('title', '')).strip()
-
-    # Check if title contains TS (case-insensitive)
-    title_has_ts = 'TS' in title.upper() if title else False
-
-    # Apply override: if title has TS and typology is not already TS, set to TS
-    if title_has_ts and typologie.upper() != 'TS':
-        return 'TS'
-
-    return typologie
+    """DEPRECATED: Use typologie_allocation.allocate_typologie_for_row instead."""
+    from src.processing.typologie_allocation import allocate_typologie_for_row
+    tags, primary = allocate_typologie_for_row(row)
+    return primary or ''
 
 
 def split_typologies(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Split multi-typologie entries and divide amounts equally.
+    DEPRECATED: This function is kept for backward compatibility but should not be used.
+    Use typologie_allocation.allocate_typologie_for_row instead.
 
-    When a project has 'DV,Animation,Paysage', the amount is divided
-    equally among all categories.
-
-    Also applies reporting typology override: title-based TS -> typology TS.
+    This function now returns the original DataFrame unchanged, as the new allocation
+    logic handles typologies differently (primary tag for amounts, all tags for counts).
     """
-    if df.empty or 'cf_typologie_de_devis' not in df.columns:
-        return df
-
-    expanded_rows = []
-
-    for _, row in df.iterrows():
-        # Get reporting typology (applies TS title override)
-        reporting_typologie = get_reporting_typologie(row)
-
-        if not reporting_typologie or reporting_typologie == 'nan':
-            # Keep row as-is with empty typologie
-            expanded_rows.append(row.to_dict())
-            continue
-
-        # Split by comma and clean
-        typologies = [t.strip() for t in reporting_typologie.split(',') if t.strip()]
-
-        if len(typologies) <= 1:
-            # Single typologie, apply reporting typology override
-            new_row = row.to_dict()
-            new_row['cf_typologie_de_devis'] = reporting_typologie
-            expanded_rows.append(new_row)
-        else:
-            # Multiple typologies - divide amount equally
-            split_factor = 1 / len(typologies)
-            for typ in typologies:
-                new_row = row.to_dict()
-                new_row['cf_typologie_de_devis'] = typ
-                new_row['amount'] = row.get('amount', 0) * split_factor
-                if 'amount_pondere' in row:
-                    new_row['amount_pondere'] = row.get('amount_pondere', 0) * split_factor
-                expanded_rows.append(new_row)
-
-    return pd.DataFrame(expanded_rows)
+    # Return original DataFrame - new logic doesn't expand rows
+    return df.copy()
 
 
 def calculate_ts_total(df: pd.DataFrame) -> float:
@@ -616,24 +567,50 @@ def get_bu_amounts(df: pd.DataFrame, include_weighted: bool = False) -> Dict[str
 
 
 def get_typologie_amounts(df: pd.DataFrame, include_weighted: bool = False) -> Dict[str, Dict[str, float]]:
-    """Get total and weighted amounts per typologie (with split handling)."""
+    """
+    Get total and weighted amounts per typologie using new allocation logic.
+
+    Uses primary typologie for amounts, all tags for counts.
+    """
     if df.empty or 'cf_typologie_de_devis' not in df.columns:
         return {}
 
-    # Split typologies for accurate counting
-    df_split = split_typologies(df)
-
     result = {}
-    for typ in df_split['cf_typologie_de_devis'].unique():
-        if not typ or str(typ) == 'nan':
-            continue
-        typ_df = df_split[df_split['cf_typologie_de_devis'] == typ]
+    count_dict = {}  # Track counts separately (all tags)
+    amount_dict = {}  # Track amounts (primary only)
+    pondere_dict = {}  # Track weighted amounts (primary only)
+
+    for _, row in df.iterrows():
+        tags, primary = allocate_typologie_for_row(row)
+
+        # Count: increment for all tags
+        for tag in tags:
+            if tag not in count_dict:
+                count_dict[tag] = 0
+            count_dict[tag] += 1
+
+        # Amount: add to primary only
+        if primary:
+            amount = float(row.get('amount', 0) or 0)
+            if primary not in amount_dict:
+                amount_dict[primary] = 0.0
+            amount_dict[primary] += amount
+
+            if include_weighted:
+                pondere = float(row.get('amount_pondere', 0) or 0)
+                if primary not in pondere_dict:
+                    pondere_dict[primary] = 0.0
+                pondere_dict[primary] += pondere
+
+    # Combine into result structure
+    all_typologies = set(count_dict.keys()) | set(amount_dict.keys())
+    for typ in all_typologies:
         result[typ] = {
-            'total': typ_df['amount'].sum() if 'amount' in typ_df.columns else 0,
-            'count': len(typ_df)
+            'total': amount_dict.get(typ, 0.0),
+            'count': count_dict.get(typ, 0)
         }
-        if include_weighted and 'amount_pondere' in typ_df.columns:
-            result[typ]['pondere'] = typ_df['amount_pondere'].sum()
+        if include_weighted:
+            result[typ]['pondere'] = pondere_dict.get(typ, 0.0)
 
     return result
 
@@ -647,9 +624,9 @@ def get_typologie_amounts_for_bu(
     Get typologie amounts for a specific BU, with zero-filled output for all mapped typologies.
 
     Special handling:
-    - TS(typologie): Shows amounts from ALL rows where cf_typologie_de_devis == 'TS',
+    - TS(typologie): Shows amounts from ALL rows where primary typologie is 'TS',
       regardless of BU (so it appears under MAINTENANCE even if BU=TRAVAUX due to title rule)
-    - Other typologies: Only count rows where both BU and typologie match
+    - Other typologies: Only count rows where both BU matches AND typologie is in tags/primary
 
     Args:
         df: DataFrame with cf_bu and cf_typologie_de_devis columns
@@ -660,47 +637,56 @@ def get_typologie_amounts_for_bu(
         Dictionary mapping typologie names to {total, count, pondere?} dicts.
         Always includes all typologies from BU_TO_TYPOLOGIES[bu], with 0 values if absent.
     """
-    if df.empty or 'cf_bu' not in df.columns or 'cf_typologie_de_devis' not in df.columns:
-        # Return zero-filled result for all typologies in this BU
-        typologies = BU_TO_TYPOLOGIES.get(bu, [])
-        return {typ: {'total': 0.0, 'count': 0, 'pondere': 0.0} if include_weighted else {'total': 0.0, 'count': 0}
-                for typ in typologies}
-
-    # Split typologies for accurate counting
-    df_split = split_typologies(df)
-
     # Get typologies mapped to this BU
     typologies = BU_TO_TYPOLOGIES.get(bu, [])
 
-    result = {}
+    # Initialize zero-filled result
+    result = {typ: {'total': 0.0, 'count': 0, 'pondere': 0.0} if include_weighted else {'total': 0.0, 'count': 0}
+              for typ in typologies}
 
-    for typ in typologies:
-        # Special case: TS(typologie) - count from ALL rows with typology='TS', regardless of BU
-        if typ == 'TS' and bu == 'MAINTENANCE':
-            typ_df = df_split[df_split['cf_typologie_de_devis'] == 'TS']
-        else:
-            # Normal case: filter by both BU and typologie
-            typ_df = df_split[
-                (df_split['cf_bu'] == bu) &
-                (df_split['cf_typologie_de_devis'] == typ)
-            ]
+    if df.empty or 'cf_bu' not in df.columns or 'cf_typologie_de_devis' not in df.columns:
+        return result
 
-        result[typ] = {
-            'total': typ_df['amount'].sum() if 'amount' in typ_df.columns and not typ_df.empty else 0.0,
-            'count': len(typ_df) if not typ_df.empty else 0
-        }
+    for _, row in df.iterrows():
+        tags, primary = allocate_typologie_for_row(row)
+        row_bu = str(row.get('cf_bu', '')).strip()
 
-        if include_weighted and 'amount_pondere' in df_split.columns:
-            result[typ]['pondere'] = typ_df['amount_pondere'].sum() if not typ_df.empty else 0.0
+        for typ in typologies:
+            # Special case: TS under MAINTENANCE - count from ALL rows where primary is TS
+            if typ == 'TS' and bu == 'MAINTENANCE':
+                if primary == 'TS':
+                    # Count: TS in tags
+                    if 'TS' in tags:
+                        result[typ]['count'] += 1
+                    # Amount: primary is TS
+                    amount = float(row.get('amount', 0) or 0)
+                    result[typ]['total'] += amount
+                    if include_weighted:
+                        pondere = float(row.get('amount_pondere', 0) or 0)
+                        result[typ]['pondere'] += pondere
+            else:
+                # Normal case: BU must match
+                if row_bu != bu:
+                    continue
+
+                # Count: typ in tags
+                if typ in tags:
+                    result[typ]['count'] += 1
+
+                # Amount: primary matches typ
+                if primary == typ:
+                    amount = float(row.get('amount', 0) or 0)
+                    result[typ]['total'] += amount
+                    if include_weighted:
+                        pondere = float(row.get('amount_pondere', 0) or 0)
+                        result[typ]['pondere'] += pondere
 
     return result
 
 
 def get_ts_typologie_total(df: pd.DataFrame, include_weighted: bool = False) -> Dict[str, float]:
     """
-    Calculate TS(typologie) total - based on cf_typologie_de_devis == 'TS'.
-
-    This is separate from TS(title) which is based on 'TS' in title.
+    Calculate TS(typologie) total - based on primary typologie == 'TS' (from tag or title).
 
     Args:
         df: DataFrame with cf_typologie_de_devis column
@@ -712,19 +698,28 @@ def get_ts_typologie_total(df: pd.DataFrame, include_weighted: bool = False) -> 
     if df.empty or 'cf_typologie_de_devis' not in df.columns:
         return {'total': 0.0, 'count': 0, 'pondere': 0.0} if include_weighted else {'total': 0.0, 'count': 0}
 
-    # Split typologies first
-    df_split = split_typologies(df)
+    total = 0.0
+    count = 0
+    pondere = 0.0
 
-    # Filter for typology='TS'
-    ts_df = df_split[df_split['cf_typologie_de_devis'] == 'TS']
+    for _, row in df.iterrows():
+        tags, primary = allocate_typologie_for_row(row)
+
+        if primary == 'TS':
+            total += float(row.get('amount', 0) or 0)
+            if include_weighted:
+                pondere += float(row.get('amount_pondere', 0) or 0)
+
+        if 'TS' in tags:
+            count += 1
 
     result = {
-        'total': ts_df['amount'].sum() if 'amount' in ts_df.columns and not ts_df.empty else 0.0,
-        'count': len(ts_df) if not ts_df.empty else 0
+        'total': total,
+        'count': count
     }
 
-    if include_weighted and 'amount_pondere' in df_split.columns:
-        result['pondere'] = ts_df['amount_pondere'].sum() if not ts_df.empty else 0.0
+    if include_weighted:
+        result['pondere'] = pondere
 
     return result
 
@@ -780,10 +775,18 @@ def get_monthly_data_by_typologie(df: pd.DataFrame, top_n: int = 6, include_weig
     if df.empty or 'source_sheet' not in df.columns or 'cf_typologie_de_devis' not in df.columns:
         return pd.DataFrame(), []
 
-    # First, determine top N typologies by total amount
-    df_split = split_typologies(df)
-    type_totals = df_split.groupby('cf_typologie_de_devis')['amount'].sum().sort_values(ascending=False)
-    top_typologies = type_totals.head(top_n).index.tolist()
+    # First, determine top N typologies by total amount (using primary allocation)
+    type_totals = {}
+    for _, row in df.iterrows():
+        tags, primary = allocate_typologie_for_row(row)
+        if primary:
+            amount = float(row.get('amount', 0) or 0)
+            if primary not in type_totals:
+                type_totals[primary] = 0.0
+            type_totals[primary] += amount
+
+    sorted_types = sorted(type_totals.items(), key=lambda x: x[1], reverse=True)
+    top_typologies = [typ for typ, _ in sorted_types[:top_n]]
 
     monthly_records = []
 
@@ -793,19 +796,27 @@ def get_monthly_data_by_typologie(df: pd.DataFrame, top_n: int = 6, include_weig
             continue
 
         sheet_df = df[df['source_sheet'] == sheet]
-        sheet_df_split = split_typologies(sheet_df)
 
-        # Aggregate by top typologies
+        # Aggregate by top typologies (using primary allocation)
         for typ in top_typologies:
-            typ_df = sheet_df_split[sheet_df_split['cf_typologie_de_devis'] == typ]
+            amount_sum = 0.0
+            pondere_sum = 0.0
+
+            for _, row in sheet_df.iterrows():
+                tags, primary = allocate_typologie_for_row(row)
+                if primary == typ:
+                    amount_sum += float(row.get('amount', 0) or 0)
+                    if include_weighted:
+                        pondere_sum += float(row.get('amount_pondere', 0) or 0)
+
             record = {
                 'month_num': month_num,
                 'month': month_name,
                 'typologie': typ,
-                'amount': typ_df['amount'].sum() if not typ_df.empty else 0
+                'amount': amount_sum
             }
-            if include_weighted and 'amount_pondere' in sheet_df_split.columns:
-                record['amount_pondere'] = typ_df['amount_pondere'].sum() if not typ_df.empty else 0
+            if include_weighted:
+                record['amount_pondere'] = pondere_sum
             monthly_records.append(record)
 
     if not monthly_records:
@@ -973,20 +984,12 @@ def calculate_realized_by_month(
     elif dimension == "typologie":
         if 'cf_typologie_de_devis' not in month_df.columns:
             return 0.0
-        # Handle split typologies (e.g., "DV, Paysage")
-        # Use the same logic as get_typologie_amounts
+        # Use new allocation logic: amount goes to primary only
         total = 0.0
         for _, row in month_df.iterrows():
-            typo_str = str(row.get('cf_typologie_de_devis', ''))
-            if not typo_str or typo_str.lower() == 'nan':
-                continue
-            # Split by comma or space
-            typologies = [t.strip() for t in typo_str.replace(',', ' ').split()]
-            if key in typologies:
-                # Divide amount equally among all typologies
-                num_typos = len(typologies)
-                if num_typos > 0:
-                    total += row[amount_col] / num_typos
+            tags, primary = allocate_typologie_for_row(row)
+            if primary == key:
+                total += float(row.get(amount_col, 0) or 0)
         return total
     else:
         return 0.0
@@ -1093,19 +1096,12 @@ def calculate_realized_by_production_year(
     elif dimension == "typologie":
         if 'cf_typologie_de_devis' not in df.columns:
             return 0.0
-        # Handle split typologies (e.g., "DV, Paysage")
+        # Use new allocation logic: amount goes to primary only
         total = 0.0
         for _, row in df.iterrows():
-            typo_str = str(row.get('cf_typologie_de_devis', ''))
-            if not typo_str or typo_str.lower() == 'nan':
-                continue
-            # Split by comma or space
-            typologies = [t.strip() for t in typo_str.replace(',', ' ').split()]
-            if key in typologies:
-                # Divide amount equally among all typologies
-                num_typos = len(typologies)
-                if num_typos > 0:
-                    total += (row[amount_col] or 0) / num_typos
+            tags, primary = allocate_typologie_for_row(row)
+            if primary == key:
+                total += float(row.get(amount_col, 0) or 0)
         return total
     else:
         return 0.0
@@ -1237,22 +1233,123 @@ def _filter_df_for_dimension(df: pd.DataFrame, dimension: str, key: str) -> pd.D
 
 def _sum_split_typologie_column(df: pd.DataFrame, amount_col: str, typologie_key: str) -> float:
     """
-    Sum a numeric column for a given typologie with split handling.
+    Sum a numeric column for a given typologie using new allocation logic.
+
+    Amount goes to primary typologie only (no splitting).
     """
     if df.empty or amount_col not in df.columns or "cf_typologie_de_devis" not in df.columns:
         return 0.0
 
     total = 0.0
     for _, row in df.iterrows():
-        typo_str = str(row.get("cf_typologie_de_devis", "")).strip()
-        if not typo_str or typo_str.lower() == "nan":
-            continue
-        typologies = [t.strip() for t in typo_str.replace(",", " ").split() if t.strip()]
-        if not typologies:
-            continue
-        if typologie_key in typologies:
-            total += float(row.get(amount_col, 0) or 0) / len(typologies)
+        tags, primary = allocate_typologie_for_row(row)
+        if primary == typologie_key:
+            total += float(row.get(amount_col, 0) or 0)
     return total
+
+
+def calculate_production_month_with_carryover(
+    df: pd.DataFrame,
+    production_year: int,
+    month_num: int,
+    dimension: str,
+    key: str,
+    use_pondere: bool = False,
+) -> tuple[float, float]:
+    """
+    Calculate production-month realized amount with carryover split.
+
+    For a given production month, uses the quarter column divided by 3 to ensure
+    Jan + Feb + Mar = Q1, etc.
+
+    Args:
+        df: DataFrame with production-year financial columns
+        production_year: Target production year (e.g., 2026)
+        month_num: Production month number (1-12)
+        dimension: "bu" or "typologie"
+        key: BU name or typologie name
+        use_pondere: Whether to use weighted amounts (for Envoyé)
+
+    Returns:
+        Tuple of (total, prev_years_part) where:
+        - total: Production amount for this month (all signed_years)
+        - prev_years_part: Production amount from previous-year signings
+    """
+    if df.empty:
+        return 0.0, 0.0
+
+    quarter = get_quarter_for_month(month_num)
+    quarter_col = (
+        f"Montant Pondéré {quarter}_{production_year}"
+        if use_pondere
+        else f"Montant Total {quarter}_{production_year}"
+    )
+
+    if quarter_col not in df.columns:
+        return 0.0, 0.0
+
+    has_signed_year = "signed_year" in df.columns
+    prev_df = df[df["signed_year"] < production_year] if has_signed_year else df.iloc[0:0]
+
+    # Compute total (all signed_years) - divide quarter by 3 for monthly amount
+    if dimension == "bu":
+        work = _filter_df_for_dimension(df, dimension, key)
+        total = float(work[quarter_col].sum() or 0.0) / 3.0
+        prev_work = _filter_df_for_dimension(prev_df, dimension, key)
+        prev_total = float(prev_work[quarter_col].sum() or 0.0) / 3.0
+    else:
+        # typologie
+        total = _sum_split_typologie_column(df, quarter_col, key) / 3.0
+        prev_total = _sum_split_typologie_column(prev_df, quarter_col, key) / 3.0
+
+    return float(total), float(prev_total)
+
+
+def calculate_production_period_with_carryover(
+    df: pd.DataFrame,
+    production_year: int,
+    period_idx: int,
+    dimension: str,
+    key: str,
+    use_pondere: bool = False,
+) -> tuple[float, float]:
+    """
+    Calculate production-period realized amount with carryover split.
+
+    Sums production-month amounts for all months in the accounting period.
+    For Juil+Août (period 6), this naturally becomes 2/3 of Q3.
+
+    Args:
+        df: DataFrame with production-year financial columns
+        production_year: Target production year (e.g., 2026)
+        period_idx: Accounting period index (0-10)
+        dimension: "bu" or "typologie"
+        key: BU name or typologie name
+        use_pondere: Whether to use weighted amounts (for Envoyé)
+
+    Returns:
+        Tuple of (total, prev_years_part) where:
+        - total: Production amount for this accounting period (all signed_years)
+        - prev_years_part: Production amount from previous-year signings
+    """
+    if df.empty:
+        return 0.0, 0.0
+
+    period_months = get_months_for_accounting_period(period_idx)
+    if not period_months:
+        return 0.0, 0.0
+
+    total = 0.0
+    prev_total = 0.0
+
+    for month_num in period_months:
+        month_total, month_prev = calculate_production_month_with_carryover(
+            df, production_year, month_num, dimension, key, use_pondere
+        )
+        total += month_total
+        prev_total += month_prev
+
+    return float(total), float(prev_total)
 
 
 def calculate_production_amount_with_carryover(
@@ -1284,78 +1381,205 @@ def calculate_production_amount_with_carryover(
     return float(total), float(prev_total)
 
 
-def calculate_production_period_with_carryover_distribution(
+# =============================================================================
+# PURE SIGNATURE CALCULATION HELPERS (signing-time based, no production split)
+# =============================================================================
+
+def calculate_pure_signature_for_month(
     df: pd.DataFrame,
-    production_year: int,
-    period_idx: int,
+    signed_year: int,
+    month_num: int,
     dimension: str,
     key: str,
     use_pondere: bool = False,
 ) -> tuple[float, float]:
     """
-    Compute period realized amounts for production-year objectives with two components:
-    - current_year_component: deals signed in production_year, attributed by their real signing month (source_sheet)
-    - carryover_component: deals signed in previous years, attributed into the production year by evenly
-      distributing their production-quarter amounts across the 3 months of that quarter.
+    Calculate pure signature amount for a signing month (raw amount, no production split).
 
-    Returns (total, carryover_component).
+    Args:
+        df: DataFrame with source_sheet and amount columns
+        signed_year: Year of signatures to include (filters signed_year == signed_year)
+        month_num: Signing month number (1-12)
+        dimension: "bu" or "typologie"
+        key: BU name or typologie name
+        use_pondere: If True, return (brut, pondere); if False, return (brut, 0.0)
+
+    Returns:
+        Tuple of (brut, pondere) where:
+        - brut: Raw amount signed in that month
+        - pondere: Weighted amount (only if use_pondere=True and column exists)
+    """
+    if df.empty or "source_sheet" not in df.columns:
+        return 0.0, 0.0
+
+    # Filter to signed_year == signed_year
+    has_signed_year = "signed_year" in df.columns
+    if has_signed_year:
+        df = df[df["signed_year"] == signed_year]
+        if df.empty:
+            return 0.0, 0.0
+
+    # Filter by signing month using source_sheet
+    month_df = pd.DataFrame()
+    for sheet in df["source_sheet"].unique():
+        _, sheet_month_num = extract_month_from_sheet(sheet)
+        if sheet_month_num == month_num:
+            month_df = pd.concat([month_df, df[df["source_sheet"] == sheet]], ignore_index=True)
+
+    if month_df.empty:
+        return 0.0, 0.0
+
+    # Compute brut (raw amount)
+    if dimension == "bu":
+        month_df = _filter_df_for_dimension(month_df, dimension, key)
+        brut = float(month_df["amount"].sum() or 0.0) if "amount" in month_df.columns else 0.0
+    else:
+        # typologie - use primary allocation
+        brut = 0.0
+        for _, row in month_df.iterrows():
+            tags, primary = allocate_typologie_for_row(row)
+            if primary == key:
+                brut += float(row.get("amount", 0) or 0)
+
+    # Compute pondere if requested
+    pondere = 0.0
+    if use_pondere:
+        if "amount_pondere" in month_df.columns:
+            if dimension == "bu":
+                pondere = float(month_df["amount_pondere"].sum() or 0.0)
+            else:
+                for _, row in month_df.iterrows():
+                    tags, primary = allocate_typologie_for_row(row)
+                    if primary == key:
+                        pondere += float(row.get("amount_pondere", 0) or 0)
+        elif "probability" in month_df.columns and "amount" in month_df.columns:
+            # Compute pondere from probability if column missing
+            if dimension == "bu":
+                for _, row in month_df.iterrows():
+                    prob = float(row.get("probability", 50) or 50) / 100.0
+                    pondere += float(row.get("amount", 0) or 0) * prob
+            else:
+                for _, row in month_df.iterrows():
+                    tags, primary = allocate_typologie_for_row(row)
+                    if primary == key:
+                        prob = float(row.get("probability", 50) or 50) / 100.0
+                        pondere += float(row.get("amount", 0) or 0) * prob
+
+    return float(brut), float(pondere)
+
+
+def calculate_pure_signature_for_quarter(
+    df: pd.DataFrame,
+    signed_year: int,
+    quarter: str,
+    dimension: str,
+    key: str,
+    use_pondere: bool = False,
+) -> tuple[float, float]:
+    """
+    Calculate pure signature amount for a signing quarter (raw amount, no production split).
+
+    Args:
+        df: DataFrame with source_sheet and amount columns
+        signed_year: Year of signatures to include
+        quarter: "Q1", "Q2", "Q3", or "Q4"
+        dimension: "bu" or "typologie"
+        key: BU name or typologie name
+        use_pondere: If True, return (brut, pondere); if False, return (brut, 0.0)
+
+    Returns:
+        Tuple of (brut, pondere)
+    """
+    quarter_months = {
+        "Q1": [1, 2, 3],
+        "Q2": [4, 5, 6],
+        "Q3": [7, 8, 9],
+        "Q4": [10, 11, 12]
+    }
+
+    if quarter not in quarter_months:
+        return 0.0, 0.0
+
+    brut_total = 0.0
+    pondere_total = 0.0
+
+    for month_num in quarter_months[quarter]:
+        brut, pondere = calculate_pure_signature_for_month(
+            df, signed_year, month_num, dimension, key, use_pondere
+        )
+        brut_total += brut
+        pondere_total += pondere
+
+    return float(brut_total), float(pondere_total)
+
+
+def calculate_pure_signature_for_year(
+    df: pd.DataFrame,
+    signed_year: int,
+    dimension: str,
+    key: str,
+    use_pondere: bool = False,
+) -> tuple[float, float]:
+    """
+    Calculate pure signature amount for a signing year (raw amount, no production split).
+
+    Args:
+        df: DataFrame with source_sheet and amount columns
+        signed_year: Year of signatures to include
+        dimension: "bu" or "typologie"
+        key: BU name or typologie name
+        use_pondere: If True, return (brut, pondere); if False, return (brut, 0.0)
+
+    Returns:
+        Tuple of (brut, pondere)
     """
     if df.empty:
         return 0.0, 0.0
 
-    amount_year_col = f"Montant Pondéré {production_year}" if use_pondere else f"Montant Total {production_year}"
-    if amount_year_col not in df.columns:
-        return 0.0, 0.0
-
+    # Filter to signed_year == signed_year
     has_signed_year = "signed_year" in df.columns
-    current_year_df = df[df["signed_year"] == production_year] if has_signed_year else df
-    prev_years_df = df[df["signed_year"] < production_year] if has_signed_year else df.iloc[0:0]
+    if has_signed_year:
+        df = df[df["signed_year"] == signed_year]
+        if df.empty:
+            return 0.0, 0.0
 
-    # --- Current-year component (real signing months) ---
-    current_total = 0.0
-    if "source_sheet" in current_year_df.columns:
-        period_months = get_months_for_accounting_period(period_idx)
-        signed_in_period = pd.DataFrame()
-        for sheet in current_year_df["source_sheet"].unique():
-            _, month_num = extract_month_from_sheet(sheet)
-            if month_num and month_num in period_months:
-                signed_in_period = pd.concat(
-                    [signed_in_period, current_year_df[current_year_df["source_sheet"] == sheet]],
-                    ignore_index=True,
-                )
+    # Compute brut (raw amount) - all rows in this year
+    if dimension == "bu":
+        df = _filter_df_for_dimension(df, dimension, key)
+        brut = float(df["amount"].sum() or 0.0) if "amount" in df.columns else 0.0
+    else:
+        # typologie - use primary allocation
+        brut = 0.0
+        for _, row in df.iterrows():
+            tags, primary = allocate_typologie_for_row(row)
+            if primary == key:
+                brut += float(row.get("amount", 0) or 0)
 
-        if not signed_in_period.empty:
+    # Compute pondere if requested
+    pondere = 0.0
+    if use_pondere:
+        if "amount_pondere" in df.columns:
             if dimension == "bu":
-                signed_in_period = _filter_df_for_dimension(signed_in_period, dimension, key)
-                current_total = float(signed_in_period[amount_year_col].sum() or 0.0)
+                pondere = float(df["amount_pondere"].sum() or 0.0)
             else:
-                current_total = _sum_split_typologie_column(signed_in_period, amount_year_col, key)
-
-    # --- Carryover component (prev years distributed by production quarter) ---
-    carryover = 0.0
-    if not prev_years_df.empty:
-        # Filter by dimension for BU; typologie handled row-wise.
-        prev_work = _filter_df_for_dimension(prev_years_df, dimension, key) if dimension == "bu" else prev_years_df
-        period_months = get_months_for_accounting_period(period_idx)
-
-        # For each month in this accounting period, add 1/3 of that quarter's production amount.
-        for month_num in period_months:
-            quarter = get_quarter_for_month(month_num)
-            quarter_col = (
-                f"Montant Pondéré {quarter}_{production_year}"
-                if use_pondere
-                else f"Montant Total {quarter}_{production_year}"
-            )
-            if quarter_col not in prev_work.columns:
-                continue
-
+                for _, row in df.iterrows():
+                    tags, primary = allocate_typologie_for_row(row)
+                    if primary == key:
+                        pondere += float(row.get("amount_pondere", 0) or 0)
+        elif "probability" in df.columns and "amount" in df.columns:
+            # Compute pondere from probability if column missing
             if dimension == "bu":
-                carryover += float(prev_work[quarter_col].sum() or 0.0) / 3.0
+                for _, row in df.iterrows():
+                    prob = float(row.get("probability", 50) or 50) / 100.0
+                    pondere += float(row.get("amount", 0) or 0) * prob
             else:
-                carryover += _sum_split_typologie_column(prev_work, quarter_col, key) / 3.0
+                for _, row in df.iterrows():
+                    tags, primary = allocate_typologie_for_row(row)
+                    if primary == key:
+                        prob = float(row.get("probability", 50) or 50) / 100.0
+                        pondere += float(row.get("amount", 0) or 0) * prob
 
-    total = float(current_total + carryover)
-    return total, float(carryover)
+    return float(brut), float(pondere)
 
 
 def plot_objectives_line_chart(
@@ -1363,11 +1587,23 @@ def plot_objectives_line_chart(
     metric: str,
     dimension: str,
     key: str,
-    df: pd.DataFrame
+    df: pd.DataFrame,
+    use_pondere: bool = False,
+    show_pure: bool = False
 ) -> go.Figure:
     """
     Create a line chart comparing realized vs objectives by month.
+    Uses production-month realized series (Jan-Dec only) including carryover.
     If key is "all", show cumulative total vs total objective and individual lines.
+
+    Args:
+        year: Production year
+        metric: "envoye" or "signe"
+        dimension: "bu" or "typologie"
+        key: BU name or typologie name (or "all")
+        df: DataFrame with production-year columns
+        use_pondere: Whether to use weighted amounts (for Envoyé)
+        show_pure: Whether to show pure signature lines
     """
     months = MONTH_NAMES
     fig = go.Figure()
@@ -1376,6 +1612,8 @@ def plot_objectives_line_chart(
         # All view: show cumulative realized vs cumulative objective, and individual lines
         realized_total = [0.0] * 12
         objective_total = [0.0] * 12
+        pure_brut_total = [0.0] * 12
+        pure_pondere_total = [0.0] * 12
 
         items = BU_ORDER if dimension == "bu" else EXPECTED_TYPOLOGIES
 
@@ -1383,10 +1621,22 @@ def plot_objectives_line_chart(
         for item in items:
             item_realized = []
             for month_num in range(1, 13):
-                val = calculate_realized_by_month(df, dimension, item, month_num)
+                # Use production-month realized (includes carryover)
+                val, _ = calculate_production_month_with_carryover(
+                    df, year, month_num, dimension, item, use_pondere
+                )
                 item_realized.append(val)
                 realized_total[month_num-1] += val
                 objective_total[month_num-1] += objective_for_month(year, metric, dimension, item, month_num)
+
+                # Pure signature for this month
+                if show_pure:
+                    brut, pond = calculate_pure_signature_for_month(
+                        df, year, month_num, dimension, item, use_pondere
+                    )
+                    pure_brut_total[month_num-1] += brut
+                    if use_pondere:
+                        pure_pondere_total[month_num-1] += pond
 
             # Get color
             if dimension == "bu":
@@ -1409,7 +1659,7 @@ def plot_objectives_line_chart(
             x=months,
             y=realized_total,
             mode='lines+markers',
-            name='Total Réalisé (Mensuel)',
+            name='Total Réalisé (Production)',
             line=dict(color='#2d5a3f', width=4),
             marker=dict(size=10)
         ))
@@ -1433,24 +1683,60 @@ def plot_objectives_line_chart(
             line=dict(color='#e74c3c', width=3, dash='dash')
         ))
 
+        # Pure signature lines (if enabled)
+        if show_pure:
+            fig.add_trace(go.Scatter(
+                x=months,
+                y=pure_brut_total,
+                mode='lines+markers',
+                name='Pur (brut)',
+                line=dict(color='#3498db', width=2, dash='dot'),
+                marker=dict(size=6, symbol='circle'),
+                opacity=0.7
+            ))
+            if use_pondere:
+                fig.add_trace(go.Scatter(
+                    x=months,
+                    y=pure_pondere_total,
+                    mode='lines+markers',
+                    name='Pur (pondéré)',
+                    line=dict(color='#9b59b6', width=2, dash='dot'),
+                    marker=dict(size=6, symbol='square'),
+                    opacity=0.7
+                ))
+
         title = f"Toutes les {dimension.upper()}s - {metric.upper()} : Réalisé vs Objectif"
     else:
         # Single item view
         realized = []
         objectives = []
+        pure_brut = []
+        pure_pondere = []
 
         for month_num in range(1, 13):
-            realized_val = calculate_realized_by_month(df, dimension, key, month_num)
+            # Use production-month realized (includes carryover)
+            realized_val, _ = calculate_production_month_with_carryover(
+                df, year, month_num, dimension, key, use_pondere
+            )
             objective_val = objective_for_month(year, metric, dimension, key, month_num)
             realized.append(realized_val)
             objectives.append(objective_val)
+
+            # Pure signature for this month
+            if show_pure:
+                brut, pond = calculate_pure_signature_for_month(
+                    df, year, month_num, dimension, key, use_pondere
+                )
+                pure_brut.append(brut)
+                if use_pondere:
+                    pure_pondere.append(pond)
 
         # Realized line
         fig.add_trace(go.Scatter(
             x=months,
             y=realized,
             mode='lines+markers',
-            name='Réalisé',
+            name='Réalisé (Production)',
             line=dict(color='#2d5a3f', width=3),
             marker=dict(size=8)
         ))
@@ -1464,6 +1750,28 @@ def plot_objectives_line_chart(
             line=dict(color='#e74c3c', width=2, dash='dash'),
             marker=dict(size=6, symbol='diamond')
         ))
+
+        # Pure signature lines (if enabled)
+        if show_pure:
+            fig.add_trace(go.Scatter(
+                x=months,
+                y=pure_brut,
+                mode='lines+markers',
+                name='Pur (brut)',
+                line=dict(color='#3498db', width=2, dash='dot'),
+                marker=dict(size=6, symbol='circle'),
+                opacity=0.7
+            ))
+            if use_pondere:
+                fig.add_trace(go.Scatter(
+                    x=months,
+                    y=pure_pondere,
+                    mode='lines+markers',
+                    name='Pur (pondéré)',
+                    line=dict(color='#9b59b6', width=2, dash='dot'),
+                    marker=dict(size=6, symbol='square'),
+                    opacity=0.7
+                ))
 
         title = f"{key} - {metric.upper()} : Réalisé vs Objectif"
 
@@ -1504,40 +1812,28 @@ def get_quarterly_by_typologie(df: pd.DataFrame, year: int, include_pondere: boo
     if df.empty or 'cf_typologie_de_devis' not in df.columns:
         return {}
 
-    # Use split typologies for accurate counting
-    df_split = split_typologies(df)
-
-    result = {}
     quarters = ['Q1', 'Q2', 'Q3', 'Q4']
+    result = {}
 
-    # Get all unique typologies
-    typologies = df_split['cf_typologie_de_devis'].dropna().unique()
+    for _, row in df.iterrows():
+        tags, primary = allocate_typologie_for_row(row)
 
-    for typ in typologies:
-        if not typ or str(typ) == 'nan':
+        if not primary:
             continue
 
-        typ_df = df_split[df_split['cf_typologie_de_devis'] == typ]
-        if typ_df.empty:
-            continue
+        if primary not in result:
+            result[primary] = {q: {'total': 0.0, 'pondere': 0.0} for q in quarters}
 
-        typ_data = {}
         for quarter in quarters:
             total_col = f'Montant Total {quarter}_{year}'
             pondere_col = f'Montant Pondéré {quarter}_{year}'
 
-            quarter_data = {'total': 0.0}
+            total_val = float(row.get(total_col, 0) or 0)
+            result[primary][quarter]['total'] += total_val
 
-            if total_col in typ_df.columns:
-                quarter_data['total'] = typ_df[total_col].sum()
-
-            if include_pondere and pondere_col in typ_df.columns:
-                quarter_data['pondere'] = typ_df[pondere_col].sum()
-
-            typ_data[quarter] = quarter_data
-
-        if any(typ_data[q]['total'] > 0 for q in quarters):
-            result[typ] = typ_data
+            if include_pondere:
+                pondere_val = float(row.get(pondere_col, 0) or 0)
+                result[primary][quarter]['pondere'] += pondere_val
 
     return result
 
@@ -1643,43 +1939,43 @@ def get_production_typologie_amounts(df: pd.DataFrame, production_year: int, inc
     if total_col not in df.columns:
         return {}
 
-    # We need to split typologies but also handle the production year columns
-    # Create a copy with production amounts for splitting
-    df_work = df.copy()
-
     result = {}
+    count_dict = {}  # Track counts separately (all tags)
+    amount_dict = {}  # Track amounts (primary only)
+    pondere_dict = {}  # Track weighted amounts (primary only)
 
-    for _, row in df_work.iterrows():
-        typologie = str(row.get('cf_typologie_de_devis', '')).strip()
+    for _, row in df.iterrows():
+        tags, primary = allocate_typologie_for_row(row)
 
-        if not typologie or typologie == 'nan':
+        if not primary:
             continue
 
-        # Split by comma
-        typologies = [t.strip() for t in typologie.split(',') if t.strip()]
+        # Count: increment for all tags
+        for tag in tags:
+            if tag not in count_dict:
+                count_dict[tag] = 0
+            count_dict[tag] += 1
 
-        if not typologies:
-            continue
+        # Amount: add to primary only
+        total_amount = float(row.get(total_col, 0) or 0)
+        if primary not in amount_dict:
+            amount_dict[primary] = 0.0
+        amount_dict[primary] += total_amount
 
-        # Divide amounts equally among typologies
-        split_factor = 1 / len(typologies)
+        if include_pondere:
+            pondere_amount = float(row.get(pondere_col, 0) or 0)
+            if primary not in pondere_dict:
+                pondere_dict[primary] = 0.0
+            pondere_dict[primary] += pondere_amount
 
-        total_amount = row.get(total_col, 0) if total_col in row.index else 0
-        pondere_amount = row.get(pondere_col, 0) if pondere_col in row.index else 0
-
-        for typ in typologies:
-            if typ not in result:
-                result[typ] = {'total': 0.0, 'pondere': 0.0, 'count': 0}
-
-            result[typ]['total'] += total_amount * split_factor
-            if include_pondere:
-                result[typ]['pondere'] += pondere_amount * split_factor
-            if total_amount > 0:
-                result[typ]['count'] += split_factor  # Fractional count for split
-
-    # Round counts to integers
-    for typ in result:
-        result[typ]['count'] = int(round(result[typ]['count']))
+    # Combine into result structure
+    all_typologies = set(count_dict.keys()) | set(amount_dict.keys())
+    for typ in all_typologies:
+        result[typ] = {
+            'total': amount_dict.get(typ, 0.0),
+            'pondere': pondere_dict.get(typ, 0.0) if include_pondere else 0.0,
+            'count': count_dict.get(typ, 0)
+        }
 
     return result
 
@@ -2450,7 +2746,7 @@ def get_production_typologie_amounts_for_bu(
     This is the production-year equivalent of `get_typologie_amounts_for_bu()`.
 
     Special handling:
-    - TS(typologie) under MAINTENANCE: counts ALL rows where typology includes 'TS',
+    - TS(typologie) under MAINTENANCE: counts ALL rows where primary typologie is 'TS',
       regardless of BU (so it can appear even when BU=TRAVAUX due to title rule).
 
     Args:
@@ -2472,47 +2768,40 @@ def get_production_typologie_amounts_for_bu(
     if df.empty or 'cf_typologie_de_devis' not in df.columns or total_col not in df.columns:
         return base
 
-    # Ensure BU exists; if not, treat as AUTRE
     has_bu = 'cf_bu' in df.columns
 
-    # Accumulate fractional counts, then round
-    fractional_counts = {typ: 0.0 for typ in typologies}
-
     for _, row in df.iterrows():
-        row_typ = str(row.get('cf_typologie_de_devis', '')).strip()
-        if not row_typ or row_typ == 'nan':
-            continue
-
+        tags, primary = allocate_typologie_for_row(row)
         row_bu = str(row.get('cf_bu', 'AUTRE')).strip() if has_bu else 'AUTRE'
 
-        # Split by comma
-        row_typs = [t.strip() for t in row_typ.split(',') if t.strip()]
-        if not row_typs:
-            continue
-
-        split_factor = 1 / len(row_typs)
         total_amount = float(row.get(total_col, 0) or 0)
         pondere_amount = float(row.get(pondere_col, 0) or 0) if include_pondere else 0.0
 
-        for typ in row_typs:
-            if typ not in typologies:
-                continue
-
+        for typ in typologies:
+            # Special case: TS under MAINTENANCE - count from ALL rows where primary is TS
             if typ == 'TS' and bu == 'MAINTENANCE':
-                # TS(typologie): ignore BU filter
-                pass
+                if primary == 'TS':
+                    # Count: TS in tags
+                    if 'TS' in tags:
+                        base[typ]['count'] += 1
+                    # Amount: primary is TS
+                    base[typ]['total'] += total_amount
+                    if include_pondere:
+                        base[typ]['pondere'] += pondere_amount
             else:
+                # Normal case: BU must match
                 if row_bu != bu:
                     continue
 
-            base[typ]['total'] += total_amount * split_factor
-            if include_pondere:
-                base[typ]['pondere'] += pondere_amount * split_factor
-            if total_amount > 0:
-                fractional_counts[typ] += split_factor
+                # Count: typ in tags
+                if typ in tags:
+                    base[typ]['count'] += 1
 
-    for typ in typologies:
-        base[typ]['count'] = int(round(fractional_counts.get(typ, 0.0)))
+                # Amount: primary matches typ
+                if primary == typ:
+                    base[typ]['total'] += total_amount
+                    if include_pondere:
+                        base[typ]['pondere'] += pondere_amount
 
     return base
 
@@ -2653,37 +2942,32 @@ def display_quarterly_breakdown(df: pd.DataFrame, year: int, show_pondere: bool 
         has_bu = 'cf_bu' in df.columns
 
         for _, row in df.iterrows():
-            raw_typ = str(row.get('cf_typologie_de_devis', '')).strip()
-            if not raw_typ or raw_typ == 'nan':
+            tags, primary = allocate_typologie_for_row(row)
+
+            if not primary:
                 continue
 
             row_bu = str(row.get('cf_bu', 'AUTRE')).strip() if has_bu else 'AUTRE'
-            typs = [t.strip() for t in raw_typ.split(',') if t.strip()]
-            if not typs:
-                continue
 
-            split_factor = 1 / len(typs)
+            for bu in BU_ORDER:
+                if primary not in BU_TO_TYPOLOGIES.get(bu, []):
+                    continue
 
-            for typ in typs:
-                for bu in BU_ORDER:
-                    if typ not in BU_TO_TYPOLOGIES.get(bu, []):
+                # TS(typologie) under MAINTENANCE ignores BU filter by design
+                if not (primary == 'TS' and bu == 'MAINTENANCE'):
+                    if row_bu != bu:
                         continue
 
-                    # TS(typologie) under MAINTENANCE ignores BU filter by design
-                    if not (typ == 'TS' and bu == 'MAINTENANCE'):
-                        if row_bu != bu:
-                            continue
+                for q in quarters_local:
+                    total_col = f"Montant Total {q}_{year}"
+                    pondere_col = f"Montant Pondéré {q}_{year}"
 
-                    for q in quarters_local:
-                        total_col = f"Montant Total {q}_{year}"
-                        pondere_col = f"Montant Pondéré {q}_{year}"
+                    total_val = float(row.get(total_col, 0) or 0)
+                    result[bu][primary][q]['total'] += total_val
 
-                        total_val = float(row.get(total_col, 0) or 0)
-                        result[bu][typ][q]['total'] += total_val * split_factor
-
-                        if show_pondere:
-                            pondere_val = float(row.get(pondere_col, 0) or 0)
-                            result[bu][typ][q]['pondere'] += pondere_val * split_factor
+                    if show_pondere:
+                        pondere_val = float(row.get(pondere_col, 0) or 0)
+                        result[bu][primary][q]['pondere'] += pondere_val
 
         return result
 
@@ -2862,19 +3146,18 @@ def plot_bu_donut(df: pd.DataFrame, title: str = "Répartition par BU", value_co
 
 
 def plot_typologie_donut(df: pd.DataFrame, title: str = "Répartition par Typologie", value_col: str = "amount", show_count: bool = True) -> go.Figure:
-    """Create a vertical bar chart of revenue by typologie with split handling and counts."""
+    """Create a vertical bar chart of revenue by typologie using new allocation logic."""
     if df.empty or 'cf_typologie_de_devis' not in df.columns:
         return go.Figure()
 
-    # Use split typologies
-    df_split = split_typologies(df)
+    # Use new allocation logic
+    type_amounts = get_typologie_amounts(df, include_weighted=(value_col == 'amount_pondere'))
 
-    # Aggregate
-    type_data = df_split.groupby('cf_typologie_de_devis')[value_col].sum().reset_index()
-
-    # Add count
-    type_counts = df_split.groupby('cf_typologie_de_devis').size().reset_index(name='count')
-    type_data = type_data.merge(type_counts, on='cf_typologie_de_devis', how='left')
+    # Convert to DataFrame for plotting
+    type_data = pd.DataFrame([
+        {'cf_typologie_de_devis': typ, value_col: data['total'], 'count': data['count']}
+        for typ, data in type_amounts.items()
+    ])
 
     type_data = type_data[type_data[value_col] > 0].sort_values(value_col, ascending=False)
 
@@ -3173,21 +3456,18 @@ def plot_sent_pondere_bar(df: pd.DataFrame, year: int, title: str = "Envoyé: To
 
 
 def plot_typologie_bar(df: pd.DataFrame, title: str = "Répartition par Typologie", show_count: bool = True) -> go.Figure:
-    """Create a vertical bar chart by typologie with split handling and colors."""
+    """Create a vertical bar chart by typologie using new allocation logic."""
     if df.empty or 'cf_typologie_de_devis' not in df.columns:
         return go.Figure()
 
-    # Use split typologies
-    df_split = split_typologies(df)
+    # Use new allocation logic
+    type_amounts = get_typologie_amounts(df, include_weighted=False)
 
-    # Aggregate by typologie
-    type_data = df_split.groupby('cf_typologie_de_devis').agg({
-        'amount': 'sum'
-    }).reset_index()
-
-    # Count projects (before split)
-    type_counts = df_split.groupby('cf_typologie_de_devis').size().reset_index(name='count')
-    type_data = type_data.merge(type_counts, on='cf_typologie_de_devis', how='left')
+    # Convert to DataFrame for plotting
+    type_data = pd.DataFrame([
+        {'cf_typologie_de_devis': typ, 'amount': data['total'], 'count': data['count']}
+        for typ, data in type_amounts.items()
+    ])
 
     type_data = type_data[type_data['amount'] > 0].sort_values('amount', ascending=False)
 
@@ -3290,6 +3570,102 @@ def style_objectives_df(df: pd.DataFrame):
             return ''
 
     return df.style.applymap(color_reste, subset=['Reste']).applymap(color_percent, subset=['%'])
+
+
+# =============================================================================
+# HELPER FUNCTIONS FOR DONNÉES DÉTAILLÉES TAB
+# =============================================================================
+
+def parse_sheet_month_year(sheet_name: str) -> Tuple[Optional[int], Optional[int]]:
+    """
+    Parse month and year from sheet name.
+
+    Handles formats:
+    - "Envoyé Janvier 2026" -> (1, 2026)
+    - "Signé Mars 2025" -> (3, 2025)
+    - "État au 15-01-2026" -> (1, 2026)
+
+    Args:
+        sheet_name: Name of the sheet
+
+    Returns:
+        Tuple of (month, year) or (None, None) if parsing fails
+    """
+    if not sheet_name:
+        return None, None
+
+    # Reverse lookup for month names (month number -> month name)
+    month_name_to_num = {v.lower(): k for k, v in MONTH_MAP.items()}
+
+    # Try to parse "Envoyé {Month} {Year}" or "Signé {Month} {Year}"
+    for month_name, month_num in month_name_to_num.items():
+        if month_name.lower() in sheet_name.lower():
+            # Extract year (4 digits)
+            year_match = re.search(r'\b(20\d{2})\b', sheet_name)
+            if year_match:
+                year = int(year_match.group(1))
+                return month_num, year
+
+    # Try to parse "État au DD-MM-YYYY"
+    if "État au" in sheet_name or "Etat au" in sheet_name:
+        # Extract date part after "État au " or "Etat au "
+        date_match = re.search(r'(?:État au|Etat au)\s+(\d{2}-\d{2}-\d{4})', sheet_name)
+        if date_match:
+            try:
+                date_str = date_match.group(1)
+                dt = datetime.strptime(date_str, "%d-%m-%Y")
+                return dt.month, dt.year
+            except ValueError:
+                pass
+
+    return None, None
+
+
+def get_available_months_from_sheets(df: pd.DataFrame) -> List[Tuple[int, int]]:
+    """
+    Extract available (month, year) tuples from source_sheet column.
+
+    Args:
+        df: DataFrame with source_sheet column
+
+    Returns:
+        List of (month, year) tuples, sorted by year then month
+    """
+    if df.empty or 'source_sheet' not in df.columns:
+        return []
+
+    months_years = set()
+    for sheet in df['source_sheet'].unique():
+        month, year = parse_sheet_month_year(str(sheet))
+        if month is not None and year is not None:
+            months_years.add((month, year))
+
+    # Sort by year then month
+    return sorted(months_years, key=lambda x: (x[1], x[0]))
+
+
+def get_available_quarters_from_sheets(df: pd.DataFrame) -> List[Tuple[int, int]]:
+    """
+    Extract available (quarter, year) tuples from source_sheet column.
+
+    Args:
+        df: DataFrame with source_sheet column
+
+    Returns:
+        List of (quarter, year) tuples, sorted by year then quarter
+    """
+    if df.empty or 'source_sheet' not in df.columns:
+        return []
+
+    quarters_years = set()
+    for sheet in df['source_sheet'].unique():
+        month, year = parse_sheet_month_year(str(sheet))
+        if month is not None and year is not None:
+            quarter = get_quarter_for_month(month)
+            quarters_years.add((quarter, year))
+
+    # Sort by year then quarter
+    return sorted(quarters_years, key=lambda x: (x[1], x[0]))
 
 
 def main():
@@ -3783,260 +4159,319 @@ def main():
                                 st.dataframe(carryover_df, use_container_width=True, hide_index=True)
                                 st.markdown(f"**Total production {selected_year}:** {total_production:,.0f}€")
 
-                    # Get available accounting periods from source_sheet
-                    available_periods = []
-                    period_to_months = {}
-                    if 'source_sheet' in metric_df.columns:
-                        for sheet in metric_df['source_sheet'].unique():
-                            _, month_num = extract_month_from_sheet(sheet)
-                            if month_num:
-                                period_idx = get_accounting_period_for_month(month_num)
-                                if period_idx not in available_periods:
-                                    available_periods.append(period_idx)
-                                    period_to_months[period_idx] = []
-                                if month_num not in period_to_months[period_idx]:
-                                    period_to_months[period_idx].append(month_num)
+                    # Period selector - use all accounting periods (0-10)
+                    all_periods = list(range(11))  # 0-10 for all accounting periods
+                    period_options = [f"{idx:02d} - {get_accounting_period_label(idx)}" for idx in all_periods]
 
-                    available_periods.sort()
-                    period_options = [f"{idx:02d} - {get_accounting_period_label(idx)}" for idx in available_periods]
+                    current_month_num = datetime.now().month
+                    current_period_idx = get_accounting_period_for_month(current_month_num)
+                    default_idx = current_period_idx if current_period_idx < len(all_periods) else 0
 
-                    # Period selector (11 accounting periods)
-                    if period_options:
-                        current_month_num = datetime.now().month
-                        current_period_idx = get_accounting_period_for_month(current_month_num)
-                        default_idx = 0
-                        if current_period_idx in available_periods:
-                            default_idx = available_periods.index(current_period_idx)
-                        elif available_periods:
-                            default_idx = len(available_periods) - 1  # Last available period
+                    selected_period_str = st.selectbox(
+                        "Sélectionner une période",
+                        period_options,
+                        index=default_idx,
+                        key=f"period_select_{metric_key}"
+                    )
+                    selected_period_idx = all_periods[period_options.index(selected_period_str)]
+                    selected_period_label = get_accounting_period_label(selected_period_idx)
 
-                        selected_period_str = st.selectbox(
-                            "Sélectionner une période",
-                            period_options,
-                            index=default_idx,
-                            key=f"period_select_{metric_key}"
+                    # =============================================================
+                    # SECTION 1: PÉRIODE (Production period)
+                    # =============================================================
+                    st.markdown("---")
+                    st.markdown(f"### 📅 Production de {selected_period_label}")
+
+                    st.markdown(f"*Montants de production {selected_year} pour cette période comptable*")
+
+                    # BU Table
+                    st.markdown("#### Par Business Unit")
+                    bu_data = []
+                    for bu in BU_ORDER:
+                        # Realized = production-period amount using quarter columns / 3
+                        realized_total, realized_prev = calculate_production_period_with_carryover(
+                            metric_df, selected_year, selected_period_idx, "bu", bu, use_pondere
                         )
-                        selected_period_idx = available_periods[period_options.index(selected_period_str)]
-                        selected_period_label = get_accounting_period_label(selected_period_idx)
-                    else:
-                        st.warning("Aucune période disponible dans les données")
-                        selected_period_idx = None
-                        selected_period_label = None
-
-                    if selected_period_idx is not None:
-                        # =============================================================
-                        # SECTION 1: PÉRIODE (Signature contribution)
-                        # =============================================================
-                        st.markdown("---")
-                        st.markdown(f"### 📅 Contribution des signatures de {selected_period_label}")
-
-                        st.markdown(f"*Montants de production {selected_year} sécurisés par les signatures de cette période*")
-
-                        # BU Table
-                        st.markdown("#### Par Business Unit")
-                        bu_data = []
-                        for bu in BU_ORDER:
-                            # Realized = production-year amount for this period, with carryover distributed by quarter months
-                            realized_total, realized_prev = calculate_production_period_with_carryover_distribution(
-                                metric_df, selected_year, selected_period_idx, "bu", bu, use_pondere
-                            )
-                            # Objective = sum of objectives for months in this accounting period
-                            period_months = get_months_for_accounting_period(selected_period_idx)
-                            objective = sum(
-                                objective_for_month(selected_year, metric_key, "bu", bu, m)
-                                for m in period_months
-                            )
-                            reste = objective - realized_total
-                            percent = (realized_total / objective * 100) if objective > 0 else 0.0
-
-                            bu_data.append({
-                                "BU": bu,
-                                "Objectif": f"{objective:,.0f}€",
-                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                                "Reste": f"{reste:,.0f}€",
-                                "%": f"{percent:.1f}%"
-                            })
-
-                        st.dataframe(style_objectives_df(pd.DataFrame(bu_data)), use_container_width=True, hide_index=True)
-
-                        # Typologie Table
-                        st.markdown("#### Par Typologie")
-                        typo_data = []
-                        for typo in EXPECTED_TYPOLOGIES:
-                            realized_total, realized_prev = calculate_production_period_with_carryover_distribution(
-                                metric_df, selected_year, selected_period_idx, "typologie", typo, use_pondere
-                            )
-                            period_months = get_months_for_accounting_period(selected_period_idx)
-                            objective = sum(
-                                objective_for_month(selected_year, metric_key, "typologie", typo, m)
-                                for m in period_months
-                            )
-                            reste = objective - realized_total
-                            percent = (realized_total / objective * 100) if objective > 0 else 0.0
-
-                            typo_data.append({
-                                "Typologie": typo,
-                                "Objectif": f"{objective:,.0f}€",
-                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                                "Reste": f"{reste:,.0f}€",
-                                "%": f"{percent:.1f}%"
-                            })
-
-                        st.dataframe(style_objectives_df(pd.DataFrame(typo_data)), use_container_width=True, hide_index=True)
-
-                        # =============================================================
-                        # SECTION 2: TRIMESTRE (Production year)
-                        # =============================================================
-                        st.markdown("---")
-                        st.markdown("### 📊 Trimestre de Production")
-
-                        # Determine current quarter from selected period
+                        # Objective = sum of objectives for months in this accounting period
                         period_months = get_months_for_accounting_period(selected_period_idx)
-                        if period_months:
-                            current_quarter = get_quarter_for_month(period_months[0])
+                        objective = sum(
+                            objective_for_month(selected_year, metric_key, "bu", bu, m)
+                            for m in period_months
+                        )
+                        reste = objective - realized_total
+                        percent = (realized_total / objective * 100) if objective > 0 else 0.0
+
+                        # Pure signature for this period (sum of months in period)
+                        pure_brut = 0.0
+                        pure_pondere = 0.0
+                        for m in period_months:
+                            brut, pond = calculate_pure_signature_for_month(
+                                metric_df, selected_year, m, "bu", bu, use_pondere
+                            )
+                            pure_brut += brut
+                            pure_pondere += pond
+
+                        # Format pure column
+                        if use_pondere:
+                            pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
                         else:
-                            current_quarter = "Q1"  # Default
+                            pure_display = f"{pure_brut:,.0f}€"
 
-                        quarter_start = quarter_start_dates(selected_year)[current_quarter]
-                        quarter_end = quarter_end_dates(selected_year)[current_quarter]
+                        bu_data.append({
+                            "BU": bu,
+                            "Objectif": f"{objective:,.0f}€",
+                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                            "Pur": pure_display,
+                            "Reste": f"{reste:,.0f}€",
+                            "%": f"{percent:.1f}%"
+                        })
 
-                        st.markdown(f"**Trimestre actuel:** {current_quarter} | **Début:** {quarter_start.strftime('%d/%m/%Y')} | **Fin:** {quarter_end.strftime('%d/%m/%Y')}")
+                    st.dataframe(style_objectives_df(pd.DataFrame(bu_data)), use_container_width=True, hide_index=True)
 
-                        # BU Table (Quarter) - using production-year columns
-                        st.markdown("#### Par Business Unit (Trimestre de production)")
-                        bu_quarter_data = []
-                        quarter_amount_col = (
-                            f"Montant Pondéré {current_quarter}_{selected_year}"
-                            if use_pondere
-                            else f"Montant Total {current_quarter}_{selected_year}"
+                    # Typologie Table
+                    st.markdown("#### Par Typologie")
+                    typo_data = []
+                    for typo in EXPECTED_TYPOLOGIES:
+                        realized_total, realized_prev = calculate_production_period_with_carryover(
+                            metric_df, selected_year, selected_period_idx, "typologie", typo, use_pondere
                         )
-                        for bu in BU_ORDER:
-                            realized_total, realized_prev = calculate_production_amount_with_carryover(
-                                metric_df, selected_year, quarter_amount_col, "bu", bu
+                        period_months = get_months_for_accounting_period(selected_period_idx)
+                        objective = sum(
+                            objective_for_month(selected_year, metric_key, "typologie", typo, m)
+                            for m in period_months
+                        )
+                        reste = objective - realized_total
+                        percent = (realized_total / objective * 100) if objective > 0 else 0.0
+
+                        # Pure signature for this period
+                        pure_brut = 0.0
+                        pure_pondere = 0.0
+                        for m in period_months:
+                            brut, pond = calculate_pure_signature_for_month(
+                                metric_df, selected_year, m, "typologie", typo, use_pondere
                             )
-                            objective = objective_for_quarter(selected_year, metric_key, "bu", bu, current_quarter)
-                            reste = objective - realized_total
-                            percent = (realized_total / objective * 100) if objective > 0 else 0.0
+                            pure_brut += brut
+                            pure_pondere += pond
 
-                            bu_quarter_data.append({
-                                "BU": bu,
-                                "Objectif": f"{objective:,.0f}€",
-                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                                "Reste": f"{reste:,.0f}€",
-                                "%": f"{percent:.1f}%"
-                            })
+                        # Format pure column
+                        if use_pondere:
+                            pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
+                        else:
+                            pure_display = f"{pure_brut:,.0f}€"
 
-                        st.dataframe(style_objectives_df(pd.DataFrame(bu_quarter_data)), use_container_width=True, hide_index=True)
+                        typo_data.append({
+                            "Typologie": typo,
+                            "Objectif": f"{objective:,.0f}€",
+                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                            "Pur": pure_display,
+                            "Reste": f"{reste:,.0f}€",
+                            "%": f"{percent:.1f}%"
+                        })
 
-                        # Typologie Table (Quarter)
-                        st.markdown("#### Par Typologie (Trimestre de production)")
-                        typo_quarter_data = []
-                        for typo in EXPECTED_TYPOLOGIES:
-                            realized_total, realized_prev = calculate_production_amount_with_carryover(
-                                metric_df, selected_year, quarter_amount_col, "typologie", typo
-                            )
-                            objective = objective_for_quarter(selected_year, metric_key, "typologie", typo, current_quarter)
-                            reste = objective - realized_total
-                            percent = (realized_total / objective * 100) if objective > 0 else 0.0
+                    st.dataframe(style_objectives_df(pd.DataFrame(typo_data)), use_container_width=True, hide_index=True)
 
-                            typo_quarter_data.append({
-                                "Typologie": typo,
-                                "Objectif": f"{objective:,.0f}€",
-                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                                "Reste": f"{reste:,.0f}€",
-                                "%": f"{percent:.1f}%"
-                            })
+                    # =============================================================
+                    # SECTION 2: TRIMESTRE (Production year)
+                    # =============================================================
+                    st.markdown("---")
+                    st.markdown("### 📊 Trimestre de Production")
 
-                        st.dataframe(style_objectives_df(pd.DataFrame(typo_quarter_data)), use_container_width=True, hide_index=True)
+                    # Determine current quarter from selected period
+                    period_months = get_months_for_accounting_period(selected_period_idx)
+                    if period_months:
+                        current_quarter = get_quarter_for_month(period_months[0])
+                    else:
+                        current_quarter = "Q1"  # Default
 
-                        # =============================================================
-                        # SECTION 3: ANNÉE (Production year)
-                        # =============================================================
-                        st.markdown("---")
-                        st.markdown("### 📈 Année de Production")
+                    quarter_start = quarter_start_dates(selected_year)[current_quarter]
+                    quarter_end = quarter_end_dates(selected_year)[current_quarter]
 
-                        # BU Table (Year) - using production-year columns
-                        st.markdown("#### Par Business Unit (Année de production)")
-                        bu_year_data = []
-                        year_amount_col = (
-                            f"Montant Pondéré {selected_year}"
-                            if use_pondere
-                            else f"Montant Total {selected_year}"
+                    st.markdown(f"**Trimestre actuel:** {current_quarter} | **Début:** {quarter_start.strftime('%d/%m/%Y')} | **Fin:** {quarter_end.strftime('%d/%m/%Y')}")
+
+                    # BU Table (Quarter) - using production-year columns
+                    st.markdown("#### Par Business Unit (Trimestre de production)")
+                    bu_quarter_data = []
+                    quarter_amount_col = (
+                        f"Montant Pondéré {current_quarter}_{selected_year}"
+                        if use_pondere
+                        else f"Montant Total {current_quarter}_{selected_year}"
+                    )
+                    for bu in BU_ORDER:
+                        realized_total, realized_prev = calculate_production_amount_with_carryover(
+                            metric_df, selected_year, quarter_amount_col, "bu", bu
                         )
-                        for bu in BU_ORDER:
-                            realized_total, realized_prev = calculate_production_amount_with_carryover(
-                                metric_df, selected_year, year_amount_col, "bu", bu
-                            )
-                            objective = objective_for_year(selected_year, metric_key, "bu", bu)
-                            reste = objective - realized_total
-                            percent = (realized_total / objective * 100) if objective > 0 else 0.0
+                        objective = objective_for_quarter(selected_year, metric_key, "bu", bu, current_quarter)
+                        reste = objective - realized_total
+                        percent = (realized_total / objective * 100) if objective > 0 else 0.0
 
-                            bu_year_data.append({
-                                "BU": bu,
-                                "Objectif": f"{objective:,.0f}€",
-                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                                "Reste": f"{reste:,.0f}€",
-                                "%": f"{percent:.1f}%"
-                            })
-
-                        st.dataframe(style_objectives_df(pd.DataFrame(bu_year_data)), use_container_width=True, hide_index=True)
-
-                        # Typologie Table (Year)
-                        st.markdown("#### Par Typologie (Année de production)")
-                        typo_year_data = []
-                        for typo in EXPECTED_TYPOLOGIES:
-                            realized_total, realized_prev = calculate_production_amount_with_carryover(
-                                metric_df, selected_year, year_amount_col, "typologie", typo
-                            )
-                            objective = objective_for_year(selected_year, metric_key, "typologie", typo)
-                            reste = objective - realized_total
-                            percent = (realized_total / objective * 100) if objective > 0 else 0.0
-
-                            typo_year_data.append({
-                                "Typologie": typo,
-                                "Objectif": f"{objective:,.0f}€",
-                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                                "Reste": f"{reste:,.0f}€",
-                                "%": f"{percent:.1f}%"
-                            })
-
-                        st.dataframe(style_objectives_df(pd.DataFrame(typo_year_data)), use_container_width=True, hide_index=True)
-
-                        # =============================================================
-                        # LINE CHARTS
-                        # =============================================================
-                        st.markdown("---")
-                        st.markdown("### 📉 Évolution Mensuelle")
-
-                        # Vertical layout for charts
-                        st.markdown("#### Par Business Unit")
-                        bu_options = ["Toutes les BUs"] + BU_ORDER
-                        selected_bu_display = st.selectbox(
-                            "Sélectionner un BU",
-                            bu_options,
-                            key=f"bu_select_{metric_key}"
+                        # Pure signature for this quarter
+                        pure_brut, pure_pondere = calculate_pure_signature_for_quarter(
+                            metric_df, selected_year, current_quarter, "bu", bu, use_pondere
                         )
-                        selected_bu_key = "all" if selected_bu_display == "Toutes les BUs" else selected_bu_display
+                        if use_pondere:
+                            pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
+                        else:
+                            pure_display = f"{pure_brut:,.0f}€"
 
-                        fig_bu = plot_objectives_line_chart(
-                            selected_year, metric_key, "bu", selected_bu_key, metric_df
-                        )
-                        st.plotly_chart(fig_bu, use_container_width=True, key=f"obj_bu_chart_{metric_key}")
+                        bu_quarter_data.append({
+                            "BU": bu,
+                            "Objectif": f"{objective:,.0f}€",
+                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                            "Pur": pure_display,
+                            "Reste": f"{reste:,.0f}€",
+                            "%": f"{percent:.1f}%"
+                        })
 
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        st.markdown("#### Par Typologie")
-                        typo_options = ["Toutes les Typologies"] + EXPECTED_TYPOLOGIES
-                        selected_typo_display = st.selectbox(
-                            "Sélectionner une Typologie",
-                            typo_options,
-                            key=f"typo_select_{metric_key}"
-                        )
-                        selected_typo_key = "all" if selected_typo_display == "Toutes les Typologies" else selected_typo_display
+                    st.dataframe(style_objectives_df(pd.DataFrame(bu_quarter_data)), use_container_width=True, hide_index=True)
 
-                        fig_typo = plot_objectives_line_chart(
-                            selected_year, metric_key, "typologie", selected_typo_key, metric_df
+                    # Typologie Table (Quarter)
+                    st.markdown("#### Par Typologie (Trimestre de production)")
+                    typo_quarter_data = []
+                    for typo in EXPECTED_TYPOLOGIES:
+                        realized_total, realized_prev = calculate_production_amount_with_carryover(
+                            metric_df, selected_year, quarter_amount_col, "typologie", typo
                         )
-                        st.plotly_chart(fig_typo, use_container_width=True, key=f"obj_typo_chart_{metric_key}")
+                        objective = objective_for_quarter(selected_year, metric_key, "typologie", typo, current_quarter)
+                        reste = objective - realized_total
+                        percent = (realized_total / objective * 100) if objective > 0 else 0.0
+
+                        # Pure signature for this quarter
+                        pure_brut, pure_pondere = calculate_pure_signature_for_quarter(
+                            metric_df, selected_year, current_quarter, "typologie", typo, use_pondere
+                        )
+                        if use_pondere:
+                            pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
+                        else:
+                            pure_display = f"{pure_brut:,.0f}€"
+
+                        typo_quarter_data.append({
+                            "Typologie": typo,
+                            "Objectif": f"{objective:,.0f}€",
+                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                            "Pur": pure_display,
+                            "Reste": f"{reste:,.0f}€",
+                            "%": f"{percent:.1f}%"
+                        })
+
+                    st.dataframe(style_objectives_df(pd.DataFrame(typo_quarter_data)), use_container_width=True, hide_index=True)
+
+                    # =============================================================
+                    # SECTION 3: ANNÉE (Production year)
+                    # =============================================================
+                    st.markdown("---")
+                    st.markdown("### 📈 Année de Production")
+
+                    # BU Table (Year) - using production-year columns
+                    st.markdown("#### Par Business Unit (Année de production)")
+                    bu_year_data = []
+                    year_amount_col = (
+                        f"Montant Pondéré {selected_year}"
+                        if use_pondere
+                        else f"Montant Total {selected_year}"
+                    )
+                    for bu in BU_ORDER:
+                        realized_total, realized_prev = calculate_production_amount_with_carryover(
+                            metric_df, selected_year, year_amount_col, "bu", bu
+                        )
+                        objective = objective_for_year(selected_year, metric_key, "bu", bu)
+                        reste = objective - realized_total
+                        percent = (realized_total / objective * 100) if objective > 0 else 0.0
+
+                        # Pure signature for this year
+                        pure_brut, pure_pondere = calculate_pure_signature_for_year(
+                            metric_df, selected_year, "bu", bu, use_pondere
+                        )
+                        if use_pondere:
+                            pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
+                        else:
+                            pure_display = f"{pure_brut:,.0f}€"
+
+                        bu_year_data.append({
+                            "BU": bu,
+                            "Objectif": f"{objective:,.0f}€",
+                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                            "Pur": pure_display,
+                            "Reste": f"{reste:,.0f}€",
+                            "%": f"{percent:.1f}%"
+                        })
+
+                    st.dataframe(style_objectives_df(pd.DataFrame(bu_year_data)), use_container_width=True, hide_index=True)
+
+                    # Typologie Table (Year)
+                    st.markdown("#### Par Typologie (Année de production)")
+                    typo_year_data = []
+                    for typo in EXPECTED_TYPOLOGIES:
+                        realized_total, realized_prev = calculate_production_amount_with_carryover(
+                            metric_df, selected_year, year_amount_col, "typologie", typo
+                        )
+                        objective = objective_for_year(selected_year, metric_key, "typologie", typo)
+                        reste = objective - realized_total
+                        percent = (realized_total / objective * 100) if objective > 0 else 0.0
+
+                        # Pure signature for this year
+                        pure_brut, pure_pondere = calculate_pure_signature_for_year(
+                            metric_df, selected_year, "typologie", typo, use_pondere
+                        )
+                        if use_pondere:
+                            pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
+                        else:
+                            pure_display = f"{pure_brut:,.0f}€"
+
+                        typo_year_data.append({
+                            "Typologie": typo,
+                            "Objectif": f"{objective:,.0f}€",
+                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                            "Pur": pure_display,
+                            "Reste": f"{reste:,.0f}€",
+                            "%": f"{percent:.1f}%"
+                        })
+
+                    st.dataframe(style_objectives_df(pd.DataFrame(typo_year_data)), use_container_width=True, hide_index=True)
+
+                    # =============================================================
+                    # LINE CHARTS
+                    # =============================================================
+                    st.markdown("---")
+                    st.markdown("### 📉 Évolution Mensuelle")
+
+                    # Checkbox to show/hide pure signature lines
+                    show_pure_lines = st.checkbox(
+                        "Afficher les courbes Pur (brut/pondéré)",
+                        value=False,
+                        key=f"show_pure_{metric_key}"
+                    )
+
+                    # Vertical layout for charts
+                    st.markdown("#### Par Business Unit")
+                    bu_options = ["Toutes les BUs"] + BU_ORDER
+                    selected_bu_display = st.selectbox(
+                        "Sélectionner un BU",
+                        bu_options,
+                        key=f"bu_select_{metric_key}"
+                    )
+                    selected_bu_key = "all" if selected_bu_display == "Toutes les BUs" else selected_bu_display
+
+                    fig_bu = plot_objectives_line_chart(
+                        selected_year, metric_key, "bu", selected_bu_key, metric_df,
+                        use_pondere=use_pondere, show_pure=show_pure_lines
+                    )
+                    st.plotly_chart(fig_bu, use_container_width=True, key=f"obj_bu_chart_{metric_key}")
+
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.markdown("#### Par Typologie")
+                    typo_options = ["Toutes les Typologies"] + EXPECTED_TYPOLOGIES
+                    selected_typo_display = st.selectbox(
+                        "Sélectionner une Typologie",
+                        typo_options,
+                        key=f"typo_select_{metric_key}"
+                    )
+                    selected_typo_key = "all" if selected_typo_display == "Toutes les Typologies" else selected_typo_display
+
+                    fig_typo = plot_objectives_line_chart(
+                        selected_year, metric_key, "typologie", selected_typo_key, metric_df,
+                        use_pondere=use_pondere, show_pure=show_pure_lines
+                    )
+                    st.plotly_chart(fig_typo, use_container_width=True, key=f"obj_typo_chart_{metric_key}")
 
     # =========================================================================
     # TAB 4: DONNÉES DÉTAILLÉES
@@ -4045,9 +4480,10 @@ def main():
         st.markdown("### Données Détaillées")
 
         # Filters
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
 
         with col1:
+            bu_filter = []
             if 'cf_bu' in df.columns:
                 bu_filter = st.multiselect(
                     "Filtrer par BU",
@@ -4057,6 +4493,61 @@ def main():
                 )
 
         with col2:
+            # Time period filter
+            time_filter_type = st.radio(
+                "Période",
+                ["Toute l'année", "Par mois", "Par trimestre"],
+                key="time_filter_type",
+                horizontal=True
+            )
+
+            selected_month = None
+            selected_quarter = None
+
+            if time_filter_type == "Par mois":
+                # Get available months from source_sheet
+                available_months = get_available_months_from_sheets(df)
+                if available_months:
+                    # Filter to selected year
+                    year_months = [(m, y) for m, y in available_months if y == selected_year]
+                    if year_months:
+                        # Create display labels
+                        month_labels = [f"{MONTH_MAP.get(m, '')} {y}" for m, y in year_months]
+                        month_options = list(range(len(month_labels)))
+                        selected_idx = st.selectbox(
+                            "Mois",
+                            month_options,
+                            format_func=lambda i: month_labels[i],
+                            key="month_filter"
+                        )
+                        selected_month = year_months[selected_idx][0] if selected_idx < len(year_months) else None
+                    else:
+                        st.info(f"Aucun mois disponible pour {selected_year}")
+                else:
+                    st.info("Aucun mois disponible dans les données")
+
+            elif time_filter_type == "Par trimestre":
+                # Get available quarters from source_sheet
+                available_quarters = get_available_quarters_from_sheets(df)
+                if available_quarters:
+                    # Filter to selected year
+                    year_quarters = [(q, y) for q, y in available_quarters if y == selected_year]
+                    if year_quarters:
+                        # Get unique quarters for the year
+                        unique_quarters = sorted(set(q for q, y in year_quarters))
+                        quarter_labels = [f"Q{q}" for q in unique_quarters]
+                        selected_quarter = st.selectbox(
+                            "Trimestre",
+                            unique_quarters,
+                            format_func=lambda q: f"Q{q}",
+                            key="quarter_filter"
+                        )
+                    else:
+                        st.info(f"Aucun trimestre disponible pour {selected_year}")
+                else:
+                    st.info("Aucun trimestre disponible dans les données")
+
+        with col3:
             amount_range = st.slider(
                 "Plage de montant (€)",
                 min_value=0,
@@ -4076,15 +4567,62 @@ def main():
             (filtered_df['amount'] <= amount_range[1])
         ]
 
+        # Apply time-based filter
+        if time_filter_type == "Par mois" and selected_month is not None:
+            # Filter by month and year from source_sheet
+            month_mask = pd.Series([False] * len(filtered_df), index=filtered_df.index)
+            if 'source_sheet' in filtered_df.columns:
+                for idx, sheet in filtered_df['source_sheet'].items():
+                    month, year = parse_sheet_month_year(str(sheet))
+                    if month == selected_month and year == selected_year:
+                        month_mask[idx] = True
+            filtered_df = filtered_df[month_mask]
+
+        elif time_filter_type == "Par trimestre" and selected_quarter is not None:
+            # Filter by quarter and year from source_sheet
+            # Q1: months 1-3, Q2: months 4-6, Q3: months 7-9, Q4: months 10-12
+            quarter_months = {
+                1: [1, 2, 3],
+                2: [4, 5, 6],
+                3: [7, 8, 9],
+                4: [10, 11, 12]
+            }.get(selected_quarter, [])
+
+            quarter_mask = pd.Series([False] * len(filtered_df), index=filtered_df.index)
+            if 'source_sheet' in filtered_df.columns:
+                for idx, sheet in filtered_df['source_sheet'].items():
+                    month, year = parse_sheet_month_year(str(sheet))
+                    if month in quarter_months and year == selected_year:
+                        quarter_mask[idx] = True
+            filtered_df = filtered_df[quarter_mask]
+
+        # Note: "Toute l'année" doesn't need additional filtering
+
+        # Format date columns for display (DD/MM/YYYY format)
+        display_df = filtered_df.copy()
+        date_cols_to_format = ['date', 'projet_start', 'projet_stop']
+        for col in date_cols_to_format:
+            if col in display_df.columns:
+                # Convert to datetime if not already
+                display_df[col] = pd.to_datetime(display_df[col], errors='coerce')
+                # Format as DD/MM/YYYY, handle NaT as empty string
+                display_df[col] = display_df[col].apply(
+                    lambda x: x.strftime('%d/%m/%Y') if pd.notna(x) else ''
+                )
+
         # Display columns
-        display_cols = ['title', 'company_name', 'amount', 'cf_bu',
-                       'cf_typologie_de_devis', 'probability', 'statut']
+        display_cols = ['title', 'company_name', 'amount']
         if show_pondere:
-            display_cols.insert(3, 'amount_pondere')
-        display_cols = [c for c in display_cols if c in filtered_df.columns]
+            display_cols.append('amount_pondere')
+        # Add date columns
+        display_cols.extend(['date', 'projet_start', 'projet_stop'])
+        # Add remaining columns
+        display_cols.extend(['cf_bu', 'cf_typologie_de_devis', 'probability', 'statut'])
+        # Filter to only include columns that exist in the dataframe
+        display_cols = [c for c in display_cols if c in display_df.columns]
 
         st.dataframe(
-            filtered_df[display_cols].sort_values('amount', ascending=False),
+            display_df[display_cols].sort_values('amount', ascending=False),
             width='stretch',
             hide_index=True
         )
@@ -4094,7 +4632,8 @@ def main():
         col1, col2 = st.columns(2)
 
         with col1:
-            csv = filtered_df.to_csv(index=False)
+            # Use display_df for CSV export (already has formatted dates)
+            csv = display_df[display_cols].to_csv(index=False)
             st.download_button(
                 label="📥 Exporter en CSV",
                 data=csv,

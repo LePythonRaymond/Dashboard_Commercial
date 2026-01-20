@@ -180,12 +180,15 @@ class EmailSender:
                 proposal_id = item.get('id', '')
                 furious_url = self._build_furious_url(proposal_id)
                 url_link = f'<a href="{furious_url}" target="_blank" style="color: #3498db; text-decoration: none;">🔗 Ouvrir</a>' if furious_url else '-'
+                assigned_to_raw = item.get("assigned_to")
+                assigned_to_display = "-" if (not assigned_to_raw or str(assigned_to_raw).strip() in ("N/A", "None", "nan")) else str(assigned_to_raw)
 
                 weird_rows += f"""
                 <tr>
                     <td style="padding: 12px; border: 1px solid #ddd; text-align: center; font-family: monospace;">{proposal_id}</td>
                     <td style="padding: 12px; border: 1px solid #ddd; font-weight: 500;">{item.get('title', 'Unknown')}</td>
                     <td style="padding: 12px; border: 1px solid #ddd;">{item.get('company_name', 'N/A')}</td>
+                    <td style="padding: 12px; border: 1px solid #ddd;">{assigned_to_display}</td>
                     <td style="padding: 12px; border: 1px solid #ddd; text-align: right; font-weight: 600;">{item.get('amount', 0):,.0f} €</td>
                     <td style="padding: 12px; border: 1px solid #ddd;">{item.get('statut', 'Unknown')}</td>
                     <td style="padding: 12px; border: 1px solid #ddd;">{self._format_date_display(item.get('date'))}</td>
@@ -205,12 +208,15 @@ class EmailSender:
                 url_link = f'<a href="{furious_url}" target="_blank" style="color: #3498db; text-decoration: none;">🔗 Ouvrir</a>' if furious_url else '-'
                 prob = item.get('probability', 0)
                 prob_color = "#27ae60" if prob >= 50 else "#f39c12" if prob >= 25 else "#e74c3c"
+                assigned_to_raw = item.get("assigned_to")
+                assigned_to_display = "-" if (not assigned_to_raw or str(assigned_to_raw).strip() in ("N/A", "None", "nan")) else str(assigned_to_raw)
 
                 followup_rows += f"""
                 <tr>
                     <td style="padding: 12px; border: 1px solid #ddd; text-align: center; font-family: monospace;">{proposal_id}</td>
                     <td style="padding: 12px; border: 1px solid #ddd; font-weight: 500;">{item.get('title', 'Unknown')}</td>
                     <td style="padding: 12px; border: 1px solid #ddd;">{item.get('company_name', 'N/A')}</td>
+                    <td style="padding: 12px; border: 1px solid #ddd;">{assigned_to_display}</td>
                     <td style="padding: 12px; border: 1px solid #ddd; text-align: right; font-weight: 600;">{item.get('amount', 0):,.0f} €</td>
                     <td style="padding: 12px; border: 1px solid #ddd;">{item.get('statut', 'Unknown')}</td>
                     <td style="padding: 12px; border: 1px solid #ddd;">{self._format_date_display(item.get('date'))}</td>
@@ -284,6 +290,7 @@ class EmailSender:
                                 <th>ID</th>
                                 <th>Titre</th>
                                 <th>Client</th>
+                                <th>Assignés</th>
                                 <th>Montant</th>
                                 <th>Statut</th>
                                 <th>Date</th>
@@ -319,6 +326,7 @@ class EmailSender:
                                 <th>ID</th>
                                 <th>Titre</th>
                                 <th>Client</th>
+                                <th>Assignés</th>
                                 <th>Montant</th>
                                 <th>Statut</th>
                                 <th>Date</th>
@@ -729,16 +737,13 @@ class EmailSender:
         elif dimension == "typologie":
             if 'cf_typologie_de_devis' not in month_df.columns:
                 return 0.0
+            # Use new allocation logic: amount goes to primary only
+            from src.processing.typologie_allocation import allocate_typologie_for_row
             total = 0.0
             for _, row in month_df.iterrows():
-                typo_str = str(row.get('cf_typologie_de_devis', ''))
-                if not typo_str or typo_str.lower() == 'nan':
-                    continue
-                typologies = [t.strip() for t in typo_str.replace(',', ' ').split()]
-                if key in typologies:
-                    num_typos = len(typologies)
-                    if num_typos > 0:
-                        total += row[amount_col] / num_typos
+                tags, primary = allocate_typologie_for_row(row)
+                if primary == key:
+                    total += float(row.get(amount_col, 0) or 0)
             return total
         return 0.0
 
@@ -767,18 +772,19 @@ class EmailSender:
         return f"{total:,.0f}€ (dont {prev_years:,.0f}€ années précéd.)"
 
     def _sum_split_typologie(self, df: pd.DataFrame, amount_col: str, typologie_key: str) -> float:
+        """
+        Sum amount column for a given typologie using new allocation logic.
+
+        Amount goes to primary typologie only (no splitting).
+        """
         if df.empty or amount_col not in df.columns or "cf_typologie_de_devis" not in df.columns:
             return 0.0
+        from src.processing.typologie_allocation import allocate_typologie_for_row
         total = 0.0
         for _, row in df.iterrows():
-            typo_str = str(row.get("cf_typologie_de_devis", "")).strip()
-            if not typo_str or typo_str.lower() == "nan":
-                continue
-            typos = [t.strip() for t in typo_str.replace(",", " ").split() if t.strip()]
-            if not typos:
-                continue
-            if typologie_key in typos:
-                total += float(row.get(amount_col, 0) or 0) / len(typos)
+            tags, primary = allocate_typologie_for_row(row)
+            if primary == typologie_key:
+                total += float(row.get(amount_col, 0) or 0)
         return float(total)
 
     def _production_amount_with_carryover(
@@ -809,6 +815,137 @@ class EmailSender:
         prev = self._sum_split_typologie(prev_df, amount_col, key) if not prev_df.empty else 0.0
         return total, prev
 
+    def _pure_signature_for_month(
+        self,
+        df: pd.DataFrame,
+        signed_year: int,
+        month_num: int,
+        dimension: str,
+        key: str,
+        use_pondere: bool = False,
+    ) -> tuple[float, float]:
+        """Calculate pure signature amount for a signing month (raw amount, no production split)."""
+        if df.empty or "source_sheet" not in df.columns:
+            return 0.0, 0.0
+
+        # Filter to signed_year == signed_year
+        has_signed_year = "signed_year" in df.columns
+        if has_signed_year:
+            df = df[df["signed_year"] == signed_year]
+            if df.empty:
+                return 0.0, 0.0
+
+        # Filter by signing month using source_sheet
+        month_df = pd.DataFrame()
+        for sheet in df["source_sheet"].unique():
+            m = self._extract_month_from_sheet(sheet)
+            if m == month_num:
+                month_df = pd.concat([month_df, df[df["source_sheet"] == sheet]], ignore_index=True)
+
+        if month_df.empty:
+            return 0.0, 0.0
+
+        # Compute brut (raw amount)
+        if dimension == "bu":
+            month_df = month_df[month_df["cf_bu"] == key] if "cf_bu" in month_df.columns else month_df.iloc[0:0]
+            brut = float(month_df["amount"].sum() or 0.0) if "amount" in month_df.columns else 0.0
+        else:
+            # typologie - use primary allocation
+            brut = self._sum_split_typologie(month_df, "amount", key)
+
+        # Compute pondere if requested
+        pondere = 0.0
+        if use_pondere:
+            if "amount_pondere" in month_df.columns:
+                if dimension == "bu":
+                    pondere = float(month_df["amount_pondere"].sum() or 0.0)
+                else:
+                    pondere = self._sum_split_typologie(month_df, "amount_pondere", key)
+            elif "probability" in month_df.columns and "amount" in month_df.columns:
+                # Compute pondere from probability if column missing
+                for _, row in month_df.iterrows():
+                    prob = float(row.get("probability", 50) or 50) / 100.0
+                    if dimension == "bu":
+                        if row.get("cf_bu") == key:
+                            pondere += float(row.get("amount", 0) or 0) * prob
+                    else:
+                        from src.processing.typologie_allocation import allocate_typologie_for_row
+                        tags, primary = allocate_typologie_for_row(row)
+                        if primary == key:
+                            pondere += float(row.get("amount", 0) or 0) * prob
+
+        return float(brut), float(pondere)
+
+    def _pure_signature_for_quarter(
+        self,
+        df: pd.DataFrame,
+        signed_year: int,
+        quarter: str,
+        dimension: str,
+        key: str,
+        use_pondere: bool = False,
+    ) -> tuple[float, float]:
+        """Calculate pure signature amount for a signing quarter."""
+        quarter_months = {"Q1": [1, 2, 3], "Q2": [4, 5, 6], "Q3": [7, 8, 9], "Q4": [10, 11, 12]}
+        if quarter not in quarter_months:
+            return 0.0, 0.0
+
+        brut_total = 0.0
+        pondere_total = 0.0
+        for month_num in quarter_months[quarter]:
+            brut, pond = self._pure_signature_for_month(df, signed_year, month_num, dimension, key, use_pondere)
+            brut_total += brut
+            pondere_total += pond
+        return float(brut_total), float(pondere_total)
+
+    def _pure_signature_for_year(
+        self,
+        df: pd.DataFrame,
+        signed_year: int,
+        dimension: str,
+        key: str,
+        use_pondere: bool = False,
+    ) -> tuple[float, float]:
+        """Calculate pure signature amount for a signing year."""
+        if df.empty:
+            return 0.0, 0.0
+
+        # Filter to signed_year == signed_year
+        has_signed_year = "signed_year" in df.columns
+        if has_signed_year:
+            df = df[df["signed_year"] == signed_year]
+            if df.empty:
+                return 0.0, 0.0
+
+        # Compute brut (raw amount)
+        if dimension == "bu":
+            df = df[df["cf_bu"] == key] if "cf_bu" in df.columns else df.iloc[0:0]
+            brut = float(df["amount"].sum() or 0.0) if "amount" in df.columns else 0.0
+        else:
+            brut = self._sum_split_typologie(df, "amount", key)
+
+        # Compute pondere if requested
+        pondere = 0.0
+        if use_pondere:
+            if "amount_pondere" in df.columns:
+                if dimension == "bu":
+                    pondere = float(df["amount_pondere"].sum() or 0.0)
+                else:
+                    pondere = self._sum_split_typologie(df, "amount_pondere", key)
+            elif "probability" in df.columns and "amount" in df.columns:
+                for _, row in df.iterrows():
+                    prob = float(row.get("probability", 50) or 50) / 100.0
+                    if dimension == "bu":
+                        if row.get("cf_bu") == key:
+                            pondere += float(row.get("amount", 0) or 0) * prob
+                    else:
+                        from src.processing.typologie_allocation import allocate_typologie_for_row
+                        tags, primary = allocate_typologie_for_row(row)
+                        if primary == key:
+                            pondere += float(row.get("amount", 0) or 0) * prob
+
+        return float(brut), float(pondere)
+
     def _production_period_with_carryover_distribution(
         self,
         df: pd.DataFrame,
@@ -819,65 +956,51 @@ class EmailSender:
         use_pondere: bool,
     ) -> tuple[float, float]:
         """
-        Month/period view aligned with dashboard:
-        - Current-year signings are attributed to their signing period (source_sheet month)
-        - Previous-year signings are attributed to the production year by distributing their
-          production-quarter amounts evenly across the 3 months of the quarter.
+        Production-period view aligned with dashboard (production-month based):
+        - Uses quarter columns divided by 3 for each month in the accounting period
+        - Ensures Jan + Feb + Mar = Q1, etc.
+        - For Juil+Août (period 6), naturally becomes 2/3 of Q3
         Returns (total, prev_years_part_for_this_period).
         """
         if df.empty:
             return 0.0, 0.0
 
-        year_amount_col = f"Montant Pondéré {production_year}" if use_pondere else f"Montant Total {production_year}"
-        if year_amount_col not in df.columns:
+        period_months = get_months_for_accounting_period(period_idx)
+        if not period_months:
             return 0.0, 0.0
 
-        has_signed_year = "signed_year" in df.columns
-        current_year_df = df[df["signed_year"] == production_year] if has_signed_year else df
-        prev_years_df = df[df["signed_year"] < production_year] if has_signed_year else df.iloc[0:0]
+        total = 0.0
+        prev_total = 0.0
 
-        period_months = get_months_for_accounting_period(period_idx)
+        for month_num in period_months:
+            quarter = get_quarter_for_month(month_num)
+            quarter_col = (
+                f"Montant Pondéré {quarter}_{production_year}"
+                if use_pondere
+                else f"Montant Total {quarter}_{production_year}"
+            )
 
-        # Current-year component filtered by signing period months
-        current_total = 0.0
-        if "source_sheet" in current_year_df.columns:
-            signed_in_period = pd.DataFrame()
-            for sheet in current_year_df["source_sheet"].unique():
-                m = self._extract_month_from_sheet(sheet)
-                if m and m in period_months:
-                    signed_in_period = pd.concat(
-                        [signed_in_period, current_year_df[current_year_df["source_sheet"] == sheet]],
-                        ignore_index=True,
-                    )
-            if not signed_in_period.empty:
-                if dimension == "bu":
-                    if "cf_bu" in signed_in_period.columns:
-                        current_total = float(signed_in_period[signed_in_period["cf_bu"] == key][year_amount_col].sum() or 0.0)
-                else:
-                    current_total = self._sum_split_typologie(signed_in_period, year_amount_col, key)
+            if quarter_col not in df.columns:
+                continue
 
-        # Carryover component distributed by quarter months
-        carryover = 0.0
-        if not prev_years_df.empty:
-            # Pre-filter for BU
-            prev_work = prev_years_df
+            has_signed_year = "signed_year" in df.columns
+            prev_df = df[df["signed_year"] < production_year] if has_signed_year else df.iloc[0:0]
+
+            # Compute total (all signed_years) - divide quarter by 3 for monthly amount
             if dimension == "bu":
-                if "cf_bu" not in prev_work.columns:
-                    prev_work = prev_work.iloc[0:0]
-                else:
-                    prev_work = prev_work[prev_work["cf_bu"] == key]
+                work = df[df["cf_bu"] == key] if "cf_bu" in df.columns else df.iloc[0:0]
+                month_total = float(work[quarter_col].sum() or 0.0) / 3.0
+                prev_work = prev_df[prev_df["cf_bu"] == key] if not prev_df.empty and "cf_bu" in prev_df.columns else prev_df.iloc[0:0]
+                month_prev = float(prev_work[quarter_col].sum() or 0.0) / 3.0
+            else:
+                # typologie
+                month_total = self._sum_split_typologie(df, quarter_col, key) / 3.0
+                month_prev = self._sum_split_typologie(prev_df, quarter_col, key) / 3.0
 
-            for month_num in period_months:
-                q = get_quarter_for_month(month_num)
-                quarter_col = f"Montant Pondéré {q}_{production_year}" if use_pondere else f"Montant Total {q}_{production_year}"
-                if quarter_col not in prev_work.columns:
-                    continue
-                if dimension == "bu":
-                    carryover += float(prev_work[quarter_col].sum() or 0.0) / 3.0
-                else:
-                    carryover += self._sum_split_typologie(prev_work, quarter_col, key) / 3.0
+            total += month_total
+            prev_total += month_prev
 
-        return float(current_total + carryover), float(carryover)
+        return float(total), float(prev_total)
 
     def _load_aggregated_production_data_for_objectives(
         self,
@@ -1029,6 +1152,7 @@ class EmailSender:
                             <th>BU</th>
                             <th>Objectif</th>
                             <th>Réalisé</th>
+                            <th>Pur</th>
                             <th>Reste</th>
                             <th>%</th>
                         </tr>
@@ -1044,12 +1168,27 @@ class EmailSender:
                 objective = sum(objective_for_month(year, metric_key, "bu", bu, m) for m in period_months)
                 reste = objective - realized_total
                 percent = (realized_total / objective * 100) if objective > 0 else 0.0
+
+                # Pure signature for this period
+                pure_brut = 0.0
+                pure_pondere = 0.0
+                for m in period_months:
+                    brut, pond = self._pure_signature_for_month(metric_df, year, m, "bu", bu, use_pondere)
+                    pure_brut += brut
+                    pure_pondere += pond
+
+                if use_pondere:
+                    pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
+                else:
+                    pure_display = f"{pure_brut:,.0f}€"
+
                 row_color = "#ffe6e6" if percent < 100 else "#e6ffe6"
                 html_tables += f"""
                         <tr style="background-color: {row_color};">
                             <td><strong>{bu}</strong></td>
                             <td>{objective:,.0f}€</td>
                             <td>{self._format_realized_with_carryover(realized_total, realized_prev)}</td>
+                            <td>{pure_display}</td>
                             <td>{reste:,.0f}€</td>
                             <td><strong>{percent:.1f}%</strong></td>
                         </tr>
@@ -1069,6 +1208,7 @@ class EmailSender:
                             <th>Typologie</th>
                             <th>Objectif</th>
                             <th>Réalisé</th>
+                            <th>Pur</th>
                             <th>Reste</th>
                             <th>%</th>
                         </tr>
@@ -1084,12 +1224,27 @@ class EmailSender:
                 objective = sum(objective_for_month(year, metric_key, "typologie", typ, m) for m in period_months)
                 reste = objective - realized_total
                 percent = (realized_total / objective * 100) if objective > 0 else 0.0
+
+                # Pure signature for this period
+                pure_brut = 0.0
+                pure_pondere = 0.0
+                for m in period_months:
+                    brut, pond = self._pure_signature_for_month(metric_df, year, m, "typologie", typ, use_pondere)
+                    pure_brut += brut
+                    pure_pondere += pond
+
+                if use_pondere:
+                    pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
+                else:
+                    pure_display = f"{pure_brut:,.0f}€"
+
                 row_color = "#ffe6e6" if percent < 100 else "#e6ffe6"
                 html_tables += f"""
                         <tr style="background-color: {row_color};">
                             <td><strong>{typ}</strong></td>
                             <td>{objective:,.0f}€</td>
                             <td>{self._format_realized_with_carryover(realized_total, realized_prev)}</td>
+                            <td>{pure_display}</td>
                             <td>{reste:,.0f}€</td>
                             <td><strong>{percent:.1f}%</strong></td>
                         </tr>
@@ -1110,6 +1265,7 @@ class EmailSender:
                             <th>BU</th>
                             <th>Objectif</th>
                             <th>Réalisé</th>
+                            <th>Pur</th>
                             <th>Reste</th>
                             <th>%</th>
                         </tr>
@@ -1122,12 +1278,21 @@ class EmailSender:
                 objective = objective_for_quarter(year, metric_key, "bu", bu, current_quarter)
                 reste = objective - realized_total
                 percent = (realized_total / objective * 100) if objective > 0 else 0.0
+
+                # Pure signature for this quarter
+                pure_brut, pure_pondere = self._pure_signature_for_quarter(metric_df, year, current_quarter, "bu", bu, use_pondere)
+                if use_pondere:
+                    pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
+                else:
+                    pure_display = f"{pure_brut:,.0f}€"
+
                 row_color = "#ffe6e6" if percent < 100 else "#e6ffe6"
                 html_tables += f"""
                         <tr style="background-color: {row_color};">
                             <td><strong>{bu}</strong></td>
                             <td>{objective:,.0f}€</td>
                             <td>{self._format_realized_with_carryover(realized_total, realized_prev)}</td>
+                            <td>{pure_display}</td>
                             <td>{reste:,.0f}€</td>
                             <td><strong>{percent:.1f}%</strong></td>
                         </tr>
@@ -1148,6 +1313,7 @@ class EmailSender:
                             <th>BU</th>
                             <th>Objectif</th>
                             <th>Réalisé</th>
+                            <th>Pur</th>
                             <th>Reste</th>
                             <th>%</th>
                         </tr>
@@ -1160,12 +1326,21 @@ class EmailSender:
                 objective = objective_for_year(year, metric_key, "bu", bu)
                 reste = objective - realized_total
                 percent = (realized_total / objective * 100) if objective > 0 else 0.0
+
+                # Pure signature for this year
+                pure_brut, pure_pondere = self._pure_signature_for_year(metric_df, year, "bu", bu, use_pondere)
+                if use_pondere:
+                    pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
+                else:
+                    pure_display = f"{pure_brut:,.0f}€"
+
                 row_color = "#ffe6e6" if percent < 100 else "#e6ffe6"
                 html_tables += f"""
                         <tr style="background-color: {row_color};">
                             <td><strong>{bu}</strong></td>
                             <td>{objective:,.0f}€</td>
                             <td>{self._format_realized_with_carryover(realized_total, realized_prev)}</td>
+                            <td>{pure_display}</td>
                             <td>{reste:,.0f}€</td>
                             <td><strong>{percent:.1f}%</strong></td>
                         </tr>

@@ -201,6 +201,7 @@ class AlertsGenerator:
                 'statut': row.get('statut', 'Unknown'),
                 'probability': row.get('probability', 0),
                 'sign_url': row.get('sign_url', ''),
+                'assigned_to': row.get('assigned_to', 'N/A'),
                 'date': self._format_date(row.get('date')),
                 'projet_start': self._format_date(row.get('projet_start')),
                 'projet_stop': self._format_date(row.get('projet_stop')),
@@ -256,6 +257,7 @@ class AlertsGenerator:
                 'statut': row.get('statut', 'Unknown'),
                 'probability': row.get('probability', 0),
                 'sign_url': row.get('sign_url', ''),
+                'assigned_to': row.get('assigned_to', 'N/A'),
                 'alert_owner': owner
             })
 

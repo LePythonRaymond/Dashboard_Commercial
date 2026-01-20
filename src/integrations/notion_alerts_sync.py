@@ -5,12 +5,12 @@ Syncs commercial alerts (Weird Proposals and Follow-ups) to Notion databases.
 Creates pages in dedicated databases with person property mapping.
 """
 
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Set, Tuple
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 from notion_client import Client
 
-from config.settings import settings
+from config.settings import settings, VIP_COMMERCIALS
 from src.processing.alerts import AlertsOutput
 from .notion_users import get_user_mapper, NotionUserMapper
 
@@ -159,6 +159,98 @@ class NotionAlertsSync:
             }
         return {"people": []}
 
+    @staticmethod
+    def _parse_assigned_to(assigned_to: Any) -> List[str]:
+        """
+        Parse Furious `assigned_to` into a list of identifier tokens.
+
+        In Furious, this field is often whitespace-separated (e.g. "anne-valerie manon.navarro"),
+        but we also defensively handle commas/semicolons.
+        """
+        if assigned_to is None:
+            return []
+
+        s = str(assigned_to).strip()
+        if not s or s == "N/A" or s.lower() in ("nan", "none"):
+            return []
+
+        # Prefer whitespace split, then fallback to comma/semicolon if single token
+        parts = s.split()
+        if len(parts) == 1:
+            parts = s.split(",")
+        if len(parts) == 1:
+            parts = s.split(";")
+
+        return [p.lower().strip() for p in parts if p and p.strip()]
+
+    @staticmethod
+    def _normalize_identifier(identifier: str) -> str:
+        """Normalize identifier for matching (lowercase, remove dots/hyphens, trim)."""
+        if not identifier:
+            return ""
+        normalized = identifier.lower().strip()
+        normalized = normalized.replace(".", "").replace("-", "")
+        normalized = " ".join(normalized.split())
+        return normalized
+
+    def _classify_assignees(self, identifiers: List[str]) -> Tuple[List[str], List[str]]:
+        """
+        Split assignees into (Commercial, Chef de projet) buckets.
+
+        Commercials are: VIP_COMMERCIALS + {'alienor', 'luana'}.
+        Everything else becomes Chef de projet.
+        """
+        commercials_set: Set[str] = set(VIP_COMMERCIALS) | {"alienor", "luana"}
+        normalized_commercials = {self._normalize_identifier(c) for c in commercials_set}
+
+        commercials: List[str] = []
+        chefs_de_projet: List[str] = []
+
+        for identifier in identifiers:
+            normalized_id = self._normalize_identifier(identifier)
+            if identifier in commercials_set or normalized_id in normalized_commercials:
+                commercials.append(identifier)
+            else:
+                chefs_de_projet.append(identifier)
+
+        return commercials, chefs_de_projet
+
+    def _build_people_property(self, identifiers: List[str]) -> Dict[str, Any]:
+        """
+        Build Notion People property from Furious identifiers.
+        Skips identifiers that can't be mapped to Notion users.
+        """
+        people: List[Dict[str, str]] = []
+        seen: Set[str] = set()
+
+        for identifier in identifiers:
+            user_id = self.user_mapper.get_notion_user_id(identifier)
+            if user_id and user_id not in seen:
+                people.append({"object": "user", "id": user_id})
+                seen.add(user_id)
+
+        return {"people": people}
+
+    def _get_database_schema(self, database_id: str) -> Dict[str, Any]:
+        """
+        Get database schema (properties dict) so we can set only existing properties.
+
+        If this fails, returns {} and we will "try all properties" (backward compatible behavior).
+        """
+        if not database_id:
+            return {}
+        try:
+            db_info = self.client.databases.retrieve(database_id=database_id)
+            return db_info.get("properties", {}) or {}
+        except Exception as e:
+            print(f"    Warning: Could not fetch database schema for {database_id[:8]}...: {e}")
+            return {}
+
+    @staticmethod
+    def _schema_allows(schema: Dict[str, Any], prop_name: str) -> bool:
+        """If schema is empty (unknown), allow everything. Otherwise only allow known properties."""
+        return (not schema) or (prop_name in schema)
+
     def _build_probleme_multi_select(self, reason: str) -> Dict[str, Any]:
         """
         Build Notion multi-select property from problem reason string.
@@ -182,7 +274,7 @@ class NotionAlertsSync:
 
         return {"multi_select": select_options}
 
-    def _build_weird_page_properties(self, item: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_weird_page_properties(self, item: Dict[str, Any], schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Build Notion page properties for a weird proposal alert.
 
@@ -199,53 +291,61 @@ class NotionAlertsSync:
         start_date_value = self._format_date(item.get('projet_start'))
         end_date_value = self._format_date(item.get('projet_stop'))
 
-        properties = {
-            "Name": {
+        schema = schema or {}
+        properties: Dict[str, Any] = {}
+
+        if self._schema_allows(schema, "Name"):
+            properties["Name"] = {
                 "title": [{"text": {"content": str(item.get('title', 'Unknown'))[:100]}}]
-            },
-            "ID Devis": {
-                "rich_text": [{"text": {"content": str(proposal_id)}}]
-            },
-            "Client": {
-                "rich_text": [{"text": {"content": str(item.get('company_name', 'N/A'))[:100]}}]
-            },
-            "Montant": {
-                "number": float(item.get('amount', 0))
-            },
-            "Statut": {
-                "status": {"name": str(item.get('statut', 'Unknown'))[:100]}
-            },
-            "Probabilite": {
-                "number": float(item.get('probability', 0))
-            },
-            "Probleme": self._build_probleme_multi_select(item.get('reason', ''))
-        }
+            }
+        if self._schema_allows(schema, "ID Devis"):
+            properties["ID Devis"] = {"rich_text": [{"text": {"content": str(proposal_id)}}]}
+        if self._schema_allows(schema, "Client"):
+            properties["Client"] = {"rich_text": [{"text": {"content": str(item.get('company_name', 'N/A'))[:100]}}]}
+        if self._schema_allows(schema, "Montant"):
+            properties["Montant"] = {"number": float(item.get('amount', 0))}
+        if self._schema_allows(schema, "Statut"):
+            properties["Statut"] = {"status": {"name": str(item.get('statut', 'Unknown'))[:100]}}
+        if self._schema_allows(schema, "Probabilite"):
+            properties["Probabilite"] = {"number": float(item.get('probability', 0))}
+        if self._schema_allows(schema, "Probleme"):
+            properties["Probleme"] = self._build_probleme_multi_select(item.get('reason', ''))
 
         # Add date if available
-        if date_value:
+        if date_value and self._schema_allows(schema, "Date"):
             properties["Date"] = {"date": {"start": date_value}}
 
         # Add start date if available
-        if start_date_value:
+        if start_date_value and self._schema_allows(schema, "Début projet"):
             properties["Début projet"] = {"date": {"start": start_date_value}}
 
         # Add end date if available
-        if end_date_value:
+        if end_date_value and self._schema_allows(schema, "Fin projet"):
             properties["Fin projet"] = {"date": {"start": end_date_value}}
 
         # Add Furious URL if available
-        if furious_url:
+        if furious_url and self._schema_allows(schema, "Lien Furious"):
             properties["Lien Furious"] = {"url": furious_url}
 
+        # All assignees (Commercial / Chef de projet) from assigned_to
+        assigned_to_str = item.get("assigned_to", "")
+        identifiers = self._parse_assigned_to(assigned_to_str)
+        commercials, chefs_de_projet = self._classify_assignees(identifiers)
+
+        if self._schema_allows(schema, "Commercial"):
+            properties["Commercial"] = self._build_people_property(commercials)
+        if self._schema_allows(schema, "Chef de projet"):
+            properties["Chef de projet"] = self._build_people_property(chefs_de_projet)
+
         # Add person property if owner can be mapped
-        if owner:
+        if owner and self._schema_allows(schema, "Responsable"):
             person_prop = self._build_person_property(owner)
             if person_prop.get("people"):
                 properties["Responsable"] = person_prop
 
         return properties
 
-    def _build_followup_page_properties(self, item: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_followup_page_properties(self, item: Dict[str, Any], schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Build Notion page properties for a follow-up alert.
 
@@ -262,45 +362,52 @@ class NotionAlertsSync:
         start_date_value = self._format_date(item.get('projet_start'))
         end_date_value = self._format_date(item.get('projet_stop'))
 
-        properties = {
-            "Name": {
+        schema = schema or {}
+        properties: Dict[str, Any] = {}
+
+        if self._schema_allows(schema, "Name"):
+            properties["Name"] = {
                 "title": [{"text": {"content": str(item.get('title', 'Unknown'))[:100]}}]
-            },
-            "ID Devis": {
-                "rich_text": [{"text": {"content": str(proposal_id)}}]
-            },
-            "Client": {
-                "rich_text": [{"text": {"content": str(item.get('company_name', 'N/A'))[:100]}}]
-            },
-            "Montant": {
-                "number": float(item.get('amount', 0))
-            },
-            "Statut": {
-                "status": {"name": str(item.get('statut', 'Unknown'))[:100]}
-            },
-            "Probabilite": {
-                "number": float(item.get('probability', 0))
             }
-        }
+        if self._schema_allows(schema, "ID Devis"):
+            properties["ID Devis"] = {"rich_text": [{"text": {"content": str(proposal_id)}}]}
+        if self._schema_allows(schema, "Client"):
+            properties["Client"] = {"rich_text": [{"text": {"content": str(item.get('company_name', 'N/A'))[:100]}}]}
+        if self._schema_allows(schema, "Montant"):
+            properties["Montant"] = {"number": float(item.get('amount', 0))}
+        if self._schema_allows(schema, "Statut"):
+            properties["Statut"] = {"status": {"name": str(item.get('statut', 'Unknown'))[:100]}}
+        if self._schema_allows(schema, "Probabilite"):
+            properties["Probabilite"] = {"number": float(item.get('probability', 0))}
 
         # Add date if available
-        if date_value:
+        if date_value and self._schema_allows(schema, "Date"):
             properties["Date"] = {"date": {"start": date_value}}
 
         # Add start date if available
-        if start_date_value:
+        if start_date_value and self._schema_allows(schema, "Début projet"):
             properties["Début projet"] = {"date": {"start": start_date_value}}
 
         # Add end date if available
-        if end_date_value:
+        if end_date_value and self._schema_allows(schema, "Fin projet"):
             properties["Fin projet"] = {"date": {"start": end_date_value}}
 
         # Add Furious URL if available
-        if furious_url:
+        if furious_url and self._schema_allows(schema, "Lien Furious"):
             properties["Lien Furious"] = {"url": furious_url}
 
+        # All assignees (Commercial / Chef de projet) from assigned_to
+        assigned_to_str = item.get("assigned_to", "")
+        identifiers = self._parse_assigned_to(assigned_to_str)
+        commercials, chefs_de_projet = self._classify_assignees(identifiers)
+
+        if self._schema_allows(schema, "Commercial"):
+            properties["Commercial"] = self._build_people_property(commercials)
+        if self._schema_allows(schema, "Chef de projet"):
+            properties["Chef de projet"] = self._build_people_property(chefs_de_projet)
+
         # Add person property if owner can be mapped
-        if owner:
+        if owner and self._schema_allows(schema, "Responsable"):
             person_prop = self._build_person_property(owner)
             if person_prop.get("people"):
                 properties["Responsable"] = person_prop
@@ -460,6 +567,12 @@ class NotionAlertsSync:
         print(f"\n  Syncing weird proposals to Notion...")
         print(f"    Database: {self.weird_database_id[:8]}...")
 
+        schema = self._get_database_schema(self.weird_database_id)
+        if schema:
+            print(f"    Schema loaded ({len(schema)} properties).")
+        else:
+            print("    Warning: Could not fetch schema - will attempt all properties")
+
         existing_by_id = self._get_existing_pages_by_id(self.weird_database_id)
         print(f"    Found {len(existing_by_id)} existing page(s) with ID Devis/Lien Furious.")
 
@@ -475,7 +588,7 @@ class NotionAlertsSync:
 
         print(f"    Upserting {len(all_items)} alert(s)...")
         for item in all_items:
-            properties = self._build_weird_page_properties(item)
+            properties = self._build_weird_page_properties(item, schema=schema)
             proposal_id = str(item.get("id", "")).strip()
             existing_page_id = existing_by_id.get(proposal_id)
             if existing_page_id:
@@ -523,6 +636,12 @@ class NotionAlertsSync:
         print(f"\n  Syncing follow-up alerts to Notion...")
         print(f"    Database: {self.followup_database_id[:8]}...")
 
+        schema = self._get_database_schema(self.followup_database_id)
+        if schema:
+            print(f"    Schema loaded ({len(schema)} properties).")
+        else:
+            print("    Warning: Could not fetch schema - will attempt all properties")
+
         existing_by_id = self._get_existing_pages_by_id(self.followup_database_id)
         print(f"    Found {len(existing_by_id)} existing page(s) with ID Devis/Lien Furious.")
 
@@ -538,7 +657,7 @@ class NotionAlertsSync:
 
         print(f"    Upserting {len(all_items)} alert(s)...")
         for item in all_items:
-            properties = self._build_followup_page_properties(item)
+            properties = self._build_followup_page_properties(item, schema=schema)
             proposal_id = str(item.get("id", "")).strip()
             existing_page_id = existing_by_id.get(proposal_id)
             if existing_page_id:
