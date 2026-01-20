@@ -10,7 +10,7 @@ from email.mime.multipart import MIMEMultipart
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 
-from config.settings import settings, OWNER_EMAIL_MAP, MONTH_MAP
+from config.settings import settings, OWNER_EMAIL_MAP, MONTH_MAP, TRAVAUX_PROJECTION_PROBABILITY_THRESHOLD
 from src.processing.alerts import AlertsOutput
 from src.processing.objectives import (
     objective_for_month, objective_for_quarter, objective_for_year,
@@ -598,13 +598,13 @@ class EmailSender:
                     <p style="margin: 0 0 12px 0; font-size: 1.1em; font-weight: 600; color: #856404;">📋 Suivi Commercial</p>
                     <a href="https://www.notion.so/2d5d927802d78002b8cbcee60cc75c29?v=2d5d927802d78014bc0d000c0700ac24&source=copy_link" target="_blank" style="display: inline-block; padding: 12px 24px; background-color: #f4c430; color: #333; text-decoration: none; border-radius: 5px; font-weight: 600; font-size: 1.05em; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">🔗 Voir dans Notion</a>
                 </div>
-                <h1>🔨 Projection Travaux prochains 4 mois</h1>
+                <h1>🔨 Projection Travaux prochains 12 mois</h1>
                 <p class="greeting">Bonjour Mathilde, voici les propositions TRAVAUX à fort potentiel pour les prochains mois (le {digest_date})</p>
 
                 <div class="summary-box">
                     <strong>Résumé:</strong><br>
-                    • {len(proposals)} proposition(s) TRAVAUX avec probabilité ≥ 50%<br>
-                    • Date dans les 30 prochains jours OU début projet dans les 4 prochains mois
+                    • {len(proposals)} proposition(s) TRAVAUX avec probabilité ≥ {TRAVAUX_PROJECTION_PROBABILITY_THRESHOLD}%<br>
+                    • Date OU début projet dans les 365 prochains jours (rolling)
                 </div>
 
                 <table>
@@ -658,7 +658,7 @@ class EmailSender:
             to_email = self.TEST_EMAIL
             cc_emails = []
 
-        subject = "Projection Travaux prochains 4 mois"
+        subject = "Projection Travaux prochains 12 mois"
 
         # Generate HTML
         html = self._generate_travaux_projection_html(proposals)

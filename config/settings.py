@@ -219,10 +219,16 @@ CONCEPTION_THRESHOLD_HIGH = 30000
 # ALERT_AMOUNT_THRESHOLD = 1000  # DEPRECATED: Amount threshold rule removed (no longer used)
 ALERT_FOLLOWUP_DAYS_FORWARD = 60  # Look ahead window
 
+# Notion Follow-up Window Overrides (for specific owners)
+# These owners get extended forward windows in Notion sync (emails still use default 60 days)
+NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER: Dict[str, int] = {
+    'vincent.delavarende': 365,
+    'adelaide.patureau': 365
+}
+
 # TRAVAUX Projection Configuration
-TRAVAUX_PROJECTION_PROBABILITY_THRESHOLD = 50  # Minimum probability for projection
-TRAVAUX_PROJECTION_DATE_WINDOW = 30  # Days for proposal date filter
-TRAVAUX_PROJECTION_START_WINDOW = 120  # Days for project start date filter (~4 months)
+TRAVAUX_PROJECTION_PROBABILITY_THRESHOLD = 25  # Minimum probability for projection
+TRAVAUX_PROJECTION_START_WINDOW = 365  # Days for project start date filter (rolling 365 days)
 
 # Excluded Owners (proposals from these owners will be filtered out)
 EXCLUDED_OWNERS: List[str] = [

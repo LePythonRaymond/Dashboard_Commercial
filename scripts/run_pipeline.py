@@ -28,7 +28,7 @@ from typing import Dict, Any
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from config.settings import settings
+from config.settings import settings, NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER
 from src.api.auth import FuriousAuth, AuthenticationError
 from src.api.proposals import ProposalsClient, ProposalsAPIError
 from src.processing.cleaner import DataCleaner
@@ -168,13 +168,23 @@ class PipelineRunner:
 
             # Step 6: Generate Alerts
             logger.info("\n--- Step 6: Generating Alerts ---")
-            alerts_generator = AlertsGenerator()
-            alerts = alerts_generator.generate(df_processed)
+            # Generate alerts for emails (default 60-day window)
+            alerts_generator_email = AlertsGenerator()
+            alerts_for_email = alerts_generator_email.generate(df_processed)
+
+            # Generate alerts for Notion (with owner-specific overrides for Vincent/Adélaïde)
+            alerts_generator_notion = AlertsGenerator(
+                followup_days_forward_by_owner=NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER
+            )
+            alerts_for_notion = alerts_generator_notion.generate(df_processed)
+
             self._log_step("generate_alerts", "success", {
-                "weird_proposals_count": alerts.count_weird,
-                "followup_count": alerts.count_followup,
-                "weird_owners": list(alerts.weird_proposals.keys()),
-                "followup_owners": list(alerts.commercial_followup.keys())
+                "weird_proposals_count": alerts_for_email.count_weird,
+                "followup_count_email": alerts_for_email.count_followup,
+                "followup_count_notion": alerts_for_notion.count_followup,
+                "weird_owners": list(alerts_for_email.weird_proposals.keys()),
+                "followup_owners_email": list(alerts_for_email.commercial_followup.keys()),
+                "followup_owners_notion": list(alerts_for_notion.commercial_followup.keys())
             })
 
             # Step 7: Write to Google Sheets
@@ -282,7 +292,7 @@ class PipelineRunner:
                     # Use test_mode if --test flag is set
                     test_mode = getattr(self, 'test_mode', False)
                     email_sender = EmailSender(test_mode=test_mode)
-                    email_counts = email_sender.send_all_alerts(alerts)
+                    email_counts = email_sender.send_all_alerts(alerts_for_email)
                     self._log_step("email_alerts", "success", email_counts)
                 except Exception as e:
                     logger.error(f"Email error: {e}")
@@ -296,7 +306,8 @@ class PipelineRunner:
             else:
                 try:
                     notion_alerts_sync = NotionAlertsSync()
-                    alerts_sync_stats = notion_alerts_sync.sync_all(alerts)
+                    # Use alerts_for_notion which includes owner-specific forward windows (365 days for Vincent/Adélaïde)
+                    alerts_sync_stats = notion_alerts_sync.sync_all(alerts_for_notion)
                     self._log_step("notion_alerts_sync", "success", {
                         "weird_created": alerts_sync_stats["weird_proposals"]["created"],
                         "weird_archived": alerts_sync_stats["weird_proposals"]["archived"],

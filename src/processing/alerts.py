@@ -60,12 +60,20 @@ class AlertsGenerator:
     - Different date reference for CONCEPTION vs TRAVAUX/MAINTENANCE
     """
 
-    def __init__(self, reference_date: datetime = None):
+    def __init__(
+        self,
+        reference_date: datetime = None,
+        followup_days_forward: int = ALERT_FOLLOWUP_DAYS_FORWARD,
+        followup_days_forward_by_owner: Optional[Dict[str, int]] = None
+    ):
         """
         Initialize the alerts generator.
 
         Args:
             reference_date: Date for window calculations. Defaults to now.
+            followup_days_forward: Default forward window in days. Defaults to ALERT_FOLLOWUP_DAYS_FORWARD.
+            followup_days_forward_by_owner: Optional dict mapping owner identifiers to custom forward window days.
+                If provided, owners in this dict will use their custom window instead of the default.
         """
         self.today = reference_date or datetime.now()
 
@@ -74,7 +82,10 @@ class AlertsGenerator:
         prev_month_end = first_of_month - timedelta(days=1)
 
         self.window_start = prev_month_end.replace(day=1)  # 1st of prev month
-        self.window_end = self.today + timedelta(days=ALERT_FOLLOWUP_DAYS_FORWARD)
+        self.default_window_end = self.today + timedelta(days=followup_days_forward)
+
+        # Store owner-specific forward windows if provided
+        self.followup_days_forward_by_owner = followup_days_forward_by_owner or {}
 
         # Create view generator for combined mask
         self.view_generator = ViewGenerator(self.today)
@@ -119,6 +130,21 @@ class AlertsGenerator:
 
         return " | ".join(reasons)
 
+    def _get_window_end_for_owner(self, owner: str) -> datetime:
+        """
+        Get the forward window end date for a specific owner.
+
+        Args:
+            owner: Owner identifier
+
+        Returns:
+            Window end datetime (owner-specific if configured, otherwise default)
+        """
+        if owner in self.followup_days_forward_by_owner:
+            custom_days = self.followup_days_forward_by_owner[owner]
+            return self.today + timedelta(days=custom_days)
+        return self.default_window_end
+
     def _needs_followup(self, row: pd.Series) -> bool:
         """
         Determine if a proposal needs commercial follow-up.
@@ -126,6 +152,8 @@ class AlertsGenerator:
         Logic differs by BU:
         - CONCEPTION: Uses 'date' (proposal date) for both backward/forward checks
         - TRAVAUX/MAINTENANCE: Uses OR rule: 'date' <= window_end OR 'projet_start' <= window_end
+
+        The forward window can be owner-specific if configured via followup_days_forward_by_owner.
 
         Args:
             row: DataFrame row
@@ -136,6 +164,10 @@ class AlertsGenerator:
         bu = row.get('final_bu', row.get('cf_bu', ''))
         d_date = row.get('date')
         d_start = row.get('projet_start')
+        owner = row.get('alert_owner', 'unassigned')
+
+        # Get owner-specific window end (or default)
+        window_end = self._get_window_end_for_owner(owner)
 
         # Backward check (common): 'date' must be >= start of window
         if pd.isna(d_date) or d_date < pd.Timestamp(self.window_start):
@@ -144,11 +176,11 @@ class AlertsGenerator:
         # Forward check (split by BU)
         if bu == 'CONCEPTION':
             # CONCEPTION: use 'date' for forward check
-            if d_date > pd.Timestamp(self.window_end):
+            if d_date > pd.Timestamp(window_end):
                 return False
         else:
             # TRAVAUX / MAINTENANCE: OR rule - either date or projet_start within window
-            window_end_ts = pd.Timestamp(self.window_end)
+            window_end_ts = pd.Timestamp(window_end)
             date_in_window = not pd.isna(d_date) and d_date <= window_end_ts
             start_in_window = not pd.isna(d_start) and d_start <= window_end_ts
 

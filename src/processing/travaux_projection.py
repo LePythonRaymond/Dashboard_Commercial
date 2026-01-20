@@ -1,7 +1,7 @@
 """
 TRAVAUX Projection Generator Module
 
-Filters high-probability TRAVAUX proposals for the "Projection Travaux prochains 4 mois" feature.
+Filters high-probability TRAVAUX proposals for the "Projection Travaux prochains 12 mois" feature.
 Identifies proposals that are likely to be signed to help fill calendar gaps.
 """
 
@@ -12,7 +12,6 @@ from datetime import datetime, timedelta
 from config.settings import (
     STATUS_WAITING,
     TRAVAUX_PROJECTION_PROBABILITY_THRESHOLD,
-    TRAVAUX_PROJECTION_DATE_WINDOW,
     TRAVAUX_PROJECTION_START_WINDOW
 )
 
@@ -24,8 +23,8 @@ class TravauxProjectionGenerator:
     Filtering Criteria:
     - BU = TRAVAUX (includes TS rule via final_bu column)
     - Status = WAITING (not yet signed)
-    - Probability >= 50%
-    - date (proposal date) within 30 days OR projet_start within 120 days (~4 months)
+    - Probability >= threshold (configurable)
+    - date OR projet_start within rolling 365 days (today <= date <= today + 365 days OR today <= projet_start <= today + 365 days)
     """
 
     def __init__(self, reference_date: datetime = None):
@@ -37,9 +36,8 @@ class TravauxProjectionGenerator:
         """
         self.today = reference_date or datetime.now()
 
-        # Calculate date windows
-        self.date_window_end = self.today + timedelta(days=TRAVAUX_PROJECTION_DATE_WINDOW)
-        self.start_window_end = self.today + timedelta(days=TRAVAUX_PROJECTION_START_WINDOW)
+        # Calculate rolling 365-day window for date and projet_start
+        self.window_end = self.today + timedelta(days=TRAVAUX_PROJECTION_START_WINDOW)
 
     @staticmethod
     def _format_date(dt: Any) -> Optional[str]:
@@ -89,22 +87,27 @@ class TravauxProjectionGenerator:
         if probability < TRAVAUX_PROJECTION_PROBABILITY_THRESHOLD:
             return False
 
-        # Filter 4: Date within window OR projet_start within window
+        # Filter 4: date OR projet_start must be within rolling 365-day window
         date_val = row.get('date')
         start_date_val = row.get('projet_start')
 
-        # Check if proposal date is within window
+        today_ts = pd.Timestamp(self.today)
+        window_end_ts = pd.Timestamp(self.window_end)
+
+        # Check if date is within window
         date_in_window = False
         if not pd.isna(date_val):
-            date_in_window = pd.Timestamp(self.today) <= pd.Timestamp(date_val) <= pd.Timestamp(self.date_window_end)
+            date_ts = pd.Timestamp(date_val)
+            date_in_window = today_ts <= date_ts <= window_end_ts
 
-        # Check if project start is within window
+        # Check if projet_start is within window
         start_in_window = False
         if not pd.isna(start_date_val):
-            start_in_window = pd.Timestamp(self.today) <= pd.Timestamp(start_date_val) <= pd.Timestamp(self.start_window_end)
+            start_ts = pd.Timestamp(start_date_val)
+            start_in_window = today_ts <= start_ts <= window_end_ts
 
-        # Must match at least one date criterion
-        if not date_in_window and not start_in_window:
+        # Must match at least one date criterion (OR logic)
+        if not (date_in_window or start_in_window):
             return False
 
         return True

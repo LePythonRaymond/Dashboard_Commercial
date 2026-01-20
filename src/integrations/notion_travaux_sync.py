@@ -2,7 +2,7 @@
 Notion TRAVAUX Projection Sync Module
 
 Syncs TRAVAUX projection proposals to a dedicated Notion database.
-Creates pages with proposal information for the "Projection Travaux prochains 4 mois" dashboard.
+Creates pages with proposal information for the "Projection Travaux prochains 12 mois" dashboard.
 """
 
 from typing import List, Dict, Any, Optional, Set
