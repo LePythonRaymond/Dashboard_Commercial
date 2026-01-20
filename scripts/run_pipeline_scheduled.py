@@ -81,6 +81,31 @@ def main():
         action="store_true",
         help="Test mode: redirect all emails to taddeo.carpinelli@merciraymond.fr"
     )
+    parser.add_argument(
+        "--skip-emails",
+        action="store_true",
+        help="Skip ALL emails (objectives + alerts). Still writes Google Sheets / Notion unless disabled.",
+    )
+    parser.add_argument(
+        "--skip-sheets",
+        action="store_true",
+        help="Skip Google Sheets writes.",
+    )
+    parser.add_argument(
+        "--skip-notion",
+        action="store_true",
+        help="Skip Notion alerts sync.",
+    )
+    parser.add_argument(
+        "--emails-only",
+        action="store_true",
+        help="Emails-only mode: skip Google Sheets writes and Notion sync, but still fetches data and sends emails.",
+    )
+    parser.add_argument(
+        "--live-snapshot",
+        action="store_true",
+        help='Write snapshot to stable sheet name "État actuel" (avoid creating dated snapshot sheets).',
+    )
 
     args = parser.parse_args()
 
@@ -106,7 +131,22 @@ def main():
     # Import and run the actual pipeline
     from scripts.run_pipeline import PipelineRunner
 
-    runner = PipelineRunner(dry_run=args.dry_run)
+    emails_enabled = not args.skip_emails
+    sheets_enabled = not args.skip_sheets
+    notion_enabled = not args.skip_notion
+
+    if args.emails_only:
+        sheets_enabled = False
+        notion_enabled = False
+        emails_enabled = True
+
+    runner = PipelineRunner(
+        dry_run=args.dry_run,
+        write_google_sheets=sheets_enabled,
+        send_emails=emails_enabled,
+        sync_notion=notion_enabled,
+        live_snapshot=args.live_snapshot,
+    )
     runner.test_mode = args.test
     results = runner.run()
 

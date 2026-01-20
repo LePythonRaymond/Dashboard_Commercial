@@ -57,14 +57,33 @@ class PipelineRunner:
     Orchestrates the complete Myrium data pipeline.
     """
 
-    def __init__(self, dry_run: bool = False):
+    LIVE_SNAPSHOT_SHEET_NAME = "État actuel"
+
+    def __init__(
+        self,
+        *,
+        dry_run: bool = False,
+        write_google_sheets: bool = True,
+        send_emails: bool = True,
+        sync_notion: bool = True,
+        live_snapshot: bool = False,
+    ):
         """
         Initialize the pipeline runner.
 
         Args:
             dry_run: If True, skip writing to external services (Sheets, Email, Notion)
+            write_google_sheets: If True, write views to Google Sheets
+            send_emails: If True, send objectives + alerts emails
+            sync_notion: If True, sync alerts to Notion
+            live_snapshot: If True, write snapshot to stable sheet name "État actuel"
         """
         self.dry_run = dry_run
+        # Fine-grained toggles (dry_run overrides these)
+        self.write_google_sheets = write_google_sheets and (not dry_run)
+        self.send_emails = send_emails and (not dry_run)
+        self.sync_notion = sync_notion and (not dry_run)
+        self.live_snapshot = live_snapshot
         self.start_time = datetime.now()
         self.results: Dict[str, Any] = {
             "started_at": self.start_time.isoformat(),
@@ -93,6 +112,9 @@ class PipelineRunner:
         logger.info("="*60)
         logger.info("MYRIUM PIPELINE STARTED")
         logger.info(f"Dry run: {self.dry_run}")
+        logger.info(
+            f"Options: sheets={self.write_google_sheets} | emails={self.send_emails} | notion={self.sync_notion} | live_snapshot={self.live_snapshot}"
+        )
         logger.info("="*60)
 
         try:
@@ -131,6 +153,12 @@ class PipelineRunner:
             logger.info("\n--- Step 5: Generating Views ---")
             view_generator = ViewGenerator()
             views = view_generator.generate(df_processed)
+
+            # Optional: stable snapshot for daily refresh (avoid creating dated sheets every day)
+            if self.live_snapshot:
+                views.snapshot.name = self.LIVE_SNAPSHOT_SHEET_NAME
+                views.sheet_names["snapshot"] = self.LIVE_SNAPSHOT_SHEET_NAME
+
             self._log_step("generate_views", "success", {
                 "snapshot_count": len(views.snapshot.data),
                 "sent_month_count": len(views.sent_month.data),
@@ -152,8 +180,9 @@ class PipelineRunner:
             # Step 7: Write to Google Sheets
             logger.info("\n--- Step 7: Writing to Google Sheets ---")
             sheets_client = None
-            if self.dry_run:
-                self._log_step("google_sheets", "skipped", {"reason": "dry_run"})
+            if not self.write_google_sheets:
+                reason = "dry_run" if self.dry_run else "disabled"
+                self._log_step("google_sheets", "skipped", {"reason": reason})
             else:
                 try:
                     sheets_client = GoogleSheetsClient()
@@ -172,8 +201,9 @@ class PipelineRunner:
 
             # Step 7.5: Send Objectives Management Email (sent on every pipeline run)
             logger.info("\n--- Step 7.5: Objectives Management Email ---")
-            if self.dry_run:
-                self._log_step("objectives_management_email", "skipped", {"reason": "dry_run"})
+            if not self.send_emails:
+                reason = "dry_run" if self.dry_run else "disabled"
+                self._log_step("objectives_management_email", "skipped", {"reason": reason})
             else:
                 try:
                     today = datetime.now()
@@ -244,8 +274,9 @@ class PipelineRunner:
 
             # Step 8: Send Email Alerts
             logger.info("\n--- Step 8: Sending Email Alerts ---")
-            if self.dry_run:
-                self._log_step("email_alerts", "skipped", {"reason": "dry_run"})
+            if not self.send_emails:
+                reason = "dry_run" if self.dry_run else "disabled"
+                self._log_step("email_alerts", "skipped", {"reason": reason})
             else:
                 try:
                     # Use test_mode if --test flag is set
@@ -259,8 +290,9 @@ class PipelineRunner:
 
             # Step 9: Sync Alerts to Notion Databases
             logger.info("\n--- Step 9: Syncing Alerts to Notion ---")
-            if self.dry_run:
-                self._log_step("notion_alerts_sync", "skipped", {"reason": "dry_run"})
+            if not self.sync_notion:
+                reason = "dry_run" if self.dry_run else "disabled"
+                self._log_step("notion_alerts_sync", "skipped", {"reason": reason})
             else:
                 try:
                     notion_alerts_sync = NotionAlertsSync()
@@ -316,6 +348,31 @@ def main():
         help="Run pipeline without writing to external services"
     )
     parser.add_argument(
+        "--skip-emails",
+        action="store_true",
+        help="Skip ALL emails (objectives + alerts). Still writes Google Sheets / Notion unless disabled.",
+    )
+    parser.add_argument(
+        "--skip-sheets",
+        action="store_true",
+        help="Skip Google Sheets writes (still allows reading Sheets for objectives email if emails enabled).",
+    )
+    parser.add_argument(
+        "--skip-notion",
+        action="store_true",
+        help="Skip Notion alerts sync.",
+    )
+    parser.add_argument(
+        "--emails-only",
+        action="store_true",
+        help="Emails-only mode: skip Google Sheets writes and Notion sync, but still fetches data and sends emails.",
+    )
+    parser.add_argument(
+        "--live-snapshot",
+        action="store_true",
+        help='Write snapshot to stable sheet name "État actuel" (avoid creating dated snapshot sheets).',
+    )
+    parser.add_argument(
         "--output",
         type=str,
         help="Path to save results JSON"
@@ -332,8 +389,25 @@ def main():
     logs_dir = PROJECT_ROOT / "logs"
     logs_dir.mkdir(exist_ok=True)
 
+    # Resolve modes
+    emails_enabled = not args.skip_emails
+    sheets_enabled = not args.skip_sheets
+    notion_enabled = not args.skip_notion
+
+    if args.emails_only:
+        # Explicit emails-only mode (still runs compute, but no external writes besides email sending)
+        sheets_enabled = False
+        notion_enabled = False
+        emails_enabled = True
+
     # Run pipeline
-    runner = PipelineRunner(dry_run=args.dry_run)
+    runner = PipelineRunner(
+        dry_run=args.dry_run,
+        write_google_sheets=sheets_enabled,
+        send_emails=emails_enabled,
+        sync_notion=notion_enabled,
+        live_snapshot=args.live_snapshot,
+    )
     runner.test_mode = args.test  # Set test mode flag
     results = runner.run()
 
