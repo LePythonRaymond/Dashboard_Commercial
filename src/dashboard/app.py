@@ -281,15 +281,17 @@ st.markdown("""
         margin: 2rem 0;
     }
 
-    /* Smaller expander buttons (for "🔎 Voir projets" triggers) */
-    div[data-testid="stExpander"] summary {
+    /* Smaller dialog trigger buttons */
+    button[kind="secondary"] {
         font-size: 0.7rem !important;
         padding: 0.2rem 0.4rem !important;
+        height: auto !important;
+        line-height: 1.1 !important;
         min-height: auto !important;
     }
 
-    /* Ensure expander content uses full width */
-    div[data-testid="stExpander"] [data-testid="stDataFrame"] {
+    /* Ensure dataframe in dialog uses full width */
+    div[data-testid="stDialog"] [data-testid="stDataFrame"] {
         width: 100% !important;
         max-width: 100% !important;
     }
@@ -2858,25 +2860,20 @@ def prepare_projects_table(df: pd.DataFrame, *, show_pondere: bool = False) -> p
     return result_df
 
 
-def render_projects_popover(
-    trigger_label: str,
-    projects_df: pd.DataFrame,
-    *,
-    show_pondere: bool = False,
-    header_text: Optional[str] = None
-) -> None:
-    """
-    Render an expander with project list table (alternative to popover for larger display).
+@st.dialog("Projets", width="large")
+def show_projects_dialog():
+    """Dialog function to display projects table - reads from session state."""
+    if "dialog_projects_data" not in st.session_state:
+        st.info("Aucun projet disponible")
+        return
 
-    Args:
-        trigger_label: Label for the expander trigger (must be unique)
-        projects_df: DataFrame with project data
-        show_pondere: Whether to show weighted amounts
-        header_text: Optional header text to display in expander
-    """
+    data = st.session_state.dialog_projects_data
+    projects_df = data.get("df", pd.DataFrame())
+    show_pondere = data.get("show_pondere", False)
+    header_text = data.get("header_text", None)
+
     if projects_df.empty:
-        with st.expander(trigger_label, expanded=False):
-            st.info("Aucun projet disponible")
+        st.info("Aucun projet disponible")
         return
 
     prepared_df = prepare_projects_table(projects_df, show_pondere=show_pondere)
@@ -2906,17 +2903,48 @@ def render_projects_popover(
     if 'probability' in prepared_df.columns:
         column_config['probability'] = st.column_config.TextColumn("Probabilité", width="small")
 
-    # Use expander instead of popover - expands inline with full width
-    with st.expander(trigger_label, expanded=False):
-        if header_text:
-            st.markdown(f"**{header_text}**")
-        st.markdown(f"**{len(projects_df)} projet(s)**")
-        st.dataframe(
-            prepared_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config=column_config if column_config else None
-        )
+    if header_text:
+        st.markdown(f"**{header_text}**")
+    st.markdown(f"**{len(projects_df)} projet(s)**")
+    st.dataframe(
+        prepared_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config=column_config if column_config else None
+    )
+
+
+def render_projects_popover(
+    trigger_label: str,
+    projects_df: pd.DataFrame,
+    *,
+    show_pondere: bool = False,
+    header_text: Optional[str] = None
+) -> None:
+    """
+    Render a button that opens a dialog with project list table.
+
+    Args:
+        trigger_label: Label for the button (must be unique)
+        projects_df: DataFrame with project data
+        show_pondere: Whether to show weighted amounts
+        header_text: Optional header text to display in dialog
+    """
+    if projects_df.empty:
+        st.button(trigger_label, disabled=True, use_container_width=True)
+        return
+
+    # Create a unique key for this button
+    button_key = f"dialog_btn_{hash(str(header_text) + str(id(projects_df)))}"
+
+    # Store data and open dialog when button is clicked
+    if st.button(trigger_label, use_container_width=True, key=button_key):
+        st.session_state.dialog_projects_data = {
+            "df": projects_df.copy(),
+            "show_pondere": show_pondere,
+            "header_text": header_text
+        }
+        show_projects_dialog()
 
 
 def create_bu_kpi_row(
