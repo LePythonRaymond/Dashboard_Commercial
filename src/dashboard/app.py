@@ -684,6 +684,104 @@ def get_typologie_amounts_for_bu(
     return result
 
 
+def filter_projects_for_typologie_bu(
+    df: pd.DataFrame,
+    bu: str,
+    typ: str
+) -> pd.DataFrame:
+    """
+    Filter projects that belong to a specific typologie within a BU.
+
+    Matches the counting logic from get_typologie_amounts_for_bu:
+    - TS special case: if typ=='TS' and bu=='MAINTENANCE', include all rows where primary=='TS'
+    - Otherwise: include rows where row_bu==bu and typ in tags
+
+    Args:
+        df: DataFrame with cf_bu and cf_typologie_de_devis columns
+        bu: Business Unit name
+        typ: Typologie name
+
+    Returns:
+        Filtered DataFrame with matching projects
+    """
+    if df.empty or 'cf_bu' not in df.columns or 'cf_typologie_de_devis' not in df.columns:
+        return pd.DataFrame()
+
+    matching_indices = []
+
+    for idx, row in df.iterrows():
+        tags, primary = allocate_typologie_for_row(row)
+        row_bu = str(row.get('cf_bu', '')).strip()
+
+        # Special case: TS under MAINTENANCE
+        if typ == 'TS' and bu == 'MAINTENANCE':
+            if primary == 'TS' and 'TS' in tags:
+                matching_indices.append(idx)
+        else:
+            # Normal case: BU must match and typ in tags
+            if row_bu == bu and typ in tags:
+                matching_indices.append(idx)
+
+    if not matching_indices:
+        return pd.DataFrame()
+
+    return df.loc[matching_indices].copy()
+
+
+def filter_projects_for_typologie_bu_production(
+    df: pd.DataFrame,
+    production_year: int,
+    bu: str,
+    typ: str
+) -> pd.DataFrame:
+    """
+    Filter projects for a specific typologie within a BU for production year.
+
+    Matches the counting logic from get_production_typologie_amounts_for_bu.
+
+    Args:
+        df: DataFrame with cf_bu, cf_typologie_de_devis and production year columns
+        production_year: Target production year
+        bu: Business Unit name
+        typ: Typologie name
+
+    Returns:
+        Filtered DataFrame with matching projects
+    """
+    if df.empty or 'cf_typologie_de_devis' not in df.columns:
+        return pd.DataFrame()
+
+    total_col = f"Montant Total {production_year}"
+    if total_col not in df.columns:
+        return pd.DataFrame()
+
+    has_bu = 'cf_bu' in df.columns
+    matching_indices = []
+
+    for idx, row in df.iterrows():
+        tags, primary = allocate_typologie_for_row(row)
+        row_bu = str(row.get('cf_bu', 'AUTRE')).strip() if has_bu else 'AUTRE'
+
+        # Check if this row has production in this year
+        total_amount = float(row.get(total_col, 0) or 0)
+        if total_amount <= 0:
+            continue
+
+        # Special case: TS under MAINTENANCE
+        if typ == 'TS' and bu == 'MAINTENANCE':
+            if primary == 'TS' and 'TS' in tags:
+                matching_indices.append(idx)
+        else:
+            # Normal case: BU must match and typ in tags
+            if row_bu == bu and typ in tags:
+                matching_indices.append(idx)
+
+    if not matching_indices:
+        return pd.DataFrame()
+
+    return df.loc[matching_indices].copy()
+
+
 def get_ts_typologie_total(df: pd.DataFrame, include_weighted: bool = False) -> Dict[str, float]:
     """
     Calculate TS(typologie) total - based on primary typologie == 'TS' (from tag or title).
@@ -2336,15 +2434,25 @@ def plot_production_typologie_bar(df: pd.DataFrame, production_year: int, title:
 # PRODUCTION TABS UI COMPONENTS
 # =============================================================================
 
-def create_production_bu_kpi_row(bu_amounts: Dict[str, Dict[str, float]], show_pondere: bool = False) -> None:
+def create_production_bu_kpi_row(
+    df: pd.DataFrame,
+    production_year: int,
+    bu_amounts: Dict[str, Dict[str, float]],
+    show_pondere: bool = False,
+    key_prefix: str = ""
+) -> None:
     """
-    Create a row of BU-colored KPI cards for production year amounts.
+    Create a row of BU-colored KPI cards for production year amounts with popovers.
 
     Args:
+        df: DataFrame with production year columns
+        production_year: Target production year
         bu_amounts: Dictionary from get_production_bu_amounts()
         show_pondere: Whether to show Total / Pondéré format
+        key_prefix: Unique prefix for widget keys
     """
     cols = st.columns(len(BU_ORDER))
+    total_col = f'Montant Total {production_year}'
 
     for i, bu in enumerate(BU_ORDER):
         with cols[i]:
@@ -2360,6 +2468,17 @@ def create_production_bu_kpi_row(bu_amounts: Dict[str, Dict[str, float]], show_p
 
             label = f"{bu} ({count} projets)"
             create_kpi_card(label, value, "💼", bu)
+
+            # Add popover with project list
+            if not df.empty and 'cf_bu' in df.columns and total_col in df.columns:
+                bu_projects = df[(df['cf_bu'] == bu) & (df[total_col] > 0)].copy()
+                if not bu_projects.empty:
+                    render_projects_popover(
+                        f"🔎 Voir projets · {production_year} · BU={bu}",
+                        bu_projects,
+                        show_pondere=show_pondere,
+                        header_text=f"Projets · Production {production_year} · BU={bu}"
+                    )
 
 
 def create_production_typologie_kpi_row(type_amounts: Dict[str, Dict[str, float]], show_pondere: bool = False, max_items: int = 5) -> None:
@@ -2437,6 +2556,16 @@ def render_single_production_view(
             create_kpi_card("CA Pondéré", f"{totals.get('pondere', 0):,.0f}€", "⚖️", "default")
         with col3:
             create_kpi_card("Projets concernés", f"{totals['count']}", "📁", "default")
+            # Add popover for projects
+            if not df.empty and total_col in df.columns:
+                projects = df[df[total_col] > 0].copy()
+                if not projects.empty:
+                    render_projects_popover(
+                        f"🔎 Voir projets · Production {production_year}",
+                        projects,
+                        show_pondere=show_pondere,
+                        header_text=f"Projets · Production {production_year}"
+                    )
         with col4:
             create_kpi_card("Moyenne mensuelle", f"{production_monthly_avg:,.0f}€", "📅", "default")
     else:
@@ -2445,6 +2574,16 @@ def render_single_production_view(
             create_kpi_card("CA à produire", f"{totals['total']:,.0f}€", "💰", "default")
         with col2:
             create_kpi_card("Projets concernés", f"{totals['count']}", "📁", "default")
+            # Add popover for projects
+            if not df.empty and total_col in df.columns:
+                projects = df[df[total_col] > 0].copy()
+                if not projects.empty:
+                    render_projects_popover(
+                        f"🔎 Voir projets · Production {production_year}",
+                        projects,
+                        show_pondere=show_pondere,
+                        header_text=f"Projets · Production {production_year}"
+                    )
         with col3:
             create_kpi_card("Moyenne mensuelle", f"{production_monthly_avg:,.0f}€", "📅", "default")
 
@@ -2453,7 +2592,7 @@ def render_single_production_view(
     # === BU Amounts ===
     st.markdown('<div class="section-header">💼 Montants par Business Unit</div>', unsafe_allow_html=True)
     bu_amounts = get_production_bu_amounts(df, production_year, include_pondere=show_pondere)
-    create_production_bu_kpi_row(bu_amounts, show_pondere=show_pondere)
+    create_production_bu_kpi_row(df, production_year, bu_amounts, show_pondere=show_pondere, key_prefix=key_prefix)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -2626,8 +2765,154 @@ def create_kpi_card(label: str, value: str, icon: str = "📊", bu_class: str = 
     """, unsafe_allow_html=True)
 
 
-def create_bu_kpi_row(bu_amounts: Dict[str, Dict[str, float]], show_pondere: bool = False, show_count: bool = True) -> None:
-    """Create a row of BU-colored KPI cards with project counts."""
+def build_furious_url(proposal_id: str) -> str:
+    """
+    Build Furious CRM URL from proposal ID.
+
+    Args:
+        proposal_id: The proposal ID from Furious
+
+    Returns:
+        Full URL to the proposal in Furious, or empty string if no ID
+    """
+    if not proposal_id or pd.isna(proposal_id):
+        return ''
+    return f"https://merciraymond.furious-squad.com/compta.php?view=5&cherche={proposal_id}"
+
+
+def prepare_projects_table(df: pd.DataFrame, *, show_pondere: bool = False) -> pd.DataFrame:
+    """
+    Prepare a minimal projects table for display in popover.
+
+    Args:
+        df: DataFrame with project data
+        show_pondere: Whether to include weighted amount column
+
+    Returns:
+        DataFrame with minimal columns formatted for display
+    """
+    if df.empty:
+        return pd.DataFrame()
+
+    # Select minimal columns
+    display_cols = ['title', 'company_name', 'amount']
+    if show_pondere and 'amount_pondere' in df.columns:
+        display_cols.append('amount_pondere')
+    display_cols.extend(['probability', 'date', 'projet_start', 'projet_stop', 'cf_bu', 'cf_typologie_de_devis'])
+    if 'id' in df.columns:
+        display_cols.append('id')
+
+    # Filter to only existing columns
+    display_cols = [c for c in display_cols if c in df.columns]
+
+    # Create a copy for formatting
+    result_df = df[display_cols].copy()
+
+    # Format date columns to DD/MM/YYYY
+    date_cols = ['date', 'projet_start', 'projet_stop']
+    for col in date_cols:
+        if col in result_df.columns:
+            result_df[col] = pd.to_datetime(result_df[col], errors='coerce')
+            result_df[col] = result_df[col].apply(
+                lambda x: x.strftime('%d/%m/%Y') if pd.notna(x) else ''
+            )
+
+    # Format amount columns
+    if 'amount' in result_df.columns:
+        result_df['amount'] = result_df['amount'].apply(lambda x: f"{float(x):,.0f}€" if pd.notna(x) else '')
+    if 'amount_pondere' in result_df.columns:
+        result_df['amount_pondere'] = result_df['amount_pondere'].apply(
+            lambda x: f"{float(x):,.0f}€" if pd.notna(x) else ''
+        )
+
+    # Format probability
+    if 'probability' in result_df.columns:
+        result_df['probability'] = result_df['probability'].apply(
+            lambda x: f"{float(x):.0f}%" if pd.notna(x) else ''
+        )
+
+    # Create furious_url column if id exists
+    if 'id' in result_df.columns:
+        result_df['furious_url'] = result_df['id'].apply(build_furious_url)
+        # Reorder to put furious_url after id
+        cols = result_df.columns.tolist()
+        if 'id' in cols and 'furious_url' in cols:
+            id_idx = cols.index('id')
+            cols.remove('furious_url')
+            cols.insert(id_idx + 1, 'furious_url')
+            result_df = result_df[cols]
+
+    return result_df
+
+
+def render_projects_popover(
+    trigger_label: str,
+    projects_df: pd.DataFrame,
+    *,
+    show_pondere: bool = False,
+    header_text: Optional[str] = None
+) -> None:
+    """
+    Render a popover with project list table.
+
+    Args:
+        trigger_label: Label for the popover trigger button (must be unique)
+        projects_df: DataFrame with project data
+        show_pondere: Whether to show weighted amounts
+        header_text: Optional header text to display in popover
+    """
+    if projects_df.empty:
+        with st.popover(trigger_label, use_container_width=True):
+            st.info("Aucun projet disponible")
+        return
+
+    prepared_df = prepare_projects_table(projects_df, show_pondere=show_pondere)
+
+    # Build column config for dataframe
+    column_config = {}
+
+    # Configure furious_url as LinkColumn if present
+    if 'furious_url' in prepared_df.columns:
+        column_config['furious_url'] = st.column_config.LinkColumn(
+            "🔗 Furious",
+            help="Ouvrir dans Furious CRM",
+            max_chars=100
+        )
+
+    # Configure amount columns
+    if 'amount' in prepared_df.columns:
+        column_config['amount'] = st.column_config.TextColumn("Montant", width="medium")
+    if 'amount_pondere' in prepared_df.columns:
+        column_config['amount_pondere'] = st.column_config.TextColumn("Montant Pondéré", width="medium")
+
+    # Configure other columns
+    if 'title' in prepared_df.columns:
+        column_config['title'] = st.column_config.TextColumn("Titre", width="large")
+    if 'company_name' in prepared_df.columns:
+        column_config['company_name'] = st.column_config.TextColumn("Client", width="medium")
+    if 'probability' in prepared_df.columns:
+        column_config['probability'] = st.column_config.TextColumn("Probabilité", width="small")
+
+    with st.popover(trigger_label, use_container_width=True):
+        if header_text:
+            st.markdown(f"**{header_text}**")
+        st.markdown(f"**{len(projects_df)} projet(s)**")
+        st.dataframe(
+            prepared_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config=column_config if column_config else None
+        )
+
+
+def create_bu_kpi_row(
+    df: pd.DataFrame,
+    bu_amounts: Dict[str, Dict[str, float]],
+    show_pondere: bool = False,
+    show_count: bool = True,
+    key_prefix: str = ""
+) -> None:
+    """Create a row of BU-colored KPI cards with project counts and popovers."""
     cols = st.columns(len(BU_ORDER))
 
     for i, bu in enumerate(BU_ORDER):
@@ -2645,6 +2930,18 @@ def create_bu_kpi_row(bu_amounts: Dict[str, Dict[str, float]], show_pondere: boo
                 label = f"{bu} ({count} projets)"
 
             create_kpi_card(label, value, "💼", bu)
+
+            # Add popover with project list
+            if not df.empty and 'cf_bu' in df.columns:
+                bu_projects = df[df['cf_bu'] == bu].copy()
+                if not bu_projects.empty:
+                    popover_key = f"{key_prefix}_bu_{bu}" if key_prefix else f"bu_{bu}"
+                    render_projects_popover(
+                        f"🔎 Voir projets · BU={bu}",
+                        bu_projects,
+                        show_pondere=show_pondere,
+                        header_text=f"Projets · BU={bu}"
+                    )
 
 
 def create_typologie_kpi_row(type_amounts: Dict[str, Dict[str, float]], show_pondere: bool = False, max_items: int = 5) -> None:
@@ -2730,6 +3027,16 @@ def create_bu_grouped_typologie_blocks(
                 label = f"{typ} ({int(count)} projets)"
                 # Use BU-themed cards (matches screenshot style and avoids CSS mismatch issues)
                 create_kpi_card(label, value, "🏷️", bu.lower())
+
+                # Add popover with project list
+                typ_projects = filter_projects_for_typologie_bu(df, bu, typ)
+                if not typ_projects.empty:
+                    render_projects_popover(
+                        f"🔎 Voir projets · BU={bu} · Typ={typ}",
+                        typ_projects,
+                        show_pondere=show_pondere,
+                        header_text=f"Projets · BU={bu} · Typologie={typ}"
+                    )
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -2853,6 +3160,16 @@ def create_bu_grouped_typologie_blocks_production(
 
                 label = f"{typ} ({int(count)} projets)"
                 create_kpi_card(label, value, "🏷️", bu.lower())
+
+                # Add popover with project list
+                typ_projects = filter_projects_for_typologie_bu_production(df, production_year, bu, typ)
+                if not typ_projects.empty:
+                    render_projects_popover(
+                        f"🔎 Voir projets · {production_year} · BU={bu} · Typ={typ}",
+                        typ_projects,
+                        show_pondere=show_pondere,
+                        header_text=f"Projets · Production {production_year} · BU={bu} · Typologie={typ}"
+                    )
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -3872,6 +4189,14 @@ def main():
                 create_kpi_card("CA Pondéré", f"{total_pondere:,.0f}€", "⚖️", "default")
             with col3:
                 create_kpi_card("Nombre de Projets", f"{total_count}", "📁", "default")
+                # Add popover for all projects
+                if not df.empty:
+                    render_projects_popover(
+                        "🔎 Voir tous les projets",
+                        df,
+                        show_pondere=show_pondere,
+                        header_text=f"Tous les projets · {selected_year}"
+                    )
             with col4:
                 create_kpi_card("Moyenne mensuelle", f"{monthly_avg:,.0f}€", "📅", "default")
         else:
@@ -3880,6 +4205,14 @@ def main():
                 create_kpi_card("CA Total", f"{total_amount:,.0f}€", "💰", "default")
             with col2:
                 create_kpi_card("Nombre de Projets", f"{total_count}", "📁", "default")
+                # Add popover for all projects
+                if not df.empty:
+                    render_projects_popover(
+                        "🔎 Voir tous les projets",
+                        df,
+                        show_pondere=show_pondere,
+                        header_text=f"Tous les projets · {selected_year}"
+                    )
             with col3:
                 create_kpi_card("Moyenne mensuelle", f"{monthly_avg:,.0f}€", "📅", "default")
 
@@ -3887,7 +4220,7 @@ def main():
 
         # === BU TOTALS ===
         st.markdown('<div class="section-header">💼 Montants par Business Unit</div>', unsafe_allow_html=True)
-        create_bu_kpi_row(bu_amounts, show_pondere=show_pondere)
+        create_bu_kpi_row(df, bu_amounts, show_pondere=show_pondere, key_prefix="vue_globale")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -4026,6 +4359,14 @@ def main():
                         create_kpi_card("CA Pondéré", f"{month_pondere:,.0f}€", "⚖️", "default")
                     with col3:
                         create_kpi_card("Projets", f"{month_count}", "📁", "default")
+                        # Add popover for month projects
+                        if not month_df.empty:
+                            render_projects_popover(
+                                f"🔎 Voir projets · {selected_month}",
+                                month_df,
+                                show_pondere=show_pondere,
+                                header_text=f"Projets · {selected_month}"
+                            )
                     with col4:
                         create_kpi_card("Moyenne du mois", f"{month_avg_per_bu:,.0f}€", "📅", "default")
                 else:
@@ -4034,6 +4375,14 @@ def main():
                         create_kpi_card("CA du mois", f"{month_total:,.0f}€", "💰", "default")
                     with col2:
                         create_kpi_card("Projets", f"{month_count}", "📁", "default")
+                        # Add popover for month projects
+                        if not month_df.empty:
+                            render_projects_popover(
+                                f"🔎 Voir projets · {selected_month}",
+                                month_df,
+                                show_pondere=show_pondere,
+                                header_text=f"Projets · {selected_month}"
+                            )
                     with col3:
                         create_kpi_card("Moyenne du mois", f"{month_avg_per_bu:,.0f}€", "📅", "default")
 
@@ -4042,7 +4391,7 @@ def main():
                 # === BU AMOUNTS ===
                 st.markdown('<div class="section-header">💼 Montants par BU</div>', unsafe_allow_html=True)
                 month_bu_amounts = get_bu_amounts(month_df, include_weighted=show_pondere)
-                create_bu_kpi_row(month_bu_amounts, show_pondere=show_pondere)
+                create_bu_kpi_row(month_df, month_bu_amounts, show_pondere=show_pondere, key_prefix=f"vue_mensuelle_{selected_month.replace(' ', '_')}")
 
                 st.markdown("<br>", unsafe_allow_html=True)
 

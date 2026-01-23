@@ -78,6 +78,7 @@ The original system was built in **n8n** (workflow automation tool) with Python 
 5. **Resource Planning**
    - Sync TRAVAUX projects to Notion for Gantt visualization
    - Identify high-probability opportunities to fill calendar gaps (Projection)
+   - **TRAVAUX Projection**: Rolling 365-day window with OR logic (`date` OR `projet_start`), probability threshold 25%
 
 ### 2.2 Success Metrics
 
@@ -230,11 +231,12 @@ For each proposal, the system generates:
 
 #### Commercial Follow-up Alert
 - **Scope**: Proposals with status `STATUS_WAITING`
-- **Time Window**: Previous Month 1st to Today + 60 Days
+- **Time Window**: Previous Month 1st to Today + 60 Days (default)
 - **Date Reference**:
   - **CONCEPTION**: Uses `date`
   - **TRAVAUX/MAINTENANCE**: Uses OR logic (`date` <= window OR `projet_start` <= window)
 - **VIP Routing**: If `assigned_to` contains a VIP, assign alert ONLY to that VIP
+- **Owner-Specific Windows (Notion Only)**: Vincent and Adélaïde get 365-day forward windows in Notion sync (emails still use 60 days)
 
 **Implementation**: `src/processing/alerts.py`
 
@@ -364,6 +366,7 @@ myrium/
 - **Schema-Aware Sync**: Only sets properties that exist in database schema (prevents 400 errors)
 - **Property Preservation**: Preserves user-edited notes/checkboxes during sync
 - **Dual API Support**: Compatible with old and new Notion SDK versions (prevents duplicates)
+- **Owner-Specific Follow-up Windows**: Vincent and Adélaïde get 365-day forward windows in Notion (emails use 60 days)
 
 ### 7.7 BI Dashboard
 - **Production Tabs**: "À produire {Year}" with cross-year aggregation
@@ -394,7 +397,9 @@ NOTION_DATABASE_ID=...
 Defined in `config/settings.py`:
 - **VIP Commercials**: List of VIP sales reps
 - **BU Keywords**: Mapping keywords to business units
-- **Alert Config**: Follow-up window (60 days), Excluded owners
+- **Alert Config**: Follow-up window (60 days default, 365 days for Vincent/Adélaïde in Notion), Excluded owners
+- **TRAVAUX Projection**: Start window (365 days), Probability threshold (25%)
+- **Notion Follow-up Overrides**: `NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER` dict for owner-specific windows
 
 ---
 
@@ -435,6 +440,9 @@ The pipeline supports granular flags to control execution components:
 ```bash
 0 23 * * 0 cd /path/to/myrium && /path/to/venv/bin/python3 scripts/run_travaux_pipeline.py >> logs/travaux_cron.log 2>&1
 ```
+- Filters TRAVAUX proposals with probability ≥ 25% and `date` OR `projet_start` within rolling 365 days
+- Sends projection email to Mathilde with Guillaume and Vincent in CC
+- Syncs to Notion TRAVAUX projection database
 
 ### 9.3 Dashboard Deployment
 ```bash
@@ -520,6 +528,62 @@ See original documentation for details on performance, security, error handling,
 
 **Impact**: Notion sync now handles API changes gracefully and prevents 400 errors when properties are removed from databases. Schema-aware property building ensures compatibility with different database configurations. Users can safely remove `Responsable` property and add `Commercial`/`Chef de projet` without breaking sync functionality.
 
+### 18.2 Date Window Updates: TRAVAUX Projection & VIP Notion Follow-ups (January 2026)
+
+**Enhancement**: Extended date windows for TRAVAUX projection and owner-specific Notion follow-up alerts to improve long-term planning visibility.
+
+**TRAVAUX Projection Changes**:
+- **Rolling 365-day window**: Changed from 30/120-day windows to a unified rolling 365-day window
+- **OR logic**: Proposals included if `date` OR `projet_start` falls within the 365-day window (today → today + 365 days)
+- **Probability threshold**: Lowered from 50% to 25% (configurable via `TRAVAUX_PROJECTION_PROBABILITY_THRESHOLD`)
+- **Email copy updated**: Changed from "prochains 4 mois" to "prochains 12 mois" with OR logic description
+
+**VIP Notion Follow-up Windows**:
+- **Owner-specific forward windows**: Vincent (`vincent.delavarende`) and Adélaïde (`adelaide.patureau`) now get 365-day forward windows in Notion follow-up alerts
+- **Email alerts unchanged**: Email alerts continue using the default 60-day forward window for all owners
+- **Dual alert generation**: Main pipeline now generates alerts twice:
+  - `alerts_for_email`: Default 60-day window (for email sending)
+  - `alerts_for_notion`: Owner-specific overrides (365 days for VIPs, 60 days for others)
+- **Backward window unchanged**: All alerts still require `date >= 1st of previous month` (backward check)
+
+**Configuration**:
+- `TRAVAUX_PROJECTION_START_WINDOW = 365` (replaces previous `TRAVAUX_PROJECTION_DATE_WINDOW` and `TRAVAUX_PROJECTION_START_WINDOW`)
+- `NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER`: Dict mapping owner identifiers to custom forward window days
+- `TRAVAUX_PROJECTION_PROBABILITY_THRESHOLD = 25` (lowered from 50)
+
+**Code Changes**:
+- `src/processing/travaux_projection.py`:
+  - Updated `_matches_criteria()` to use OR logic with `date` and `projet_start`
+  - Both fields use the same 365-day rolling window
+- `src/processing/alerts.py`:
+  - Added `followup_days_forward_by_owner` parameter to `AlertsGenerator.__init__()`
+  - Added `_get_window_end_for_owner()` method for owner-specific window calculation
+  - Updated `_needs_followup()` to use owner-specific forward windows
+- `scripts/run_pipeline.py`:
+  - Generates alerts twice: one for emails (default 60d), one for Notion (owner-specific)
+  - Email alerts use `alerts_for_email`, Notion sync uses `alerts_for_notion`
+- `src/integrations/email_sender.py`:
+  - Updated TRAVAUX projection email summary to reflect OR logic and dynamic threshold
+
+**Testing**:
+- Added `tests/test_travaux_projection_window.py` (11 tests) covering:
+  - OR logic with `date` and `projet_start`
+  - Boundary conditions (today, 365-day limit)
+  - Missing date handling
+  - Other filters (BU, probability, status)
+- Added `tests/test_alerts_followup_owner_windows.py` (7 tests) covering:
+  - Default 60-day window behavior
+  - VIP 365-day window behavior
+  - Regular users still using default
+  - CONCEPTION date field handling with owner overrides
+  - Backward window still applying
+
+**Impact**:
+- TRAVAUX projection now captures proposals up to 12 months ahead, improving long-term resource planning
+- VIP commercial teams (Vincent/Adélaïde) see extended follow-up opportunities in Notion (365 days) while email alerts remain focused on near-term (60 days)
+- Lower probability threshold (25%) increases proposal coverage in TRAVAUX projection
+- All existing tests pass, backward compatible with email alert behavior
+
 ---
 
 ## 17. Conclusion
@@ -535,7 +599,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.27
+**Document Version**: 1.28
 **Last Updated**: January 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System
