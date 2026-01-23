@@ -46,9 +46,9 @@ class NotionUserMapper:
 
     @property
     def client(self) -> Client:
-        """Get or create Notion client."""
+        """Get or create Notion client (Notion API 2025-09-03)."""
         if self._client is None:
-            self._client = Client(auth=self.api_key)
+            self._client = Client(auth=self.api_key, notion_version="2025-09-03")
         return self._client
 
     @staticmethod

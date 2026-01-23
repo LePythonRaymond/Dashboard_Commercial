@@ -68,9 +68,9 @@ class NotionTravauxSync:
 
     @property
     def client(self) -> Client:
-        """Get or create Notion client."""
+        """Get or create Notion client (Notion API 2025-09-03)."""
         if self._client is None:
-            self._client = Client(auth=self.api_key)
+            self._client = Client(auth=self.api_key, notion_version="2025-09-03")
         return self._client
 
     def _get_data_source_id_for_database(self) -> str:
@@ -421,10 +421,16 @@ class NotionTravauxSync:
             return None
 
         try:
-            response = self.client.pages.create(
-                parent={"database_id": self.database_id},
-                properties=properties
-            )
+            # Notion API 2025-09-03: databases can contain multiple data sources.
+            # Creating pages should target the data source when available.
+            parent: Dict[str, Any]
+            try:
+                ds_id = self._get_data_source_id_for_database()
+                parent = {"data_source_id": ds_id}
+            except Exception:
+                parent = {"database_id": self.database_id}
+
+            response = self.client.pages.create(parent=parent, properties=properties)
             return response.get("id")
         except Exception as e:
             # Log detailed error for debugging
