@@ -298,6 +298,42 @@ st.markdown("""
         line-height: 1.1 !important;
         min-height: auto !important;
     }
+
+    /* Larger popover containers - at least 4x larger */
+    div[data-testid="stPopover"] > div {
+        max-width: 95vw !important;
+        width: 95vw !important;
+        min-width: 1200px !important;
+    }
+
+    /* Popover content container - make it much wider and taller */
+    div[data-testid="stPopover"] [data-baseweb="popover"] {
+        max-width: 95vw !important;
+        width: 95vw !important;
+        min-width: 1200px !important;
+        max-height: 85vh !important;
+        height: auto !important;
+    }
+
+    /* Popover inner content */
+    div[data-testid="stPopover"] [data-baseweb="popover"] > div {
+        max-width: 100% !important;
+        width: 100% !important;
+        max-height: 85vh !important;
+        overflow-y: auto !important;
+    }
+
+    /* Ensure dataframe in popover uses full width and is scrollable */
+    div[data-testid="stPopover"] [data-testid="stDataFrame"] {
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+
+    /* Make popover content area scrollable if needed */
+    div[data-testid="stPopover"] [data-baseweb="popover"] [data-testid="stVerticalBlock"] {
+        max-height: 80vh !important;
+        overflow-y: auto !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
