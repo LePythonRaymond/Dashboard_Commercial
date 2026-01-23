@@ -281,44 +281,15 @@ st.markdown("""
         margin: 2rem 0;
     }
 
-    /* Smaller popover buttons */
-    button[kind="secondary"] {
+    /* Smaller expander buttons (for "🔎 Voir projets" triggers) */
+    div[data-testid="stExpander"] summary {
         font-size: 0.7rem !important;
         padding: 0.2rem 0.4rem !important;
-        height: auto !important;
-        line-height: 1.1 !important;
         min-height: auto !important;
     }
 
-    /* Target popover buttons more specifically */
-    div[data-testid="stPopover"] button {
-        font-size: 0.7rem !important;
-        padding: 0.2rem 0.4rem !important;
-        height: auto !important;
-        line-height: 1.1 !important;
-        min-height: auto !important;
-    }
-
-    /* Larger popover panel (the window that opens after clicking the button) */
-    /* NOTE: Streamlit renders the popover content in a portal, so it may not be a */
-    /* descendant of div[data-testid="stPopover"]. We therefore target BaseWeb's */
-    /* popover dialog globally, but only role="dialog" to avoid tooltips/menus. */
-    div[data-baseweb="popover"][role="dialog"] {
-        width: min(95vw, 1600px) !important;
-        max-width: 95vw !important;
-        max-height: 90vh !important;
-        overflow: auto !important;
-    }
-
-    /* Inner wrapper should also expand */
-    div[data-baseweb="popover"][role="dialog"] > div {
-        width: 100% !important;
-        max-width: 100% !important;
-        max-height: 90vh !important;
-    }
-
-    /* Ensure dataframe inside the dialog uses full width */
-    div[data-baseweb="popover"][role="dialog"] [data-testid="stDataFrame"] {
+    /* Ensure expander content uses full width */
+    div[data-testid="stExpander"] [data-testid="stDataFrame"] {
         width: 100% !important;
         max-width: 100% !important;
     }
@@ -2895,16 +2866,16 @@ def render_projects_popover(
     header_text: Optional[str] = None
 ) -> None:
     """
-    Render a popover with project list table.
+    Render an expander with project list table (alternative to popover for larger display).
 
     Args:
-        trigger_label: Label for the popover trigger button (must be unique)
+        trigger_label: Label for the expander trigger (must be unique)
         projects_df: DataFrame with project data
         show_pondere: Whether to show weighted amounts
-        header_text: Optional header text to display in popover
+        header_text: Optional header text to display in expander
     """
     if projects_df.empty:
-        with st.popover(trigger_label, use_container_width=True):
+        with st.expander(trigger_label, expanded=False):
             st.info("Aucun projet disponible")
         return
 
@@ -2935,7 +2906,8 @@ def render_projects_popover(
     if 'probability' in prepared_df.columns:
         column_config['probability'] = st.column_config.TextColumn("Probabilité", width="small")
 
-    with st.popover(trigger_label, use_container_width=True):
+    # Use expander instead of popover - expands inline with full width
+    with st.expander(trigger_label, expanded=False):
         if header_text:
             st.markdown(f"**{header_text}**")
         st.markdown(f"**{len(projects_df)} projet(s)**")
