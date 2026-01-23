@@ -290,34 +290,7 @@ st.markdown("""
         min-height: auto !important;
     }
 
-    /* Target popover buttons more specifically */
-    div[data-testid="stPopover"] button {
-        font-size: 0.7rem !important;
-        padding: 0.2rem 0.4rem !important;
-        height: auto !important;
-        line-height: 1.1 !important;
-        min-height: auto !important;
-    }
-
-    /* Larger popover panel (the window that opens after clicking the button) */
-    div[data-testid="stPopover"] [data-baseweb="popover"] {
-        width: min(95vw, 1200px) !important;
-        max-width: 95vw !important;
-        max-height: 85vh !important;
-        overflow: auto !important;
-    }
-
-    /* Ensure the popover inner wrapper also uses the full width */
-    div[data-testid="stPopover"] [data-baseweb="popover"] > div {
-        width: 100% !important;
-        max-width: 100% !important;
-    }
-
-    /* Ensure dataframe in popover uses full width */
-    div[data-testid="stPopover"] [data-testid="stDataFrame"] {
-        width: 100% !important;
-        max-width: 100% !important;
-    }
+    /* NOTE: Streamlit popovers don't reliably support sizing. We use st.dialog for the large view. */
 </style>
 """, unsafe_allow_html=True)
 
@@ -2883,6 +2856,54 @@ def prepare_projects_table(df: pd.DataFrame, *, show_pondere: bool = False) -> p
     return result_df
 
 
+@st.dialog("Projets", width="large")
+def _show_projects_dialog() -> None:
+    """Large modal to display projects table (reads from session state)."""
+    data = st.session_state.get("dialog_projects_data")
+    if not data:
+        st.info("Aucun projet disponible")
+        return
+
+    projects_df = data.get("df", pd.DataFrame())
+    show_pondere = bool(data.get("show_pondere", False))
+    header_text = data.get("header_text")
+
+    if projects_df is None or projects_df.empty:
+        st.info("Aucun projet disponible")
+        return
+
+    prepared_df = prepare_projects_table(projects_df, show_pondere=show_pondere)
+
+    # Build column config for dataframe
+    column_config = {}
+    if 'furious_url' in prepared_df.columns:
+        column_config['furious_url'] = st.column_config.LinkColumn(
+            "🔗 Furious",
+            help="Ouvrir dans Furious CRM",
+            max_chars=100
+        )
+    if 'amount' in prepared_df.columns:
+        column_config['amount'] = st.column_config.TextColumn("Montant", width="medium")
+    if 'amount_pondere' in prepared_df.columns:
+        column_config['amount_pondere'] = st.column_config.TextColumn("Montant Pondéré", width="medium")
+    if 'title' in prepared_df.columns:
+        column_config['title'] = st.column_config.TextColumn("Titre", width="large")
+    if 'company_name' in prepared_df.columns:
+        column_config['company_name'] = st.column_config.TextColumn("Client", width="medium")
+    if 'probability' in prepared_df.columns:
+        column_config['probability'] = st.column_config.TextColumn("Probabilité", width="small")
+
+    if header_text:
+        st.markdown(f"**{header_text}**")
+    st.markdown(f"**{len(projects_df)} projet(s)**")
+    st.dataframe(
+        prepared_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config=column_config if column_config else None
+    )
+
+
 def render_projects_popover(
     trigger_label: str,
     projects_df: pd.DataFrame,
@@ -2891,56 +2912,26 @@ def render_projects_popover(
     header_text: Optional[str] = None
 ) -> None:
     """
-    Render a popover with project list table.
+    Render a small trigger button that opens a large dialog (st.dialog) with the projects table.
 
-    Args:
-        trigger_label: Label for the popover trigger button (must be unique)
-        projects_df: DataFrame with project data
-        show_pondere: Whether to show weighted amounts
-        header_text: Optional header text to display in popover
+    We use a dialog because Streamlit popovers don't reliably support sizing.
     """
-    if projects_df.empty:
-        with st.popover(trigger_label, use_container_width=True):
-            st.info("Aucun projet disponible")
+    # Stable-enough unique button key per KPI context
+    base = (header_text or "projects").strip()
+    safe = re.sub(r"[^a-zA-Z0-9_]+", "_", base)[:80] or "projects"
+    btn_key = f"voir_projets_{safe}"
+
+    if projects_df is None or projects_df.empty:
+        st.button(trigger_label, disabled=True, use_container_width=True, key=f"{btn_key}_disabled")
         return
 
-    prepared_df = prepare_projects_table(projects_df, show_pondere=show_pondere)
-
-    # Build column config for dataframe
-    column_config = {}
-
-    # Configure furious_url as LinkColumn if present
-    if 'furious_url' in prepared_df.columns:
-        column_config['furious_url'] = st.column_config.LinkColumn(
-            "🔗 Furious",
-            help="Ouvrir dans Furious CRM",
-            max_chars=100
-        )
-
-    # Configure amount columns
-    if 'amount' in prepared_df.columns:
-        column_config['amount'] = st.column_config.TextColumn("Montant", width="medium")
-    if 'amount_pondere' in prepared_df.columns:
-        column_config['amount_pondere'] = st.column_config.TextColumn("Montant Pondéré", width="medium")
-
-    # Configure other columns
-    if 'title' in prepared_df.columns:
-        column_config['title'] = st.column_config.TextColumn("Titre", width="large")
-    if 'company_name' in prepared_df.columns:
-        column_config['company_name'] = st.column_config.TextColumn("Client", width="medium")
-    if 'probability' in prepared_df.columns:
-        column_config['probability'] = st.column_config.TextColumn("Probabilité", width="small")
-
-    with st.popover(trigger_label, use_container_width=True):
-        if header_text:
-            st.markdown(f"**{header_text}**")
-        st.markdown(f"**{len(projects_df)} projet(s)**")
-        st.dataframe(
-            prepared_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config=column_config if column_config else None
-        )
+    if st.button(trigger_label, type="secondary", use_container_width=True, key=btn_key):
+        st.session_state["dialog_projects_data"] = {
+            "df": projects_df.copy(),
+            "show_pondere": show_pondere,
+            "header_text": header_text,
+        }
+        _show_projects_dialog()
 
 
 def create_bu_kpi_row(
