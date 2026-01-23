@@ -8,6 +8,7 @@ Creates/updates pages with project information for the "Récent projets travaux"
 import pandas as pd
 from typing import List, Dict, Any, Optional, Set
 from notion_client import Client
+from notion_client.errors import APIResponseError, APIErrorCode
 
 from config.settings import settings
 from .notion_users import get_user_mapper, NotionUserMapper
@@ -52,6 +53,7 @@ class NotionRecentTravauxProjectsSync:
         )
         self.user_mapper = user_mapper or get_user_mapper()
         self._client: Optional[Client] = None
+        self._data_source_id: Optional[str] = None
 
     @staticmethod
     def _format_database_id(db_id: str) -> str:
@@ -77,22 +79,41 @@ class NotionRecentTravauxProjectsSync:
         Newer Notion API versions introduce `data_sources` under a database; querying is done
         via `client.data_sources.query(data_source_id=...)` in newer SDK versions.
         """
+        if self._data_source_id:
+            return self._data_source_id
+
         if not self.database_id:
             raise RuntimeError("Database ID is empty; cannot resolve data source id.")
-        db = self.client.databases.retrieve(database_id=self.database_id)
-        data_sources = db.get("data_sources") or []
-        if not data_sources or not isinstance(data_sources, list) or not isinstance(data_sources[0], dict):
-            raise RuntimeError(
-                "Notion database has no `data_sources` field; cannot query pages safely "
-                f"(database_id={self.database_id[:8]}...)."
-            )
-        ds_id = str(data_sources[0].get("id") or "").strip()
-        if not ds_id:
-            raise RuntimeError(
-                "Notion database `data_sources[0].id` is empty; cannot query pages safely "
-                f"(database_id={self.database_id[:8]}...)."
-            )
-        return ds_id
+
+        # 1) Treat env var as a database_id (preferred)
+        try:
+            db = self.client.databases.retrieve(database_id=self.database_id)
+            data_sources = db.get("data_sources") or []
+            if not data_sources or not isinstance(data_sources, list) or not isinstance(data_sources[0], dict):
+                raise RuntimeError(
+                    "Notion database has no `data_sources` field; cannot query pages safely "
+                    f"(database_id={self.database_id[:8]}...)."
+                )
+            ds_id = str(data_sources[0].get("id") or "").strip()
+            if not ds_id:
+                raise RuntimeError(
+                    "Notion database `data_sources[0].id` is empty; cannot query pages safely "
+                    f"(database_id={self.database_id[:8]}...)."
+                )
+            self._data_source_id = ds_id
+            return ds_id
+        except APIResponseError as e:
+            # 2) Fallback: some Notion UI surfaces data_source ids; allow passing those directly.
+            if e.code in (APIErrorCode.ObjectNotFound, APIErrorCode.ValidationError):
+                data_sources_ep = getattr(self.client, "data_sources", None)
+                if data_sources_ep is not None and hasattr(data_sources_ep, "retrieve"):
+                    try:
+                        _ = data_sources_ep.retrieve(data_source_id=self.database_id)
+                        self._data_source_id = self.database_id
+                        return self.database_id
+                    except Exception:
+                        pass
+            raise
 
     def _query_pages(self, start_cursor: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -140,16 +161,18 @@ class NotionRecentTravauxProjectsSync:
 
         try:
             db_info = self.client.databases.retrieve(database_id=self.database_id)
-            properties = db_info.get("properties", {})
-            if isinstance(properties, dict) and properties:
-                return properties
 
-            # Newer Notion API can expose properties via "data_sources" attached to the database.
-            # Try to retrieve the first data source and read its properties.
+            # Old/standard shape: properties live directly on the database object
+            props = db_info.get("properties") or {}
+            if isinstance(props, dict) and props:
+                return props
+
+            # Notion API 2025-09-03: properties can be exposed via a data source attached to the database.
             data_sources = db_info.get("data_sources") or []
             if isinstance(data_sources, list) and data_sources and isinstance(data_sources[0], dict):
                 ds_id = str(data_sources[0].get("id") or "").strip()
                 if ds_id:
+                    self._data_source_id = ds_id
                     data_sources_ep = getattr(self.client, "data_sources", None)
                     if data_sources_ep is not None and hasattr(data_sources_ep, "retrieve"):
                         ds_info = data_sources_ep.retrieve(data_source_id=ds_id)
@@ -157,6 +180,25 @@ class NotionRecentTravauxProjectsSync:
                         if isinstance(ds_props, dict) and ds_props:
                             return ds_props
 
+            return {}
+        except APIResponseError as e:
+            # Fallback: env var might be a data_source_id, not a database_id
+            if e.code == APIErrorCode.ObjectNotFound:
+                data_sources_ep = getattr(self.client, "data_sources", None)
+                if data_sources_ep is not None and hasattr(data_sources_ep, "retrieve"):
+                    try:
+                        ds_info = data_sources_ep.retrieve(data_source_id=self.database_id)
+                        self._data_source_id = self.database_id
+                        ds_props = ds_info.get("properties") or {}
+                        if isinstance(ds_props, dict) and ds_props:
+                            return ds_props
+                    except Exception:
+                        pass
+            print(
+                "    Error: Could not access Notion database/data source. "
+                "Likely wrong ID or the database is not shared with the integration. "
+                f"(id={self.database_id})"
+            )
             return {}
         except Exception as e:
             print(f"    Warning: Could not fetch database schema: {e}")
@@ -522,7 +564,10 @@ class NotionRecentTravauxProjectsSync:
         if schema:
             print(f"    Database properties: {list(schema.keys())}")
         else:
-            print(f"    Warning: Could not fetch database schema - will attempt all properties")
+            # Fail closed: schema-gated property building would otherwise create blank pages.
+            print("    Error: Could not fetch schema; refusing to create/update pages.")
+            stats["errors"] += len(projects)
+            return stats
 
         existing_by_id = self._get_existing_pages_by_id()
         print(f"    Found {len(existing_by_id)} existing page(s) with ID Projet.")
