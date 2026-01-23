@@ -300,10 +300,11 @@ st.markdown("""
     }
 
     /* Larger popover panel (the window that opens after clicking the button) */
-    /* NOTE: Streamlit renders popover content in a portal, so we must target the */
-    /* BaseWeb popover dialog globally (but only role=\"dialog\" to avoid tooltips). */
+    /* NOTE: Streamlit renders the popover content in a portal, so it may not be a */
+    /* descendant of div[data-testid="stPopover"]. We therefore target BaseWeb's */
+    /* popover dialog globally, but only role="dialog" to avoid tooltips/menus. */
     div[data-baseweb="popover"][role="dialog"] {
-        width: min(95vw, 1400px) !important;
+        width: min(95vw, 1600px) !important;
         max-width: 95vw !important;
         max-height: 90vh !important;
         overflow: auto !important;
