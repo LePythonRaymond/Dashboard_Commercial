@@ -298,6 +298,31 @@ st.markdown("""
         line-height: 1.1 !important;
         min-height: auto !important;
     }
+
+    /* Larger popover containers */
+    div[data-testid="stPopover"] > div {
+        max-width: 90vw !important;
+        width: 90vw !important;
+    }
+
+    /* Popover content container - make it wider */
+    div[data-testid="stPopover"] [data-baseweb="popover"] {
+        max-width: 90vw !important;
+        width: 90vw !important;
+        min-width: 800px !important;
+    }
+
+    /* Popover inner content */
+    div[data-testid="stPopover"] [data-baseweb="popover"] > div {
+        max-width: 100% !important;
+        width: 100% !important;
+    }
+
+    /* Ensure dataframe in popover uses full width */
+    div[data-testid="stPopover"] [data-testid="stDataFrame"] {
+        width: 100% !important;
+        max-width: 100% !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -2897,30 +2922,44 @@ def render_projects_popover(
             max_chars=100
         )
 
-    # Configure amount columns
+    # Configure amount columns (more compact)
     if 'amount' in prepared_df.columns:
-        column_config['amount'] = st.column_config.TextColumn("Montant", width="medium")
+        column_config['amount'] = st.column_config.TextColumn("Montant", width="small")
     if 'amount_pondere' in prepared_df.columns:
-        column_config['amount_pondere'] = st.column_config.TextColumn("Montant Pondéré", width="medium")
+        column_config['amount_pondere'] = st.column_config.TextColumn("Pondéré", width="small")
 
-    # Configure other columns
+    # Configure other columns (more compact to fit more columns)
     if 'title' in prepared_df.columns:
-        column_config['title'] = st.column_config.TextColumn("Titre", width="large")
+        column_config['title'] = st.column_config.TextColumn("Titre", width="medium")
     if 'company_name' in prepared_df.columns:
-        column_config['company_name'] = st.column_config.TextColumn("Client", width="medium")
+        column_config['company_name'] = st.column_config.TextColumn("Client", width="small")
     if 'probability' in prepared_df.columns:
-        column_config['probability'] = st.column_config.TextColumn("Probabilité", width="small")
+        column_config['probability'] = st.column_config.TextColumn("Prob", width="small")
+    if 'date' in prepared_df.columns:
+        column_config['date'] = st.column_config.TextColumn("Date", width="small")
+    if 'projet_start' in prepared_df.columns:
+        column_config['projet_start'] = st.column_config.TextColumn("Début", width="small")
+    if 'projet_stop' in prepared_df.columns:
+        column_config['projet_stop'] = st.column_config.TextColumn("Fin", width="small")
+    if 'cf_bu' in prepared_df.columns:
+        column_config['cf_bu'] = st.column_config.TextColumn("BU", width="small")
+    if 'cf_typologie_de_devis' in prepared_df.columns:
+        column_config['cf_typologie_de_devis'] = st.column_config.TextColumn("Typologie", width="small")
+    if 'id' in prepared_df.columns:
+        column_config['id'] = st.column_config.TextColumn("ID", width="small")
 
     with st.popover(trigger_label, use_container_width=True):
         if header_text:
             st.markdown(f"**{header_text}**")
         st.markdown(f"**{len(projects_df)} projet(s)**")
-        st.dataframe(
-            prepared_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config=column_config if column_config else None
-        )
+        # Use a container to ensure full width
+        with st.container():
+            st.dataframe(
+                prepared_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config=column_config if column_config else None
+            )
 
 
 def create_bu_kpi_row(
