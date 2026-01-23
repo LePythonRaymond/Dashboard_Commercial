@@ -50,6 +50,7 @@ class NotionTravauxSync:
         )
         self.user_mapper = user_mapper or get_user_mapper()
         self._client: Optional[Client] = None
+        self._data_source_id: Optional[str] = None
 
         # Define commercials set: VIP_COMMERCIALS + alienor + luana
         # Normalize all to lowercase for consistent matching
@@ -82,6 +83,9 @@ class NotionTravauxSync:
         """
         if not self.database_id:
             raise RuntimeError("Database ID is empty; cannot resolve data source id.")
+        if self._data_source_id:
+            return self._data_source_id
+
         db = self.client.databases.retrieve(database_id=self.database_id)
         data_sources = db.get("data_sources") or []
         if not data_sources or not isinstance(data_sources, list) or not isinstance(data_sources[0], dict):
@@ -95,6 +99,7 @@ class NotionTravauxSync:
                 "Notion database `data_sources[0].id` is empty; cannot query pages safely "
                 f"(database_id={self.database_id[:8]}...)."
             )
+        self._data_source_id = ds_id
         return ds_id
 
     def _query_pages(self, start_cursor: Optional[str] = None) -> Dict[str, Any]:
@@ -143,8 +148,26 @@ class NotionTravauxSync:
 
         try:
             db_info = self.client.databases.retrieve(database_id=self.database_id)
-            properties = db_info.get("properties", {})
-            return properties
+
+            # Old/standard shape: properties live directly on the database object
+            props = db_info.get("properties") or {}
+            if isinstance(props, dict) and props:
+                return props
+
+            # Notion API 2025-09-03: properties can be exposed via a data source attached to the database.
+            data_sources = db_info.get("data_sources") or []
+            if isinstance(data_sources, list) and data_sources and isinstance(data_sources[0], dict):
+                ds_id = str(data_sources[0].get("id") or "").strip()
+                if ds_id:
+                    self._data_source_id = ds_id
+                    data_sources_ep = getattr(self.client, "data_sources", None)
+                    if data_sources_ep is not None and hasattr(data_sources_ep, "retrieve"):
+                        ds_info = data_sources_ep.retrieve(data_source_id=ds_id)
+                        ds_props = ds_info.get("properties") or {}
+                        if isinstance(ds_props, dict) and ds_props:
+                            return ds_props
+
+            return {}
         except Exception as e:
             print(f"    Warning: Could not fetch database schema: {e}")
             return {}
@@ -488,7 +511,11 @@ class NotionTravauxSync:
         if schema:
             print(f"    Database properties: {list(schema.keys())}")
         else:
-            print(f"    Warning: Could not fetch database schema - will attempt all properties")
+            # Fail closed: if we can't determine schema, creating pages may yield blank pages
+            # because _build_page_properties is schema-gated.
+            print("    Error: Could not fetch database schema; refusing to create blank pages.")
+            stats["errors"] += len(proposals)
+            return stats
 
         # Debug: show commercials set for troubleshooting
         print(f"    Commercials set (for classification): {sorted(self.commercials_set)}")

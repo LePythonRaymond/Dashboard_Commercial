@@ -142,6 +142,10 @@ class Settings:
     notion_travaux_projection_database_id: str = field(
         default_factory=lambda: get_secret("NOTION_TRAVAUX_PROJECTION_DATABASE_ID", "")
     )
+    # Notion database for recent TRAVAUX projects
+    notion_travaux_recent_projects_database_id: str = field(
+        default_factory=lambda: get_secret("NOTION_TRAVAUX_RECENT_PROJECTS_DATABASE_ID", "")
+    )
 
     # API Request Settings
     api_timeout: int = 30

@@ -23,11 +23,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.api.auth import FuriousAuth, AuthenticationError
 from src.api.proposals import ProposalsClient, ProposalsAPIError
+from src.api.projects import ProjectsClient, ProjectsAPIError
 from src.processing.cleaner import DataCleaner
 from src.processing.revenue_engine import RevenueEngine
 from src.processing.travaux_projection import TravauxProjectionGenerator
 from src.integrations.email_sender import EmailSender
 from src.integrations.notion_travaux_sync import NotionTravauxSync
+from src.integrations.notion_recent_travaux_projects_sync import NotionRecentTravauxProjectsSync
 
 
 def _setup_logging() -> logging.Logger:
@@ -100,6 +102,41 @@ def run_travaux_pipeline(*, dry_run: bool = False, test_mode: bool = False) -> b
         sync_stats = notion_travaux_sync.sync_proposals(proposals)
         logger.info(f"Notion sync stats: {sync_stats}")
 
+        logger.info("\n--- Step 6: Recent TRAVAUX Projects (Notion) ---")
+        try:
+            projects_client = ProjectsClient(auth=auth)
+            df_recent_projects = projects_client.fetch_recent_travaux(days=7)
+            logger.info(f"Fetched {len(df_recent_projects)} recent TRAVAUX projects")
+
+            if not df_recent_projects.empty:
+                projects = []
+                for _, row in df_recent_projects.iterrows():
+                    projects.append({
+                        "id": str(row.get("id", "")).strip(),
+                        "title": row.get("title", "Unknown"),
+                        "type": row.get("type", ""),
+                        "type_label": row.get("type_label", ""),
+                        "tags": row.get("tags", ""),
+                        "start_date": row.get("start_date"),
+                        "end_date": row.get("end_date"),
+                        "created_at": row.get("created_at"),
+                        "project_manager": row.get("project_manager", ""),
+                        "business_account": row.get("business_account", ""),
+                        "total_amount": row.get("total_amount", 0),
+                    })
+
+                notion_recent_sync = NotionRecentTravauxProjectsSync()
+                recent_sync_stats = notion_recent_sync.sync_projects(projects)
+                logger.info(f"Recent projects Notion sync stats: {recent_sync_stats}")
+            else:
+                logger.info("No recent TRAVAUX projects found (last 7 days).")
+        except ProjectsAPIError as e:
+            logger.error(f"Projects API failed: {e}")
+            # Keep the pipeline successful if only this step fails
+        except Exception as e:
+            logger.exception(f"Recent projects sync failed: {e}")
+            # Keep the pipeline successful if only this step fails
+
         logger.info("=" * 60)
         logger.info("TRAVAUX PROJECTION PIPELINE COMPLETED SUCCESSFULLY")
         logger.info("=" * 60)
@@ -110,6 +147,9 @@ def run_travaux_pipeline(*, dry_run: bool = False, test_mode: bool = False) -> b
         return False
     except ProposalsAPIError as e:
         logger.error(f"Proposals API failed: {e}")
+        return False
+    except ProjectsAPIError as e:
+        logger.error(f"Projects API failed: {e}")
         return False
     except Exception as e:
         logger.exception(f"TRAVAUX pipeline failed: {e}")
