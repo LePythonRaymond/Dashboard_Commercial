@@ -281,7 +281,7 @@ st.markdown("""
         margin: 2rem 0;
     }
 
-    /* Smaller dialog trigger buttons */
+    /* Smaller popover buttons */
     button[kind="secondary"] {
         font-size: 0.7rem !important;
         padding: 0.2rem 0.4rem !important;
@@ -290,8 +290,31 @@ st.markdown("""
         min-height: auto !important;
     }
 
-    /* Ensure dataframe in dialog uses full width */
-    div[data-testid="stDialog"] [data-testid="stDataFrame"] {
+    /* Target popover buttons more specifically */
+    div[data-testid="stPopover"] button {
+        font-size: 0.7rem !important;
+        padding: 0.2rem 0.4rem !important;
+        height: auto !important;
+        line-height: 1.1 !important;
+        min-height: auto !important;
+    }
+
+    /* Larger popover panel (the window that opens after clicking the button) */
+    div[data-testid="stPopover"] [data-baseweb="popover"] {
+        width: min(95vw, 1200px) !important;
+        max-width: 95vw !important;
+        max-height: 85vh !important;
+        overflow: auto !important;
+    }
+
+    /* Ensure the popover inner wrapper also uses the full width */
+    div[data-testid="stPopover"] [data-baseweb="popover"] > div {
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+
+    /* Ensure dataframe in popover uses full width */
+    div[data-testid="stPopover"] [data-testid="stDataFrame"] {
         width: 100% !important;
         max-width: 100% !important;
     }
@@ -2860,20 +2883,25 @@ def prepare_projects_table(df: pd.DataFrame, *, show_pondere: bool = False) -> p
     return result_df
 
 
-@st.dialog("Projets", width="large")
-def show_projects_dialog():
-    """Dialog function to display projects table - reads from session state."""
-    if "dialog_projects_data" not in st.session_state:
-        st.info("Aucun projet disponible")
-        return
+def render_projects_popover(
+    trigger_label: str,
+    projects_df: pd.DataFrame,
+    *,
+    show_pondere: bool = False,
+    header_text: Optional[str] = None
+) -> None:
+    """
+    Render a popover with project list table.
 
-    data = st.session_state.dialog_projects_data
-    projects_df = data.get("df", pd.DataFrame())
-    show_pondere = data.get("show_pondere", False)
-    header_text = data.get("header_text", None)
-
+    Args:
+        trigger_label: Label for the popover trigger button (must be unique)
+        projects_df: DataFrame with project data
+        show_pondere: Whether to show weighted amounts
+        header_text: Optional header text to display in popover
+    """
     if projects_df.empty:
-        st.info("Aucun projet disponible")
+        with st.popover(trigger_label, use_container_width=True):
+            st.info("Aucun projet disponible")
         return
 
     prepared_df = prepare_projects_table(projects_df, show_pondere=show_pondere)
@@ -2903,48 +2931,16 @@ def show_projects_dialog():
     if 'probability' in prepared_df.columns:
         column_config['probability'] = st.column_config.TextColumn("Probabilité", width="small")
 
-    if header_text:
-        st.markdown(f"**{header_text}**")
-    st.markdown(f"**{len(projects_df)} projet(s)**")
-    st.dataframe(
-        prepared_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config=column_config if column_config else None
-    )
-
-
-def render_projects_popover(
-    trigger_label: str,
-    projects_df: pd.DataFrame,
-    *,
-    show_pondere: bool = False,
-    header_text: Optional[str] = None
-) -> None:
-    """
-    Render a button that opens a dialog with project list table.
-
-    Args:
-        trigger_label: Label for the button (must be unique)
-        projects_df: DataFrame with project data
-        show_pondere: Whether to show weighted amounts
-        header_text: Optional header text to display in dialog
-    """
-    if projects_df.empty:
-        st.button(trigger_label, disabled=True, use_container_width=True)
-        return
-
-    # Create a unique key for this button
-    button_key = f"dialog_btn_{hash(str(header_text) + str(id(projects_df)))}"
-
-    # Store data and open dialog when button is clicked
-    if st.button(trigger_label, use_container_width=True, key=button_key):
-        st.session_state.dialog_projects_data = {
-            "df": projects_df.copy(),
-            "show_pondere": show_pondere,
-            "header_text": header_text
-        }
-        show_projects_dialog()
+    with st.popover(trigger_label, use_container_width=True):
+        if header_text:
+            st.markdown(f"**{header_text}**")
+        st.markdown(f"**{len(projects_df)} projet(s)**")
+        st.dataframe(
+            prepared_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config=column_config if column_config else None
+        )
 
 
 def create_bu_kpi_row(
