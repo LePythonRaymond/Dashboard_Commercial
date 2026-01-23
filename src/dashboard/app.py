@@ -280,60 +280,6 @@ st.markdown("""
         border-top: 3px solid #1a472a;
         margin: 2rem 0;
     }
-
-    /* Smaller popover buttons */
-    button[kind="secondary"] {
-        font-size: 0.7rem !important;
-        padding: 0.2rem 0.4rem !important;
-        height: auto !important;
-        line-height: 1.1 !important;
-        min-height: auto !important;
-    }
-
-    /* Target popover buttons more specifically */
-    div[data-testid="stPopover"] button {
-        font-size: 0.7rem !important;
-        padding: 0.2rem 0.4rem !important;
-        height: auto !important;
-        line-height: 1.1 !important;
-        min-height: auto !important;
-    }
-
-    /* Larger popover containers - at least 4x larger */
-    div[data-testid="stPopover"] > div {
-        max-width: 95vw !important;
-        width: 95vw !important;
-        min-width: 1200px !important;
-    }
-
-    /* Popover content container - make it much wider and taller */
-    div[data-testid="stPopover"] [data-baseweb="popover"] {
-        max-width: 95vw !important;
-        width: 95vw !important;
-        min-width: 1200px !important;
-        max-height: 85vh !important;
-        height: auto !important;
-    }
-
-    /* Popover inner content */
-    div[data-testid="stPopover"] [data-baseweb="popover"] > div {
-        max-width: 100% !important;
-        width: 100% !important;
-        max-height: 85vh !important;
-        overflow-y: auto !important;
-    }
-
-    /* Ensure dataframe in popover uses full width and is scrollable */
-    div[data-testid="stPopover"] [data-testid="stDataFrame"] {
-        width: 100% !important;
-        max-width: 100% !important;
-    }
-
-    /* Make popover content area scrollable if needed */
-    div[data-testid="stPopover"] [data-baseweb="popover"] [data-testid="stVerticalBlock"] {
-        max-height: 80vh !important;
-        overflow-y: auto !important;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -2528,7 +2474,7 @@ def create_production_bu_kpi_row(
                 bu_projects = df[(df['cf_bu'] == bu) & (df[total_col] > 0)].copy()
                 if not bu_projects.empty:
                     render_projects_popover(
-                        "🔎 Voir projets",
+                        f"🔎 Voir projets · {production_year} · BU={bu}",
                         bu_projects,
                         show_pondere=show_pondere,
                         header_text=f"Projets · Production {production_year} · BU={bu}"
@@ -2615,7 +2561,7 @@ def render_single_production_view(
                 projects = df[df[total_col] > 0].copy()
                 if not projects.empty:
                     render_projects_popover(
-                        "🔎 Voir projets",
+                        f"🔎 Voir projets · Production {production_year}",
                         projects,
                         show_pondere=show_pondere,
                         header_text=f"Projets · Production {production_year}"
@@ -2633,7 +2579,7 @@ def render_single_production_view(
                 projects = df[df[total_col] > 0].copy()
                 if not projects.empty:
                     render_projects_popover(
-                        "🔎 Voir projets",
+                        f"🔎 Voir projets · Production {production_year}",
                         projects,
                         show_pondere=show_pondere,
                         header_text=f"Projets · Production {production_year}"
@@ -2991,7 +2937,7 @@ def create_bu_kpi_row(
                 if not bu_projects.empty:
                     popover_key = f"{key_prefix}_bu_{bu}" if key_prefix else f"bu_{bu}"
                     render_projects_popover(
-                        "🔎 Voir projets",
+                        f"🔎 Voir projets · BU={bu}",
                         bu_projects,
                         show_pondere=show_pondere,
                         header_text=f"Projets · BU={bu}"
@@ -3086,7 +3032,7 @@ def create_bu_grouped_typologie_blocks(
                 typ_projects = filter_projects_for_typologie_bu(df, bu, typ)
                 if not typ_projects.empty:
                     render_projects_popover(
-                        "🔎 Voir projets",
+                        f"🔎 Voir projets · BU={bu} · Typ={typ}",
                         typ_projects,
                         show_pondere=show_pondere,
                         header_text=f"Projets · BU={bu} · Typologie={typ}"
@@ -3219,7 +3165,7 @@ def create_bu_grouped_typologie_blocks_production(
                 typ_projects = filter_projects_for_typologie_bu_production(df, production_year, bu, typ)
                 if not typ_projects.empty:
                     render_projects_popover(
-                        "🔎 Voir projets",
+                        f"🔎 Voir projets · {production_year} · BU={bu} · Typ={typ}",
                         typ_projects,
                         show_pondere=show_pondere,
                         header_text=f"Projets · Production {production_year} · BU={bu} · Typologie={typ}"
@@ -4246,7 +4192,7 @@ def main():
                 # Add popover for all projects
                 if not df.empty:
                     render_projects_popover(
-                        "🔎 Voir projets",
+                        "🔎 Voir tous les projets",
                         df,
                         show_pondere=show_pondere,
                         header_text=f"Tous les projets · {selected_year}"
@@ -4262,7 +4208,7 @@ def main():
                 # Add popover for all projects
                 if not df.empty:
                     render_projects_popover(
-                        "🔎 Voir projets",
+                        "🔎 Voir tous les projets",
                         df,
                         show_pondere=show_pondere,
                         header_text=f"Tous les projets · {selected_year}"
@@ -4416,7 +4362,7 @@ def main():
                         # Add popover for month projects
                         if not month_df.empty:
                             render_projects_popover(
-                                "🔎 Voir projets",
+                                f"🔎 Voir projets · {selected_month}",
                                 month_df,
                                 show_pondere=show_pondere,
                                 header_text=f"Projets · {selected_month}"
@@ -4432,7 +4378,7 @@ def main():
                         # Add popover for month projects
                         if not month_df.empty:
                             render_projects_popover(
-                                "🔎 Voir projets",
+                                f"🔎 Voir projets · {selected_month}",
                                 month_df,
                                 show_pondere=show_pondere,
                                 header_text=f"Projets · {selected_month}"
