@@ -280,6 +280,24 @@ st.markdown("""
         border-top: 3px solid #1a472a;
         margin: 2rem 0;
     }
+
+    /* Smaller popover buttons */
+    button[kind="secondary"] {
+        font-size: 0.7rem !important;
+        padding: 0.2rem 0.4rem !important;
+        height: auto !important;
+        line-height: 1.1 !important;
+        min-height: auto !important;
+    }
+
+    /* Target popover buttons more specifically */
+    div[data-testid="stPopover"] button {
+        font-size: 0.7rem !important;
+        padding: 0.2rem 0.4rem !important;
+        height: auto !important;
+        line-height: 1.1 !important;
+        min-height: auto !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -2474,7 +2492,7 @@ def create_production_bu_kpi_row(
                 bu_projects = df[(df['cf_bu'] == bu) & (df[total_col] > 0)].copy()
                 if not bu_projects.empty:
                     render_projects_popover(
-                        f"🔎 Voir projets · {production_year} · BU={bu}",
+                        "🔎 Voir projets",
                         bu_projects,
                         show_pondere=show_pondere,
                         header_text=f"Projets · Production {production_year} · BU={bu}"
@@ -2561,7 +2579,7 @@ def render_single_production_view(
                 projects = df[df[total_col] > 0].copy()
                 if not projects.empty:
                     render_projects_popover(
-                        f"🔎 Voir projets · Production {production_year}",
+                        "🔎 Voir projets",
                         projects,
                         show_pondere=show_pondere,
                         header_text=f"Projets · Production {production_year}"
@@ -2579,7 +2597,7 @@ def render_single_production_view(
                 projects = df[df[total_col] > 0].copy()
                 if not projects.empty:
                     render_projects_popover(
-                        f"🔎 Voir projets · Production {production_year}",
+                        "🔎 Voir projets",
                         projects,
                         show_pondere=show_pondere,
                         header_text=f"Projets · Production {production_year}"
@@ -2937,7 +2955,7 @@ def create_bu_kpi_row(
                 if not bu_projects.empty:
                     popover_key = f"{key_prefix}_bu_{bu}" if key_prefix else f"bu_{bu}"
                     render_projects_popover(
-                        f"🔎 Voir projets · BU={bu}",
+                        "🔎 Voir projets",
                         bu_projects,
                         show_pondere=show_pondere,
                         header_text=f"Projets · BU={bu}"
@@ -3032,7 +3050,7 @@ def create_bu_grouped_typologie_blocks(
                 typ_projects = filter_projects_for_typologie_bu(df, bu, typ)
                 if not typ_projects.empty:
                     render_projects_popover(
-                        f"🔎 Voir projets · BU={bu} · Typ={typ}",
+                        "🔎 Voir projets",
                         typ_projects,
                         show_pondere=show_pondere,
                         header_text=f"Projets · BU={bu} · Typologie={typ}"
@@ -3165,7 +3183,7 @@ def create_bu_grouped_typologie_blocks_production(
                 typ_projects = filter_projects_for_typologie_bu_production(df, production_year, bu, typ)
                 if not typ_projects.empty:
                     render_projects_popover(
-                        f"🔎 Voir projets · {production_year} · BU={bu} · Typ={typ}",
+                        "🔎 Voir projets",
                         typ_projects,
                         show_pondere=show_pondere,
                         header_text=f"Projets · Production {production_year} · BU={bu} · Typologie={typ}"
@@ -4192,7 +4210,7 @@ def main():
                 # Add popover for all projects
                 if not df.empty:
                     render_projects_popover(
-                        "🔎 Voir tous les projets",
+                        "🔎 Voir projets",
                         df,
                         show_pondere=show_pondere,
                         header_text=f"Tous les projets · {selected_year}"
@@ -4208,7 +4226,7 @@ def main():
                 # Add popover for all projects
                 if not df.empty:
                     render_projects_popover(
-                        "🔎 Voir tous les projets",
+                        "🔎 Voir projets",
                         df,
                         show_pondere=show_pondere,
                         header_text=f"Tous les projets · {selected_year}"
@@ -4362,7 +4380,7 @@ def main():
                         # Add popover for month projects
                         if not month_df.empty:
                             render_projects_popover(
-                                f"🔎 Voir projets · {selected_month}",
+                                "🔎 Voir projets",
                                 month_df,
                                 show_pondere=show_pondere,
                                 header_text=f"Projets · {selected_month}"
@@ -4378,7 +4396,7 @@ def main():
                         # Add popover for month projects
                         if not month_df.empty:
                             render_projects_popover(
-                                f"🔎 Voir projets · {selected_month}",
+                                "🔎 Voir projets",
                                 month_df,
                                 show_pondere=show_pondere,
                                 header_text=f"Projets · {selected_month}"
