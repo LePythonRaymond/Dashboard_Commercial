@@ -300,21 +300,24 @@ st.markdown("""
     }
 
     /* Larger popover panel (the window that opens after clicking the button) */
-    div[data-testid="stPopover"] [data-baseweb="popover"] {
-        width: min(95vw, 1200px) !important;
+    /* NOTE: Streamlit renders popover content in a portal, so we must target the */
+    /* BaseWeb popover dialog globally (but only role=\"dialog\" to avoid tooltips). */
+    div[data-baseweb="popover"][role="dialog"] {
+        width: min(95vw, 1400px) !important;
         max-width: 95vw !important;
-        max-height: 85vh !important;
+        max-height: 90vh !important;
         overflow: auto !important;
     }
 
-    /* Ensure the popover inner wrapper also uses the full width */
-    div[data-testid="stPopover"] [data-baseweb="popover"] > div {
+    /* Inner wrapper should also expand */
+    div[data-baseweb="popover"][role="dialog"] > div {
         width: 100% !important;
         max-width: 100% !important;
+        max-height: 90vh !important;
     }
 
-    /* Ensure dataframe in popover uses full width */
-    div[data-testid="stPopover"] [data-testid="stDataFrame"] {
+    /* Ensure dataframe inside the dialog uses full width */
+    div[data-baseweb="popover"][role="dialog"] [data-testid="stDataFrame"] {
         width: 100% !important;
         max-width: 100% !important;
     }
