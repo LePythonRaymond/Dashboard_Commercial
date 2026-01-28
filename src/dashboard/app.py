@@ -85,24 +85,24 @@ BU_ORDER = ['CONCEPTION', 'TRAVAUX', 'MAINTENANCE', 'AUTRE']
 
 # BU to Typologies mapping (source of truth for new typology structure)
 BU_TO_TYPOLOGIES = {
-    'CONCEPTION': ['DV', 'Paysage', 'Concours'],
-    'TRAVAUX': ['DV(Travaux)', 'Travaux Vincent', 'Travaux conception'],
-    'MAINTENANCE': ['TS', 'Entretien', 'Animation'],
+    'CONCEPTION': ['Conception Concours', 'Conception DV', 'Conception Paysage'],
+    'TRAVAUX': ['Travaux Direct', 'Travaux DV', 'Travaux Conception'],
+    'MAINTENANCE': ['Maintenance TS', 'Maintenance Entretien', 'Maintenance Animation'],
     'AUTRE': ['Autre']
 }
 
 # Typologie Color Palette - Unique colors distinct from BU colors
 # Using warm coral/teal palette to differentiate from BU's green/yellow/purple
 TYPOLOGIE_COLORS = {
-    'DV': '#e76f51',        # Coral Red
-    'Animation': '#2a9d8f', # Ocean Teal
-    'Paysage': '#90be6d',   # Light Green (distinct from BU yellow/green)
-    'Concours': '#e63946',  # Bright Red
-    'DV(Travaux)': '#f77f00', # Orange
-    'Travaux Vincent': '#fcbf49', # Golden Yellow
-    'Travaux conception': '#fca311', # Amber
-    'TS': '#9b59b6',        # Purple (for typology TS, distinct from BU colors)
-    'Entretien': '#3498db', # Blue
+    'Conception DV': '#e76f51',        # Coral Red
+    'Conception Paysage': '#90be6d',   # Light Green (distinct from BU yellow/green)
+    'Conception Concours': '#e63946',  # Bright Red
+    'Travaux DV': '#f77f00', # Orange
+    'Travaux Direct': '#fcbf49', # Golden Yellow
+    'Travaux Conception': '#fca311', # Amber
+    'Maintenance TS': '#9b59b6',        # Purple (for typology TS, distinct from BU colors)
+    'Maintenance Entretien': '#3498db', # Blue
+    'Maintenance Animation': '#2a9d8f', # Ocean Teal
     'Toiture': '#264653',   # Deep Navy
     'Intérieur': '#f4a261', # Sunset Orange
     'Etude': '#d4a5a5',     # Rose Pink
@@ -663,13 +663,13 @@ def get_typologie_amounts_for_bu(
         row_bu = str(row.get('cf_bu', '')).strip()
 
         for typ in typologies:
-            # Special case: TS under MAINTENANCE - count from ALL rows where primary is TS
-            if typ == 'TS' and bu == 'MAINTENANCE':
-                if primary == 'TS':
-                    # Count: TS in tags
-                    if 'TS' in tags:
+            # Special case: Maintenance TS under MAINTENANCE - count from ALL rows where primary is Maintenance TS
+            if typ == 'Maintenance TS' and bu == 'MAINTENANCE':
+                if primary == 'Maintenance TS':
+                    # Count: Maintenance TS in tags
+                    if 'Maintenance TS' in tags:
                         result[typ]['count'] += 1
-                    # Amount: primary is TS
+                    # Amount: primary is Maintenance TS
                     amount = float(row.get('amount', 0) or 0)
                     result[typ]['total'] += amount
                     if include_weighted:
@@ -724,9 +724,9 @@ def filter_projects_for_typologie_bu(
         tags, primary = allocate_typologie_for_row(row)
         row_bu = str(row.get('cf_bu', '')).strip()
 
-        # Special case: TS under MAINTENANCE
-        if typ == 'TS' and bu == 'MAINTENANCE':
-            if primary == 'TS' and 'TS' in tags:
+        # Special case: Maintenance TS under MAINTENANCE
+        if typ == 'Maintenance TS' and bu == 'MAINTENANCE':
+            if primary == 'Maintenance TS' and 'Maintenance TS' in tags:
                 matching_indices.append(idx)
         else:
             # Normal case: BU must match and typ in tags
@@ -778,9 +778,9 @@ def filter_projects_for_typologie_bu_production(
         if total_amount <= 0:
             continue
 
-        # Special case: TS under MAINTENANCE
-        if typ == 'TS' and bu == 'MAINTENANCE':
-            if primary == 'TS' and 'TS' in tags:
+        # Special case: Maintenance TS under MAINTENANCE
+        if typ == 'Maintenance TS' and bu == 'MAINTENANCE':
+            if primary == 'Maintenance TS' and 'Maintenance TS' in tags:
                 matching_indices.append(idx)
         else:
             # Normal case: BU must match and typ in tags
@@ -795,7 +795,7 @@ def filter_projects_for_typologie_bu_production(
 
 def get_ts_typologie_total(df: pd.DataFrame, include_weighted: bool = False) -> Dict[str, float]:
     """
-    Calculate TS(typologie) total - based on primary typologie == 'TS' (from tag or title).
+    Calculate Maintenance TS(typologie) total - based on primary typologie == 'Maintenance TS' (from tag or title).
 
     Args:
         df: DataFrame with cf_typologie_de_devis column
@@ -814,12 +814,12 @@ def get_ts_typologie_total(df: pd.DataFrame, include_weighted: bool = False) -> 
     for _, row in df.iterrows():
         tags, primary = allocate_typologie_for_row(row)
 
-        if primary == 'TS':
+        if primary == 'Maintenance TS':
             total += float(row.get('amount', 0) or 0)
             if include_weighted:
                 pondere += float(row.get('amount_pondere', 0) or 0)
 
-        if 'TS' in tags:
+        if 'Maintenance TS' in tags:
             count += 1
 
     result = {

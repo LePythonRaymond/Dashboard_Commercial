@@ -30,22 +30,22 @@ from src.processing.typologie_allocation import (
 
 def test_parse_typologie_list_single():
     """Test parsing single typologie tag."""
-    assert parse_typologie_list("Paysage") == ["Paysage"]
-    assert parse_typologie_list("DV") == ["DV"]
-    assert parse_typologie_list("Animation") == ["Animation"]
+    assert parse_typologie_list("Conception Paysage") == ["Conception Paysage"]
+    assert parse_typologie_list("Conception DV") == ["Conception DV"]
+    assert parse_typologie_list("Maintenance Animation") == ["Maintenance Animation"]
 
 
 def test_parse_typologie_list_multi():
     """Test parsing multiple typologie tags."""
-    assert parse_typologie_list("Paysage, Animation") == ["Paysage", "Animation"]
-    assert parse_typologie_list("DV, Paysage, Animation") == ["DV", "Paysage", "Animation"]
-    assert parse_typologie_list("Animation, Paysage") == ["Animation", "Paysage"]
+    assert parse_typologie_list("Conception Paysage, Maintenance Animation") == ["Conception Paysage", "Maintenance Animation"]
+    assert parse_typologie_list("Conception DV, Conception Paysage, Maintenance Animation") == ["Conception DV", "Conception Paysage", "Maintenance Animation"]
+    assert parse_typologie_list("Maintenance Animation, Conception Paysage") == ["Maintenance Animation", "Conception Paysage"]
 
 
 def test_parse_typologie_list_whitespace():
     """Test parsing with various whitespace."""
-    assert parse_typologie_list("  paysage ,  ANIMATION ") == ["paysage", "ANIMATION"]
-    assert parse_typologie_list("DV,Paysage") == ["DV", "Paysage"]
+    assert parse_typologie_list("  Conception Paysage ,  Maintenance Animation ") == ["Conception Paysage", "Maintenance Animation"]
+    assert parse_typologie_list("Conception DV,Conception Paysage") == ["Conception DV", "Conception Paysage"]
 
 
 def test_parse_typologie_list_empty():
@@ -99,35 +99,35 @@ def test_inject_ts_tag():
 
 
 def test_choose_primary_typologie_ts_priority():
-    """Test TS has highest priority for primary selection."""
-    assert choose_primary_typologie(["TS"]) == "TS"
-    assert choose_primary_typologie(["DV", "TS"]) == "TS"
-    assert choose_primary_typologie(["TS", "DV"]) == "TS"
-    assert choose_primary_typologie(["Animation", "TS", "DV"]) == "TS"
+    """Test Maintenance TS has highest priority for primary selection."""
+    assert choose_primary_typologie(["Maintenance TS"]) == "Maintenance TS"
+    assert choose_primary_typologie(["Conception DV", "Maintenance TS"]) == "Maintenance TS"
+    assert choose_primary_typologie(["Maintenance TS", "Conception DV"]) == "Maintenance TS"
+    assert choose_primary_typologie(["Maintenance Animation", "Maintenance TS", "Conception DV"]) == "Maintenance TS"
 
 
 def test_choose_primary_typologie_animation_demotion():
-    """Test Animation demotion when multiple tags."""
-    # Animation first, other tag exists
-    assert choose_primary_typologie(["Animation", "Paysage"]) == "Paysage"
-    assert choose_primary_typologie(["Animation", "DV"]) == "DV"
+    """Test Maintenance Animation demotion when multiple tags."""
+    # Maintenance Animation first, other tag exists
+    assert choose_primary_typologie(["Maintenance Animation", "Conception Paysage"]) == "Conception Paysage"
+    assert choose_primary_typologie(["Maintenance Animation", "Conception DV"]) == "Conception DV"
 
-    # Multiple tags, Animation not first
-    assert choose_primary_typologie(["Paysage", "Animation"]) == "Paysage"
-    assert choose_primary_typologie(["DV", "Animation", "Paysage"]) == "DV"
+    # Multiple tags, Maintenance Animation not first
+    assert choose_primary_typologie(["Conception Paysage", "Maintenance Animation"]) == "Conception Paysage"
+    assert choose_primary_typologie(["Conception DV", "Maintenance Animation", "Conception Paysage"]) == "Conception DV"
 
-    # Only Animation
-    assert choose_primary_typologie(["Animation"]) == "Animation"
+    # Only Maintenance Animation
+    assert choose_primary_typologie(["Maintenance Animation"]) == "Maintenance Animation"
 
-    # All Animation
-    assert choose_primary_typologie(["Animation", "Animation"]) == "Animation"
+    # All Maintenance Animation
+    assert choose_primary_typologie(["Maintenance Animation", "Maintenance Animation"]) == "Maintenance Animation"
 
 
 def test_choose_primary_typologie_single_tag():
     """Test single tag selection."""
-    assert choose_primary_typologie(["DV"]) == "DV"
-    assert choose_primary_typologie(["Paysage"]) == "Paysage"
-    assert choose_primary_typologie(["Entretien"]) == "Entretien"
+    assert choose_primary_typologie(["Conception DV"]) == "Conception DV"
+    assert choose_primary_typologie(["Conception Paysage"]) == "Conception Paysage"
+    assert choose_primary_typologie(["Maintenance Entretien"]) == "Maintenance Entretien"
 
 
 def test_choose_primary_typologie_empty():
@@ -138,71 +138,71 @@ def test_choose_primary_typologie_empty():
 def test_allocate_typologie_for_row_single_tag():
     """Test allocation for single tag."""
     row = pd.Series({
-        'cf_typologie_de_devis': 'Paysage',
+        'cf_typologie_de_devis': 'Conception Paysage',
         'title': 'Project'
     })
     tags, primary = allocate_typologie_for_row(row)
-    assert 'Paysage' in tags
-    assert primary == 'Paysage'
+    assert 'Conception Paysage' in tags
+    assert primary == 'Conception Paysage'
 
 
 def test_allocate_typologie_for_row_multi_tag():
     """Test allocation for multiple tags."""
     row = pd.Series({
-        'cf_typologie_de_devis': 'Paysage, Animation',
+        'cf_typologie_de_devis': 'Conception Paysage, Maintenance Animation',
         'title': 'Project'
     })
     tags, primary = allocate_typologie_for_row(row)
-    assert 'Paysage' in tags
-    assert 'Animation' in tags
-    assert primary == 'Paysage'  # Animation demoted
+    assert 'Conception Paysage' in tags
+    assert 'Maintenance Animation' in tags
+    assert primary == 'Conception Paysage'  # Maintenance Animation demoted
 
 
 def test_allocate_typologie_for_row_ts_by_title():
-    """Test TS detection from title."""
+    """Test Maintenance TS detection from title."""
     row = pd.Series({
-        'cf_typologie_de_devis': 'Entretien',
+        'cf_typologie_de_devis': 'Maintenance Entretien',
         'title': 'Project TS'
     })
     tags, primary = allocate_typologie_for_row(row)
-    assert 'TS' in tags
-    assert 'Entretien' in tags
-    assert primary == 'TS'  # TS has priority
+    assert 'Maintenance TS' in tags
+    assert 'Maintenance Entretien' in tags
+    assert primary == 'Maintenance TS'  # Maintenance TS has priority
 
 
 def test_allocate_typologie_for_row_ts_by_tag():
-    """Test TS detection from tag."""
+    """Test Maintenance TS detection from tag."""
     row = pd.Series({
-        'cf_typologie_de_devis': 'TS',
+        'cf_typologie_de_devis': 'Maintenance TS',
         'title': 'Project'
     })
     tags, primary = allocate_typologie_for_row(row)
-    assert 'TS' in tags
-    assert primary == 'TS'
+    assert 'Maintenance TS' in tags
+    assert primary == 'Maintenance TS'
 
 
 def test_allocate_typologie_for_row_ts_both():
-    """Test TS detection when both tag and title have TS (no double counting)."""
+    """Test Maintenance TS detection when both tag and title have TS (no double counting)."""
     row = pd.Series({
-        'cf_typologie_de_devis': 'TS',
+        'cf_typologie_de_devis': 'Maintenance TS',
         'title': 'Project TS'
     })
     tags, primary = allocate_typologie_for_row(row)
-    # TS should appear only once in tags
-    assert tags.count('TS') == 1
-    assert primary == 'TS'
+    # Maintenance TS should appear only once in tags
+    assert tags.count('Maintenance TS') == 1
+    assert primary == 'Maintenance TS'
 
 
 def test_allocate_typologie_for_row_animation_first():
-    """Test Animation demotion when first in list."""
+    """Test Maintenance Animation demotion when first in list."""
     row = pd.Series({
-        'cf_typologie_de_devis': 'Animation, Paysage',
+        'cf_typologie_de_devis': 'Maintenance Animation, Conception Paysage',
         'title': 'Project'
     })
     tags, primary = allocate_typologie_for_row(row)
-    assert 'Animation' in tags
-    assert 'Paysage' in tags
-    assert primary == 'Paysage'  # Animation demoted
+    assert 'Maintenance Animation' in tags
+    assert 'Conception Paysage' in tags
+    assert primary == 'Conception Paysage'  # Maintenance Animation demoted
 
 
 def test_allocate_typologie_for_row_empty():
@@ -217,15 +217,15 @@ def test_allocate_typologie_for_row_empty():
 
 
 def test_allocate_typologie_for_row_deduplication():
-    """Test tag deduplication (e.g., 'DV, DV')."""
+    """Test tag deduplication (e.g., 'Conception DV, Conception DV')."""
     row = pd.Series({
-        'cf_typologie_de_devis': 'DV, DV',
+        'cf_typologie_de_devis': 'Conception DV, Conception DV',
         'title': 'Project'
     })
     tags, primary = allocate_typologie_for_row(row)
-    # DV should appear only once
-    assert tags.count('DV') == 1
-    assert primary == 'DV'
+    # Conception DV should appear only once
+    assert tags.count('Conception DV') == 1
+    assert primary == 'Conception DV'
 
 
 if __name__ == "__main__":

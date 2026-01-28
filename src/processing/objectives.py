@@ -19,9 +19,9 @@ EXPECTED_BUS = ['CONCEPTION', 'TRAVAUX', 'MAINTENANCE', 'AUTRE']
 
 # Expected Typologie keys (union of all BU_TO_TYPOLOGIES)
 EXPECTED_TYPOLOGIES = [
-    'DV', 'Paysage', 'Concours',  # CONCEPTION
-    'DV(Travaux)', 'Travaux Vincent', 'Travaux conception',  # TRAVAUX
-    'TS', 'Entretien', 'Animation',  # MAINTENANCE
+    'Conception Concours', 'Conception DV', 'Conception Paysage',  # CONCEPTION
+    'Travaux Direct', 'Travaux DV', 'Travaux Conception',  # TRAVAUX
+    'Maintenance TS', 'Maintenance Entretien', 'Maintenance Animation',  # MAINTENANCE
     'Autre'  # AUTRE
 ]
 
@@ -77,15 +77,15 @@ OBJECTIVES: Dict[int, Dict[ObjectiveMetric, Dict[ObjectiveDimension, Dict[str, L
                 "AUTRE": [0.0] * 12,
             },
             "typologie": {
-                "DV": [100000] * 12,
-                "Paysage": [1000000] * 12,
-                "Concours": [100000] * 12,
-                "DV(Travaux)": [300000] * 12,
-                "Travaux Vincent": [400000] * 12,
-                "Travaux conception": [300000] * 12,
-                "TS": [75000] * 12,
-                "Entretien": [75000] * 12,
-                "Animation": [50000] * 12,
+                "Conception DV": [100000] * 12,
+                "Conception Paysage": [1000000] * 12,
+                "Conception Concours": [100000] * 12,
+                "Travaux DV": [300000] * 12,
+                "Travaux Direct": [400000] * 12,
+                "Travaux Conception": [300000] * 12,
+                "Maintenance TS": [75000] * 12,
+                "Maintenance Entretien": [75000] * 12,
+                "Maintenance Animation": [50000] * 12,
                 "Autre": [0.0] * 12,
             }
         },
@@ -97,15 +97,15 @@ OBJECTIVES: Dict[int, Dict[ObjectiveMetric, Dict[ObjectiveDimension, Dict[str, L
                 "AUTRE": [0.0] * 12,
             },
             "typologie": {
-                "DV": [20000] * 12,
-                "Paysage": [30000] * 12,
-                "Concours": [20000] * 12,
-                "DV(Travaux)": [100000] * 12,
-                "Travaux Vincent": [100000] * 12,
-                "Travaux conception": [100000] * 12,
-                "TS": [25000] * 12,
-                "Entretien": [25000] * 12,
-                "Animation": [10000] * 12,
+                "Conception DV": [20000] * 12,
+                "Conception Paysage": [30000] * 12,
+                "Conception Concours": [20000] * 12,
+                "Travaux DV": [100000] * 12,
+                "Travaux Direct": [100000] * 12,
+                "Travaux Conception": [100000] * 12,
+                "Maintenance TS": [25000] * 12,
+                "Maintenance Entretien": [25000] * 12,
+                "Maintenance Animation": [10000] * 12,
                 "Autre": [0.0] * 12,
             }
         }
@@ -114,26 +114,26 @@ OBJECTIVES: Dict[int, Dict[ObjectiveMetric, Dict[ObjectiveDimension, Dict[str, L
         "signe": {
             "typologie": {
                 # CONCEPTION
-                "DV": generate_11_month_distribution(50000),
-                "Concours": generate_11_month_distribution(100000),
-                "Paysage": generate_11_month_distribution(650000),
+                "Conception DV": generate_11_month_distribution(50000),
+                "Conception Concours": generate_11_month_distribution(100000),
+                "Conception Paysage": generate_11_month_distribution(650000),
                 # TRAVAUX
-                "DV(Travaux)": generate_11_month_distribution(1000000),
-                "Travaux conception": generate_11_month_distribution(500000),
-                "Travaux Vincent": generate_11_month_distribution(1500000),
+                "Travaux DV": generate_11_month_distribution(1000000),
+                "Travaux Conception": generate_11_month_distribution(500000),
+                "Travaux Direct": generate_11_month_distribution(1500000),
                 # MAINTENANCE
-                "Entretien": generate_11_month_distribution(495000),
-                "TS": generate_11_month_distribution(137500),  # 137,500 per year
-                "Animation": generate_11_month_distribution(50000),  # 50,000 per year
+                "Maintenance Entretien": generate_11_month_distribution(495000),
+                "Maintenance TS": generate_11_month_distribution(137500),  # 137,500 per year
+                "Maintenance Animation": generate_11_month_distribution(50000),  # 50,000 per year
                 # AUTRE
                 "Autre": [0.0] * 12,
             },
             "bu": {
                 # BU totals: CONCEPTION (800k), TRAVAUX (3M), MAINTENANCE (682.5k)
                 # Computed as sum of typologies and stored directly
-                "CONCEPTION": generate_11_month_distribution(800000),  # DV 50k + Concours 100k + Paysage 650k
-                "TRAVAUX": generate_11_month_distribution(3000000),     # DV(Travaux) 1M + Travaux conception 500k + Travaux Vincent 1.5M
-                "MAINTENANCE": generate_11_month_distribution(682500), # Entretien 495k + TS 137.5k + Animation 50k
+                "CONCEPTION": generate_11_month_distribution(800000),  # Conception DV 50k + Conception Concours 100k + Conception Paysage 650k
+                "TRAVAUX": generate_11_month_distribution(3000000),     # Travaux DV 1M + Travaux Conception 500k + Travaux Direct 1.5M
+                "MAINTENANCE": generate_11_month_distribution(682500), # Maintenance Entretien 495k + Maintenance TS 137.5k + Maintenance Animation 50k
                 "AUTRE": [0.0] * 12,
             }
         },
@@ -170,15 +170,15 @@ OBJECTIVES: Dict[int, Dict[ObjectiveMetric, Dict[ObjectiveDimension, Dict[str, L
                 "AUTRE": [0.0] * 12,
             },
             "typologie": {
-                "DV": [100000] * 12,
-                "Paysage": [1000000] * 12,
-                "Concours": [100000] * 12,
-                "DV(Travaux)": [300000] * 12,
-                "Travaux Vincent": [400000] * 12,
-                "Travaux conception": [300000] * 12,
-                "TS": [75000] * 12,
-                "Entretien": [75000] * 12,
-                "Animation": [50000] * 12,
+                "Conception DV": [100000] * 12,
+                "Conception Paysage": [1000000] * 12,
+                "Conception Concours": [100000] * 12,
+                "Travaux DV": [300000] * 12,
+                "Travaux Direct": [400000] * 12,
+                "Travaux Conception": [300000] * 12,
+                "Maintenance TS": [75000] * 12,
+                "Maintenance Entretien": [75000] * 12,
+                "Maintenance Animation": [50000] * 12,
                 "Autre": [0.0] * 12,
             }
         },
@@ -190,15 +190,15 @@ OBJECTIVES: Dict[int, Dict[ObjectiveMetric, Dict[ObjectiveDimension, Dict[str, L
                 "AUTRE": [0.0] * 12,
             },
             "typologie": {
-                "DV": [20000] * 12,
-                "Paysage": [30000] * 12,
-                "Concours": [20000] * 12,
-                "DV(Travaux)": [100000] * 12,
-                "Travaux Vincent": [100000] * 12,
-                "Travaux conception": [100000] * 12,
-                "TS": [25000] * 12,
-                "Entretien": [25000] * 12,
-                "Animation": [10000] * 12,
+                "Conception DV": [20000] * 12,
+                "Conception Paysage": [30000] * 12,
+                "Conception Concours": [20000] * 12,
+                "Travaux DV": [100000] * 12,
+                "Travaux Direct": [100000] * 12,
+                "Travaux Conception": [100000] * 12,
+                "Maintenance TS": [25000] * 12,
+                "Maintenance Entretien": [25000] * 12,
+                "Maintenance Animation": [10000] * 12,
                 "Autre": [0.0] * 12,
             }
         }

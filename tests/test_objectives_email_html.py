@@ -25,7 +25,7 @@ def test_objectives_email_contains_carryover_and_period_label():
                 "source_sheet": "Envoyé Août 2026",
                 "signed_year": 2026,
                 "cf_bu": "TRAVAUX",
-                "cf_typologie_de_devis": "DV(Travaux)",
+                "cf_typologie_de_devis": "Travaux DV",
                 f"Montant Total {production_year}": 10000.0,
                 f"Montant Total Q3_{production_year}": 10000.0,
                 f"Montant Pondéré {production_year}": 5000.0,

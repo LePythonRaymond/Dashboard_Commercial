@@ -43,19 +43,19 @@ def test_11_month_distribution():
 def test_2026_signe_typologie_values():
     """Test that 2026 Signé typologie objectives match expected values."""
     # Check CONCEPTION
-    assert objective_for_year(2026, "signe", "typologie", "DV") == 50000, "DV annual should be 50000"
-    assert objective_for_year(2026, "signe", "typologie", "Concours") == 100000, "Concours annual should be 100000"
-    assert objective_for_year(2026, "signe", "typologie", "Paysage") == 650000, "Paysage annual should be 650000"
+    assert objective_for_year(2026, "signe", "typologie", "Conception DV") == 50000, "Conception DV annual should be 50000"
+    assert objective_for_year(2026, "signe", "typologie", "Conception Concours") == 100000, "Conception Concours annual should be 100000"
+    assert objective_for_year(2026, "signe", "typologie", "Conception Paysage") == 650000, "Conception Paysage annual should be 650000"
 
     # Check TRAVAUX
-    assert objective_for_year(2026, "signe", "typologie", "DV(Travaux)") == 1000000, "DV(Travaux) annual should be 1000000"
-    assert objective_for_year(2026, "signe", "typologie", "Travaux conception") == 500000, "Travaux conception annual should be 500000"
-    assert objective_for_year(2026, "signe", "typologie", "Travaux Vincent") == 1500000, "Travaux Vincent annual should be 1500000"
+    assert objective_for_year(2026, "signe", "typologie", "Travaux DV") == 1000000, "Travaux DV annual should be 1000000"
+    assert objective_for_year(2026, "signe", "typologie", "Travaux Conception") == 500000, "Travaux Conception annual should be 500000"
+    assert objective_for_year(2026, "signe", "typologie", "Travaux Direct") == 1500000, "Travaux Direct annual should be 1500000"
 
     # Check MAINTENANCE
-    assert objective_for_year(2026, "signe", "typologie", "Entretien") == 495000, "Entretien annual should be 495000"
-    assert objective_for_year(2026, "signe", "typologie", "TS") == 137500, "TS annual should be 137500"
-    assert objective_for_year(2026, "signe", "typologie", "Animation") == 50000, "Animation annual should be 50000"
+    assert objective_for_year(2026, "signe", "typologie", "Maintenance Entretien") == 495000, "Maintenance Entretien annual should be 495000"
+    assert objective_for_year(2026, "signe", "typologie", "Maintenance TS") == 137500, "Maintenance TS annual should be 137500"
+    assert objective_for_year(2026, "signe", "typologie", "Maintenance Animation") == 50000, "Maintenance Animation annual should be 50000"
 
 
 def test_2026_august_zero_july_double():
@@ -87,15 +87,15 @@ def test_2026_envoye_equals_signe():
 
 def test_2026_bu_totals():
     """Test that BU totals match expected values (sum of typologies)."""
-    # CONCEPTION = DV + Concours + Paysage = 50k + 100k + 650k = 800k
+    # CONCEPTION = Conception DV + Conception Concours + Conception Paysage = 50k + 100k + 650k = 800k
     assert objective_for_year(2026, "signe", "bu", "CONCEPTION") == 800000, \
         "CONCEPTION BU should be 800000"
 
-    # TRAVAUX = DV(Travaux) + Travaux conception + Travaux Vincent = 1M + 500k + 1.5M = 3M
+    # TRAVAUX = Travaux DV + Travaux Conception + Travaux Direct = 1M + 500k + 1.5M = 3M
     assert objective_for_year(2026, "signe", "bu", "TRAVAUX") == 3000000, \
         "TRAVAUX BU should be 3000000"
 
-    # MAINTENANCE = Entretien + TS + Animation = 495k + 137.5k + 50k = 682.5k
+    # MAINTENANCE = Maintenance Entretien + Maintenance TS + Maintenance Animation = 495k + 137.5k + 50k = 682.5k
     assert objective_for_year(2026, "signe", "bu", "MAINTENANCE") == 682500, \
         "MAINTENANCE BU should be 682500"
 

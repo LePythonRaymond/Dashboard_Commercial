@@ -45,15 +45,15 @@ class GoogleSheetsClient:
 
     # Typologie Colors - Matching dashboard
     TYPOLOGIE_COLORS = {
-        'DV': {'red': 0.906, 'green': 0.435, 'blue': 0.318},           # #e76f51 Coral Red
-        'Animation': {'red': 0.165, 'green': 0.616, 'blue': 0.561},    # #2a9d8f Ocean Teal
-        'Paysage': {'red': 0.565, 'green': 0.745, 'blue': 0.427},      # #90be6d Light Green
-        'Concours': {'red': 0.902, 'green': 0.224, 'blue': 0.275},     # #e63946 Bright Red
-        'DV(Travaux)': {'red': 0.969, 'green': 0.498, 'blue': 0.0},   # #f77f00 Orange
-        'Travaux Vincent': {'red': 0.988, 'green': 0.749, 'blue': 0.286},  # #fcbf49 Golden Yellow
-        'Travaux conception': {'red': 0.988, 'green': 0.639, 'blue': 0.067},  # #fca311 Amber
-        'TS': {'red': 0.608, 'green': 0.349, 'blue': 0.714},           # #9b59b6 Purple
-        'Entretien': {'red': 0.204, 'green': 0.596, 'blue': 0.859},   # #3498db Blue
+        'Conception DV': {'red': 0.906, 'green': 0.435, 'blue': 0.318},           # #e76f51 Coral Red
+        'Conception Paysage': {'red': 0.565, 'green': 0.745, 'blue': 0.427},      # #90be6d Light Green
+        'Conception Concours': {'red': 0.902, 'green': 0.224, 'blue': 0.275},     # #e63946 Bright Red
+        'Travaux DV': {'red': 0.969, 'green': 0.498, 'blue': 0.0},   # #f77f00 Orange
+        'Travaux Direct': {'red': 0.988, 'green': 0.749, 'blue': 0.286},  # #fcbf49 Golden Yellow
+        'Travaux Conception': {'red': 0.988, 'green': 0.639, 'blue': 0.067},  # #fca311 Amber
+        'Maintenance TS': {'red': 0.608, 'green': 0.349, 'blue': 0.714},           # #9b59b6 Purple
+        'Maintenance Entretien': {'red': 0.204, 'green': 0.596, 'blue': 0.859},   # #3498db Blue
+        'Maintenance Animation': {'red': 0.165, 'green': 0.616, 'blue': 0.561},    # #2a9d8f Ocean Teal
         'Toiture': {'red': 0.149, 'green': 0.275, 'blue': 0.325},      # #264653 Dark Teal
         'Intérieur': {'red': 0.957, 'green': 0.635, 'blue': 0.380},    # #f4a261 Orange
         'Etude': {'red': 0.831, 'green': 0.647, 'blue': 0.647},        # #d4a5a5 Pink/Salmon

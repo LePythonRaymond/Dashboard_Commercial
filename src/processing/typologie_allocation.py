@@ -22,10 +22,12 @@ def parse_typologie_list(raw: Any) -> List[str]:
     Parse typologie string into list of tags.
 
     Handles:
-    - Comma-separated values: "DV, Paysage, Animation"
-    - Whitespace-separated: "DV Paysage Animation"
+    - Comma-separated values: "Conception DV, Conception Paysage, Maintenance Animation"
+    - Single tag (no comma): "Travaux Direct" (kept intact, not split on whitespace)
     - NaN/None/empty strings
     - "Non défini" treated as empty
+
+    IMPORTANT: Only splits on commas to preserve multi-word tags like "Conception DV".
 
     Args:
         raw: Raw value from DataFrame (can be string, list, NaN, None)
@@ -46,11 +48,12 @@ def parse_typologie_list(raw: Any) -> List[str]:
     if not raw_str or raw_str.lower() in ('nan', 'none', 'non défini', 'non defini'):
         return []
 
-    # Split by comma first, then by space if no commas
+    # Split ONLY by comma to preserve multi-word tags (e.g., "Conception DV", "Travaux Direct")
     if ',' in raw_str:
         tags = [t.strip() for t in raw_str.split(',')]
     else:
-        tags = [t.strip() for t in raw_str.split()]
+        # No comma: treat entire string as single tag (preserves multi-word tags)
+        tags = [raw_str]
 
     # Filter out empty strings and 'nan'
     return [t for t in tags if t and t.lower() != 'nan']
@@ -93,8 +96,8 @@ def detect_ts(tags: List[str], title: Any) -> bool:
     Returns:
         True if TS detected (in tags or title), False otherwise
     """
-    # Check tags
-    if any(tag.upper() == 'TS' for tag in tags):
+    # Check tags - support both old 'TS' and new 'Maintenance TS'
+    if any(tag.upper() == 'TS' or tag.upper() == 'MAINTENANCE TS' or 'TS' in tag.upper() for tag in tags):
         return True
 
     # Check title
@@ -106,23 +109,23 @@ def detect_ts(tags: List[str], title: Any) -> bool:
 
 def inject_ts_tag(tags: List[str], title: Any) -> List[str]:
     """
-    Add TS tag if detected from title, avoiding duplicates.
+    Add Maintenance TS tag if detected from title, avoiding duplicates.
 
     Args:
         tags: List of typologie tags
         title: Project title
 
     Returns:
-        List of tags with TS added if detected (no duplicates)
+        List of tags with Maintenance TS added if detected (no duplicates)
     """
     result = tags.copy()
 
-    # Check if TS already in tags
-    has_ts_tag = any(tag.upper() == 'TS' for tag in result)
+    # Check if TS already in tags (support both old 'TS' and new 'Maintenance TS')
+    has_ts_tag = any(tag.upper() == 'TS' or tag.upper() == 'MAINTENANCE TS' or 'TS' in tag.upper() for tag in result)
 
     # Check if title has TS
     if title_has_ts(title) and not has_ts_tag:
-        result.append('TS')
+        result.append('Maintenance TS')
 
     return result
 
@@ -132,9 +135,9 @@ def choose_primary_typologie(tags: List[str]) -> Optional[str]:
     Choose primary typologie for amount allocation.
 
     Rules:
-    1. If TS in tags → TS is primary
-    2. If multiple tags → choose first non-Animation tag
-    3. If all tags are Animation → Animation is primary
+    1. If Maintenance TS (or TS) in tags → Maintenance TS is primary
+    2. If multiple tags → choose first non-Maintenance Animation tag
+    3. If all tags are Maintenance Animation → Maintenance Animation is primary
     4. If single tag → that tag is primary
 
     Args:
@@ -146,17 +149,23 @@ def choose_primary_typologie(tags: List[str]) -> Optional[str]:
     if not tags:
         return None
 
-    # Rule 1: TS has highest priority
+    # Rule 1: Maintenance TS has highest priority (support both old 'TS' and new 'Maintenance TS')
     for tag in tags:
-        if tag.upper() == 'TS':
-            return 'TS'
+        tag_upper = tag.upper()
+        if tag_upper == 'TS' or tag_upper == 'MAINTENANCE TS' or 'TS' in tag_upper:
+            # Return the actual tag name (preserve case), but normalize old 'TS' to 'Maintenance TS'
+            if tag_upper == 'TS':
+                return 'Maintenance TS'
+            return tag
 
-    # Rule 2 & 3: Multiple tags - find first non-Animation
+    # Rule 2 & 3: Multiple tags - find first non-Maintenance Animation
     if len(tags) > 1:
         for tag in tags:
-            if tag.upper() != 'ANIMATION':
+            tag_upper = tag.upper()
+            # Skip Maintenance Animation (support both old 'Animation' and new 'Maintenance Animation')
+            if tag_upper != 'ANIMATION' and tag_upper != 'MAINTENANCE ANIMATION' and 'ANIMATION' not in tag_upper:
                 return tag
-        # All tags are Animation
+        # All tags are Maintenance Animation
         return tags[0]
 
     # Rule 4: Single tag

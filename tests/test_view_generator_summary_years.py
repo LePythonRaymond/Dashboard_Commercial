@@ -26,7 +26,7 @@ def test_view_generator_summary_includes_reference_year():
         [
             {
                 "cf_bu": "CONCEPTION",
-                "cf_typologie_de_devis": "DV",
+                "cf_typologie_de_devis": "Conception DV",
                 "amount": 100.0,
                 "Montant Total 2025": 10.0,
                 "Montant Total Q1_2025": 10.0,

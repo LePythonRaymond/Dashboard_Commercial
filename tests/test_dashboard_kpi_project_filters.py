@@ -30,7 +30,7 @@ def test_bu_project_list_matches_count():
     df = pd.DataFrame({
         'cf_bu': ['CONCEPTION', 'TRAVAUX', 'MAINTENANCE', 'CONCEPTION', 'TRAVAUX'],
         'amount': [1000, 2000, 3000, 4000, 5000],
-        'cf_typologie_de_devis': ['DV', 'Paysage', 'Animation', 'DV', 'Paysage'],
+        'cf_typologie_de_devis': ['Conception DV', 'Conception Paysage', 'Maintenance Animation', 'Conception DV', 'Conception Paysage'],
         'title': ['Proj1', 'Proj2', 'Proj3', 'Proj4', 'Proj5']
     })
 
@@ -53,7 +53,7 @@ def test_production_bu_project_list_matches_count():
     df = pd.DataFrame({
         'cf_bu': ['CONCEPTION', 'TRAVAUX', 'MAINTENANCE', 'CONCEPTION', 'TRAVAUX'],
         total_col: [1000, 2000, 0, 4000, 5000],  # One row with 0 (should be excluded)
-        'cf_typologie_de_devis': ['DV', 'Paysage', 'Animation', 'DV', 'Paysage'],
+        'cf_typologie_de_devis': ['Conception DV', 'Conception Paysage', 'Maintenance Animation', 'Conception DV', 'Conception Paysage'],
         'title': ['Proj1', 'Proj2', 'Proj3', 'Proj4', 'Proj5']
     })
 
@@ -73,7 +73,7 @@ def test_typologie_project_list_matches_count():
     df = pd.DataFrame({
         'cf_bu': ['MAINTENANCE', 'MAINTENANCE', 'TRAVAUX', 'TRAVAUX'],
         'amount': [1000, 2000, 3000, 4000],
-        'cf_typologie_de_devis': ['TS', 'Animation', 'Paysage', 'Paysage'],
+        'cf_typologie_de_devis': ['Maintenance TS', 'Maintenance Animation', 'Conception Paysage', 'Conception Paysage'],
         'title': ['Proj TS', 'Proj Anim', 'Proj Paysage 1', 'Proj Paysage 2']
     })
 
@@ -81,7 +81,7 @@ def test_typologie_project_list_matches_count():
     bu = 'MAINTENANCE'
     type_amounts = get_typologie_amounts_for_bu(df, bu, include_weighted=False)
 
-    for typ in ['TS', 'Animation']:
+    for typ in ['Maintenance TS', 'Maintenance Animation']:
         expected_count = type_amounts.get(typ, {}).get('count', 0)
         typ_projects = filter_projects_for_typologie_bu(df, bu, typ)
         actual_count = len(typ_projects)
@@ -94,12 +94,12 @@ def test_ts_special_case_typologie_list():
     df = pd.DataFrame({
         'cf_bu': ['TRAVAUX', 'MAINTENANCE', 'CONCEPTION'],  # TS can appear under any BU
         'amount': [1000, 2000, 3000],
-        'cf_typologie_de_devis': ['TS', 'TS', 'DV'],
+        'cf_typologie_de_devis': ['Maintenance TS', 'Maintenance TS', 'Conception DV'],
         'title': ['Proj TS 1', 'Proj TS 2', 'Proj DV']
     })
 
     bu = 'MAINTENANCE'
-    typ = 'TS'
+    typ = 'Maintenance TS'
 
     type_amounts = get_typologie_amounts_for_bu(df, bu, include_weighted=False)
     expected_count = type_amounts.get(typ, {}).get('count', 0)
@@ -121,14 +121,14 @@ def test_production_typologie_project_list_matches_count():
     df = pd.DataFrame({
         'cf_bu': ['MAINTENANCE', 'MAINTENANCE', 'TRAVAUX'],
         total_col: [1000, 2000, 3000],
-        'cf_typologie_de_devis': ['TS', 'Animation', 'Paysage'],
+        'cf_typologie_de_devis': ['Maintenance TS', 'Maintenance Animation', 'Conception Paysage'],
         'title': ['Proj TS', 'Proj Anim', 'Proj Paysage']
     })
 
     bu = 'MAINTENANCE'
     type_amounts = get_production_typologie_amounts_for_bu(df, production_year, bu, include_pondere=False)
 
-    for typ in ['TS', 'Animation']:
+    for typ in ['Maintenance TS', 'Maintenance Animation']:
         expected_count = type_amounts.get(typ, {}).get('count', 0)
         typ_projects = filter_projects_for_typologie_bu_production(df, production_year, bu, typ)
         actual_count = len(typ_projects)
@@ -163,12 +163,12 @@ def test_typologie_normal_case_bu_match():
     df = pd.DataFrame({
         'cf_bu': ['TRAVAUX', 'TRAVAUX', 'MAINTENANCE'],
         'amount': [1000, 2000, 3000],
-        'cf_typologie_de_devis': ['DV(Travaux)', 'DV(Travaux), Animation', 'DV(Travaux)'],
+        'cf_typologie_de_devis': ['Travaux DV', 'Travaux DV, Maintenance Animation', 'Travaux DV'],
         'title': ['Proj1', 'Proj2', 'Proj3']
     })
 
     bu = 'TRAVAUX'
-    typ = 'DV(Travaux)'
+    typ = 'Travaux DV'
 
     type_amounts = get_typologie_amounts_for_bu(df, bu, include_weighted=False)
     expected_count = type_amounts.get(typ, {}).get('count', 0)
@@ -177,5 +177,5 @@ def test_typologie_normal_case_bu_match():
     actual_count = len(typ_projects)
 
     assert actual_count == expected_count, f"Typologie {typ} in BU {bu}: list length {actual_count} != count {expected_count}"
-    # Should include both TRAVAUX rows with DV(Travaux) (count: typ in tags)
+    # Should include both TRAVAUX rows with Travaux DV (count: typ in tags)
     assert actual_count == 2, f"Should have 2 projects, got {actual_count}"

@@ -150,15 +150,15 @@ class ViewGenerator:
         """
         Get the reporting typology for a row, applying TS title override rule.
 
-        If title contains 'TS' (case-insensitive) and current typology is NOT 'TS',
-        override to 'TS' for reporting purposes. This merges title-based TS detection
-        into the typology TS category without double counting.
+        If title contains 'TS' (case-insensitive) and current typology is NOT 'Maintenance TS',
+        override to 'Maintenance TS' for reporting purposes. This merges title-based TS detection
+        into the typology Maintenance TS category without double counting.
 
         Args:
             row: DataFrame row with 'title' and 'cf_typologie_de_devis' columns
 
         Returns:
-            Reporting typology string (original or 'TS' if title-based override applies)
+            Reporting typology string (original or 'Maintenance TS' if title-based override applies)
         """
         typologie = str(row.get('cf_typologie_de_devis', '')).strip()
         title = str(row.get('title', '')).strip()
@@ -166,9 +166,10 @@ class ViewGenerator:
         # Check if title contains TS (case-insensitive)
         title_has_ts = 'TS' in title.upper() if title else False
 
-        # Apply override: if title has TS and typology is not already TS, set to TS
-        if title_has_ts and typologie.upper() != 'TS':
-            return 'TS'
+        # Apply override: if title has TS and typology is not already Maintenance TS (or TS), set to Maintenance TS
+        typologie_upper = typologie.upper()
+        if title_has_ts and typologie_upper != 'MAINTENANCE TS' and typologie_upper != 'TS' and 'TS' not in typologie_upper:
+            return 'Maintenance TS'
 
         return typologie
 
@@ -214,8 +215,12 @@ class ViewGenerator:
             else:
                 raw_group = str(row[group_col])
 
-            # Split by comma or space
-            categories = re.split(r'[ ,]+', raw_group)
+            # Split ONLY by comma to preserve multi-word tags (e.g., "Conception DV", "Travaux Direct")
+            # If no comma, treat entire string as single category
+            if ',' in raw_group:
+                categories = [c.strip() for c in raw_group.split(',')]
+            else:
+                categories = [raw_group.strip()]
 
             for cat in categories:
                 cat = cat.strip()

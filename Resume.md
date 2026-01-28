@@ -119,7 +119,8 @@ The original system was built in **n8n** (workflow automation tool) with Python 
          │
          ├──► Weekly Pipeline (run_travaux_pipeline.py)
          │    ├──► Email (TRAVAUX projection)
-         │    └──► Notion (TRAVAUX projection DB)
+         │    ├──► Notion (TRAVAUX projection DB)
+         │    └──► Notion (Recent TRAVAUX projects - last 7 days)
          │
          └──► Streamlit Dashboard (BI Visualization - reads from Google Sheets)
 ```
@@ -293,7 +294,7 @@ Each view includes summaries at the bottom:
 myrium/
 ├── config/              # Configuration & constants
 ├── src/
-│   ├── api/            # External API clients
+│   ├── api/            # External API clients (auth.py, proposals.py, projects.py)
 │   ├── processing/     # Business logic
 │   ├── integrations/   # Output handlers (Sheets, Email, Notion)
 │   └── dashboard/      # Streamlit application
@@ -361,17 +362,19 @@ myrium/
 - **Assignee Visibility**: Shows all assignees in alert tables
 
 ### 7.6 Notion Integration
-- **3 Databases**: Weird Proposals, Follow-up, TRAVAUX Projection
+- **4 Databases**: Weird Proposals, Follow-up, TRAVAUX Projection, Recent TRAVAUX Projects
 - **Commercial/Chef de projet Split**: People properties for clear responsibility
 - **Schema-Aware Sync**: Only sets properties that exist in database schema (prevents 400 errors)
 - **Property Preservation**: Preserves user-edited notes/checkboxes during sync
-- **Dual API Support**: Compatible with old and new Notion SDK versions (prevents duplicates)
+- **Notion API 2025-09-03**: All clients pinned to latest API version with data_sources support
+- **Fail-Closed Behavior**: Refuses to create pages when schema cannot be loaded (prevents blank page spam)
 - **Owner-Specific Follow-up Windows**: Vincent and Adélaïde get 365-day forward windows in Notion (emails use 60 days)
 
 ### 7.7 BI Dashboard
 - **Production Tabs**: "À produire {Year}" with cross-year aggregation
 - **Time Filtering**: Filter by Month/Quarter based on source sheet
 - **Date Columns**: Full visibility of proposal dates
+- **Clickable Project Lists**: KPI cards display project counts with clickable "🔎 Voir projets" buttons that open large modal dialogs showing detailed project lists with Furious CRM links
 - **Optimization**: Lazy loading, caching, efficient multi-sheet reading
 - **PDF Removal**: Export feature removed for performance/simplicity
 
@@ -391,6 +394,8 @@ SMTP_USER=...
 SMTP_PASSWORD=...
 NOTION_API_KEY=...
 NOTION_DATABASE_ID=...
+NOTION_TRAVAUX_PROJECTION_DATABASE_ID=...
+NOTION_TRAVAUX_RECENT_PROJECTS_DATABASE_ID=...
 ```
 
 ### 8.2 Business Constants
@@ -443,6 +448,7 @@ The pipeline supports granular flags to control execution components:
 - Filters TRAVAUX proposals with probability ≥ 25% and `date` OR `projet_start` within rolling 365 days
 - Sends projection email to Mathilde with Guillaume and Vincent in CC
 - Syncs to Notion TRAVAUX projection database
+- **Step 6**: Fetches TRAVAUX projects created in last 7 days and syncs to "Récent projets travaux" Notion database
 
 ### 9.3 Dashboard Deployment
 ```bash
@@ -584,6 +590,131 @@ See original documentation for details on performance, security, error handling,
 - Lower probability threshold (25%) increases proposal coverage in TRAVAUX projection
 - All existing tests pass, backward compatible with email alert behavior
 
+### 18.3 Clickable Project Lists in Dashboard KPI Cards (January 2026)
+
+**Enhancement**: Added interactive project list viewing capability to all KPI cards in the Streamlit dashboard, allowing users to drill down from summary counts to detailed project lists.
+
+**Problem**:
+- KPI cards displayed project counts but users couldn't see which specific projects contributed to each metric
+- No way to verify accuracy of counts or access project details directly from the dashboard
+- Limited visibility into project composition for each business unit, typologie, or production year
+
+**Solution**:
+1. **Modal Dialog Implementation**:
+   - Small trigger button "🔎 Voir projets" added to each KPI card
+   - Clicking opens a large modal dialog (`st.dialog` with `width="large"`) showing detailed project list
+   - Dialog displays project title, dates, amounts, probability, and clickable Furious CRM links
+   - Modal provides significantly more viewing space than popover (at least 4x larger)
+
+2. **Accurate Project Filtering**:
+   - Created dedicated filtering functions that replicate exact counting logic used in KPI calculations
+   - `filter_projects_for_typologie_bu()`: Filters projects for BU/typologie combinations, including special "TS" case handling
+   - `filter_projects_for_typologie_bu_production()`: Production-year specific filtering with year-based amount masks
+   - Ensures project lists always match displayed counts (no discrepancies)
+
+3. **Furious CRM Integration**:
+   - `build_furious_url()`: Constructs direct links to Furious CRM proposal pages
+   - Links displayed as clickable `LinkColumn` in dataframe for easy navigation
+   - Users can jump directly from dashboard to CRM for detailed project information
+
+4. **Comprehensive Coverage**:
+   - **BU Summary Cards**: Clickable lists for each business unit (MAINTENANCE, TRAVAUX, CONCEPTION)
+   - **Typologie Blocks**: Lists for each typologie within each BU
+   - **Production Year Views**: Lists filtered by production year and BU/typologie
+   - **Global/Monthly Summary**: Clickable lists for total project counts in snapshot and monthly views
+
+**Technical Implementation**:
+- `render_projects_popover()`: Main function that renders trigger button and dialog (despite name, uses `st.dialog` not `st.popover`)
+- `prepare_projects_table()`: Prepares minimal project table with formatted dates, amounts, and Furious URLs
+- `_show_projects_dialog()`: Dialog body function that displays header, project count, and interactive dataframe
+- Filtering functions use same logic as `get_bu_amounts()` and `get_typologie_amounts_for_bu()` to ensure consistency
+
+**Why `st.dialog` Instead of `st.popover`**:
+- `st.popover` has no official API to control opened panel size (only supports label/help/on_click/disabled/use_container_width)
+- `st.dialog` provides `width="large"` parameter for significantly larger viewing area
+- Modal dialog approach is more reliable and maintainable than CSS hacks on popover containers
+
+**Testing**:
+- Added `tests/test_dashboard_kpi_project_filters.py` (7 tests) ensuring:
+  - Project list counts match KPI card counts for BU summaries
+  - Production-year filtered lists match production-year KPI counts
+  - Typologie filtered lists match typologie KPI counts (including TS special case)
+  - Filtering logic correctly handles edge cases and production year masks
+
+**Code Changes**:
+- `src/dashboard/app.py`:
+  - Added `build_furious_url()`, `prepare_projects_table()`, `render_projects_popover()`
+  - Added `filter_projects_for_typologie_bu()`, `filter_projects_for_typologie_bu_production()`
+  - Modified `create_bu_kpi_row()`, `create_production_bu_kpi_row()`, `create_bu_grouped_typologie_blocks()`, `create_bu_grouped_typologie_blocks_production()`
+  - Updated summary KPI cards in "Vue Globale", "Vue Mensuelle", and production views
+
+**Impact**:
+- Users can now drill down from any KPI card to see exact project composition
+- Improved transparency and verification of dashboard calculations
+- Direct access to Furious CRM from dashboard improves workflow efficiency
+- Large modal dialogs provide comfortable viewing experience for project lists
+- All tests pass, filtering logic validated against existing KPI counting functions
+
+### 18.4 Recent TRAVAUX Projects Sync & Notion API 2025-09-03 Migration (January 2026)
+
+**New Feature**: Added "Récent projets travaux" Notion database sync to weekly TRAVAUX pipeline.
+
+**Business Need**: Track newly created TRAVAUX projects (last 7 days) in a dedicated Notion database for immediate visibility and resource planning.
+
+**Implementation**:
+1. **New Furious API Client** (`src/api/projects.py`):
+   - `ProjectsClient` mirrors `ProposalsClient` pattern
+   - Fetches from `/api/v2/project/` endpoint with GraphQL-like query syntax
+   - Server-side filtering: `created_at >= now-7d` and `cf_bu == TRAVAUX`
+   - Client-side validation as belt-and-suspenders
+   - Fields: id, title, type, type_label, tags, start_date, end_date, created_at, project_manager, business_account, total_amount, cf_bu
+
+2. **New Notion Sync Module** (`src/integrations/notion_recent_travaux_projects_sync.py`):
+   - Upserts by `ID Projet` (dedupe key) to preserve manual Notion fields
+   - Maps 11 properties: Name, ID Projet, Voir Furious (rich_text link), Type/Label/Tags (multi_select), Date début/fin/Creation (date), Chef de projet/Commercial (people), CA (number)
+   - Uses existing `NotionUserMapper` for person property mapping
+   - Preserves `Name` on updates (manual renames not overwritten)
+   - Schema-aware property building (only sets properties that exist)
+
+3. **Pipeline Integration** (`scripts/run_travaux_pipeline.py`):
+   - Added Step 6 after TRAVAUX projection sync
+   - Fetches recent projects and transforms to dict format
+   - Non-blocking: errors don't fail entire pipeline
+   - Respects `--dry-run` flag
+
+**Notion API 2025-09-03 Migration**:
+- **Problem**: Notion API 2025-09-03 introduced `data_sources` model. Databases with multiple data sources require using `data_source_id` for page creation, not `database_id`. Without pinned API version, clients defaulted to older behavior causing "multiple data sources not supported" errors. Schema retrieval also failed when properties were only available via `data_sources.retrieve()`.
+- **Solution**:
+  - All Notion clients now pin `notion_version="2025-09-03"` when instantiating `Client`
+  - Page creation uses `parent={"data_source_id": ...}` when database has data_sources, falls back to `database_id` otherwise
+  - Enhanced schema retrieval: tries `databases.retrieve().properties` → `data_sources.retrieve().properties` → fail-closed (refuses to create pages if schema unknown)
+  - Prevents blank page creation when schema cannot be loaded
+
+**Code Changes**:
+- `src/api/projects.py`: New `ProjectsClient` with `fetch_recent_travaux(days=7)` method
+- `src/integrations/notion_recent_travaux_projects_sync.py`: New sync module with data_sources support
+- `src/integrations/notion_travaux_sync.py`: Enhanced schema retrieval, fail-closed behavior, data_source_id parent
+- `src/integrations/notion_alerts_sync.py`: Pinned API version, data_source_id parent support
+- `src/integrations/notion_users.py`: Pinned API version
+- `config/settings.py`: Added `notion_travaux_recent_projects_database_id` setting
+- `scripts/run_travaux_pipeline.py`: Added Step 6 for recent projects sync
+
+**Configuration**:
+- New env var: `NOTION_TRAVAUX_RECENT_PROJECTS_DATABASE_ID` (database or data_source ID)
+- Database must be shared with Notion integration
+- Required properties: Name (title), ID Projet (rich_text/number), Voir Furious (rich_text), Type/Label/Tags (multi_select), Date début/fin/Creation (date), Chef de projet/Commercial (people), CA (number)
+
+**Testing**:
+- Added `tests/test_projects_client_query.py`: Query building, date filtering, client-side validation
+- Added `tests/test_recent_travaux_projects_sync.py`: Upsert mapping, multi-select parsing, people mapping, URL building
+- All tests pass (97 passed, 1 skipped)
+
+**Impact**:
+- Weekly pipeline now tracks both long-term TRAVAUX projections (365-day window) and recent project creation (7-day window)
+- Recent projects database provides immediate visibility into new TRAVAUX work for resource allocation
+- Notion API 2025-09-03 compatibility ensures reliable sync with multi-data-source databases
+- Fail-closed behavior prevents blank page spam when schema cannot be retrieved
+
 ---
 
 ## 17. Conclusion
@@ -599,7 +730,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.28
+**Document Version**: 1.30
 **Last Updated**: January 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System
