@@ -29,14 +29,10 @@ CANONICAL_TYPOLOGIES = [
 _TYPOLOGIE_VARIANT_TO_CANONICAL: dict = {}
 for _canon in CANONICAL_TYPOLOGIES:
     _TYPOLOGIE_VARIANT_TO_CANONICAL[_canon.lower()] = _canon
-# Furious-specific variants (Maintenance TS spellings)
+# Furious-specific variants
 _TYPOLOGIE_VARIANT_TO_CANONICAL['maintenance ts (+dt)'] = 'Maintenance TS'
-_TYPOLOGIE_VARIANT_TO_CANONICAL['maintenance ts (dt)'] = 'Maintenance TS'
-_TYPOLOGIE_VARIANT_TO_CANONICAL['maintenance ts(+dt)'] = 'Maintenance TS'
 _TYPOLOGIE_VARIANT_TO_CANONICAL['maintenance ts / dt'] = 'Maintenance TS'
 _TYPOLOGIE_VARIANT_TO_CANONICAL['maintenance ts/dt'] = 'Maintenance TS'
-_TYPOLOGIE_VARIANT_TO_CANONICAL['maintenance ts/ dt'] = 'Maintenance TS'
-_TYPOLOGIE_VARIANT_TO_CANONICAL['maintenance ts /dt'] = 'Maintenance TS'
 _TYPOLOGIE_VARIANT_TO_CANONICAL['travaux conception'] = 'Travaux Conception'
 _TYPOLOGIE_VARIANT_TO_CANONICAL['conception concours'] = 'Conception Concours'
 _TYPOLOGIE_VARIANT_TO_CANONICAL['conception dv'] = 'Conception DV'
@@ -53,8 +49,7 @@ def normalize_typologie_tag(tag: str) -> str:
     Normalize a typologie tag to the canonical name (9 subcategories + Autre).
 
     Handles Furious variants and case so "Maintenance TS (+DT)", "Travaux conception"
-    map to "Maintenance TS", "Travaux Conception". Collapses multiple spaces so
-    "Travaux  Conception" matches. Unknown tags are returned unchanged.
+    map to "Maintenance TS", "Travaux Conception". Unknown tags are returned unchanged.
 
     Args:
         tag: Raw tag string from CRM
@@ -64,7 +59,7 @@ def normalize_typologie_tag(tag: str) -> str:
     """
     if not tag or not str(tag).strip():
         return tag
-    key = re.sub(r'\s+', ' ', str(tag).strip()).lower()
+    key = str(tag).strip().lower()
     return _TYPOLOGIE_VARIANT_TO_CANONICAL.get(key, tag)
 
 

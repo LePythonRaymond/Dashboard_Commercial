@@ -67,12 +67,6 @@ from src.processing.objectives import (
     count_unique_accounting_periods, ACCOUNTING_PERIODS
 )
 from src.processing.typologie_allocation import allocate_typologie_for_row
-try:
-    from src.processing.typologie_allocation import normalize_typologie_tag
-except ImportError:
-    # Fallback when deployment has older typologie_allocation without normalize_typologie_tag
-    def normalize_typologie_tag(tag: str) -> str:
-        return tag if tag is not None else ""
 
 # =============================================================================
 # CONSTANTS
@@ -671,7 +665,7 @@ def get_typologie_amounts_for_bu(
         for typ in typologies:
             # Special case: Maintenance TS under MAINTENANCE - count from ALL rows where primary is Maintenance TS
             if typ == 'Maintenance TS' and bu == 'MAINTENANCE':
-                if normalize_typologie_tag(primary) == 'Maintenance TS':
+                if primary == 'Maintenance TS':
                     # Count: Maintenance TS in tags
                     if 'Maintenance TS' in tags:
                         result[typ]['count'] += 1
@@ -690,8 +684,8 @@ def get_typologie_amounts_for_bu(
                 if typ in tags:
                     result[typ]['count'] += 1
 
-                # Amount: primary matches typ (normalize for variant safety)
-                if normalize_typologie_tag(primary) == typ:
+                # Amount: primary matches typ
+                if primary == typ:
                     amount = float(row.get('amount', 0) or 0)
                     result[typ]['total'] += amount
                     if include_weighted:
@@ -732,7 +726,7 @@ def filter_projects_for_typologie_bu(
 
         # Special case: Maintenance TS under MAINTENANCE
         if typ == 'Maintenance TS' and bu == 'MAINTENANCE':
-            if normalize_typologie_tag(primary) == 'Maintenance TS' and 'Maintenance TS' in tags:
+            if primary == 'Maintenance TS' and 'Maintenance TS' in tags:
                 matching_indices.append(idx)
         else:
             # Normal case: BU must match and typ in tags
@@ -786,7 +780,7 @@ def filter_projects_for_typologie_bu_production(
 
         # Special case: Maintenance TS under MAINTENANCE
         if typ == 'Maintenance TS' and bu == 'MAINTENANCE':
-            if normalize_typologie_tag(primary) == 'Maintenance TS' and 'Maintenance TS' in tags:
+            if primary == 'Maintenance TS' and 'Maintenance TS' in tags:
                 matching_indices.append(idx)
         else:
             # Normal case: BU must match and typ in tags
@@ -3115,13 +3109,13 @@ def get_production_typologie_amounts_for_bu(
         pondere_amount = float(row.get(pondere_col, 0) or 0) if include_pondere else 0.0
 
         for typ in typologies:
-            # Special case: Maintenance TS under MAINTENANCE - count from ALL rows where primary is Maintenance TS
-            if typ == 'Maintenance TS' and bu == 'MAINTENANCE':
-                if normalize_typologie_tag(primary) == 'Maintenance TS':
-                    # Count: Maintenance TS in tags
-                    if 'Maintenance TS' in tags:
+            # Special case: TS under MAINTENANCE - count from ALL rows where primary is TS
+            if typ == 'TS' and bu == 'MAINTENANCE':
+                if primary == 'TS':
+                    # Count: TS in tags
+                    if 'TS' in tags:
                         base[typ]['count'] += 1
-                    # Amount: primary is Maintenance TS
+                    # Amount: primary is TS
                     base[typ]['total'] += total_amount
                     if include_pondere:
                         base[typ]['pondere'] += pondere_amount
@@ -3134,8 +3128,8 @@ def get_production_typologie_amounts_for_bu(
                 if typ in tags:
                     base[typ]['count'] += 1
 
-                # Amount: primary matches typ (normalize for variant safety)
-                if normalize_typologie_tag(primary) == typ:
+                # Amount: primary matches typ
+                if primary == typ:
                     base[typ]['total'] += total_amount
                     if include_pondere:
                         base[typ]['pondere'] += pondere_amount

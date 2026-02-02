@@ -74,15 +74,6 @@ def test_normalize_typologie_tag_unknown_unchanged():
     assert normalize_typologie_tag("") == ""
 
 
-def test_normalize_typologie_tag_whitespace_and_ts_variants():
-    """Test whitespace collapse and extra Maintenance TS variants."""
-    assert normalize_typologie_tag("Travaux  Conception") == "Travaux Conception"
-    assert normalize_typologie_tag("Maintenance TS (DT)") == "Maintenance TS"
-    assert normalize_typologie_tag("Maintenance TS(+DT)") == "Maintenance TS"
-    assert normalize_typologie_tag("Maintenance TS /dt") == "Maintenance TS"
-    assert normalize_typologie_tag("Maintenance TS/ DT") == "Maintenance TS"
-
-
 def test_allocate_typologie_for_row_variant_normalized():
     """Test Furious variant 'Maintenance TS (+DT)' yields primary 'Maintenance TS'."""
     row = pd.Series({
