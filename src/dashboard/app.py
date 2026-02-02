@@ -1257,17 +1257,12 @@ def calculate_realized_by_production_quarter(
     elif dimension == "typologie":
         if 'cf_typologie_de_devis' not in df.columns:
             return 0.0
-        # Handle split typologies
+        # Use primary typologie only (same logic as calculate_realized_by_production_year)
         total = 0.0
         for _, row in df.iterrows():
-            typo_str = str(row.get('cf_typologie_de_devis', ''))
-            if not typo_str or typo_str.lower() == 'nan':
-                continue
-            typologies = [t.strip() for t in typo_str.replace(',', ' ').split()]
-            if key in typologies:
-                num_typos = len(typologies)
-                if num_typos > 0:
-                    total += (row[amount_col] or 0) / num_typos
+            tags, primary = allocate_typologie_for_row(row)
+            if primary == key:
+                total += float(row.get(amount_col, 0) or 0)
         return total
     else:
         return 0.0

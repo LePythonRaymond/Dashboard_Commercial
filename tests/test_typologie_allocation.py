@@ -20,6 +20,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.processing.typologie_allocation import (
     parse_typologie_list,
+    normalize_typologie_tag,
     title_has_ts,
     detect_ts,
     inject_ts_tag,
@@ -57,6 +58,44 @@ def test_parse_typologie_list_empty():
     assert parse_typologie_list("Non défini") == []
 
 
+def test_normalize_typologie_tag_furious_variants():
+    """Test Furious variants normalize to canonical names."""
+    assert normalize_typologie_tag("Maintenance TS (+DT)") == "Maintenance TS"
+    assert normalize_typologie_tag("Maintenance TS / DT") == "Maintenance TS"
+    assert normalize_typologie_tag("Maintenance TS/DT") == "Maintenance TS"
+    assert normalize_typologie_tag("Travaux conception") == "Travaux Conception"
+    assert normalize_typologie_tag("CONCEPTION PAYSAGE") == "Conception Paysage"
+    assert normalize_typologie_tag("Conception Paysage") == "Conception Paysage"
+
+
+def test_normalize_typologie_tag_unknown_unchanged():
+    """Test unknown tags are returned unchanged."""
+    assert normalize_typologie_tag("Some Other Tag") == "Some Other Tag"
+    assert normalize_typologie_tag("") == ""
+
+
+def test_allocate_typologie_for_row_variant_normalized():
+    """Test Furious variant 'Maintenance TS (+DT)' yields primary 'Maintenance TS'."""
+    row = pd.Series({
+        'cf_typologie_de_devis': 'Maintenance TS (+DT)',
+        'title': 'Project'
+    })
+    tags, primary = allocate_typologie_for_row(row)
+    assert primary == 'Maintenance TS'
+    assert 'Maintenance TS' in tags
+
+
+def test_allocate_typologie_for_row_travaux_conception_case():
+    """Test 'Travaux conception' (lowercase) normalizes to 'Travaux Conception'."""
+    row = pd.Series({
+        'cf_typologie_de_devis': 'Travaux conception',
+        'title': 'Project'
+    })
+    tags, primary = allocate_typologie_for_row(row)
+    assert primary == 'Travaux Conception'
+    assert 'Travaux Conception' in tags
+
+
 def test_title_has_ts():
     """Test TS detection in titles."""
     assert title_has_ts("Project TS") == True
@@ -84,14 +123,14 @@ def test_detect_ts():
 
 
 def test_inject_ts_tag():
-    """Test TS tag injection."""
+    """Test TS tag injection (adds Maintenance TS when title has TS)."""
     # TS already in tags
     assert inject_ts_tag(["TS"], "Project") == ["TS"]
     assert inject_ts_tag(["DV", "TS"], "Project") == ["DV", "TS"]
 
-    # TS in title, not in tags
-    assert inject_ts_tag(["DV"], "Project TS") == ["DV", "TS"]
-    assert inject_ts_tag([], "Project TS") == ["TS"]
+    # TS in title, not in tags -> inject Maintenance TS
+    assert inject_ts_tag(["DV"], "Project TS") == ["DV", "Maintenance TS"]
+    assert inject_ts_tag([], "Project TS") == ["Maintenance TS"]
 
     # No TS
     assert inject_ts_tag(["DV"], "Project") == ["DV"]

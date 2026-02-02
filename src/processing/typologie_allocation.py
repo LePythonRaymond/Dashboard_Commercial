@@ -10,11 +10,57 @@ Rules:
 3. Multi-tags: Project counted in each tag's count, but amount goes to primary tag only
    - Animation is lowest priority: if multiple tags, amount goes to first non-Animation tag
    - If all tags are Animation, amount goes to Animation
+4. Furious variants (e.g. "Maintenance TS (+DT)", "Travaux conception") are normalized to canonical names.
 """
 
 import re
 from typing import Any, List, Optional, Tuple
 import pandas as pd
+
+# Canonical typologie names (9 subcategories + Autre). Variants map to these.
+CANONICAL_TYPOLOGIES = [
+    'Conception Concours', 'Conception DV', 'Conception Paysage',
+    'Travaux Direct', 'Travaux DV', 'Travaux Conception',
+    'Maintenance TS', 'Maintenance Entretien', 'Maintenance Animation',
+    'Autre',
+]
+
+# Map lowercase variant -> canonical name. Used for case-insensitive normalization.
+_TYPOLOGIE_VARIANT_TO_CANONICAL: dict = {}
+for _canon in CANONICAL_TYPOLOGIES:
+    _TYPOLOGIE_VARIANT_TO_CANONICAL[_canon.lower()] = _canon
+# Furious-specific variants
+_TYPOLOGIE_VARIANT_TO_CANONICAL['maintenance ts (+dt)'] = 'Maintenance TS'
+_TYPOLOGIE_VARIANT_TO_CANONICAL['maintenance ts / dt'] = 'Maintenance TS'
+_TYPOLOGIE_VARIANT_TO_CANONICAL['maintenance ts/dt'] = 'Maintenance TS'
+_TYPOLOGIE_VARIANT_TO_CANONICAL['travaux conception'] = 'Travaux Conception'
+_TYPOLOGIE_VARIANT_TO_CANONICAL['conception concours'] = 'Conception Concours'
+_TYPOLOGIE_VARIANT_TO_CANONICAL['conception dv'] = 'Conception DV'
+_TYPOLOGIE_VARIANT_TO_CANONICAL['conception paysage'] = 'Conception Paysage'
+_TYPOLOGIE_VARIANT_TO_CANONICAL['travaux direct'] = 'Travaux Direct'
+_TYPOLOGIE_VARIANT_TO_CANONICAL['travaux dv'] = 'Travaux DV'
+_TYPOLOGIE_VARIANT_TO_CANONICAL['maintenance ts'] = 'Maintenance TS'
+_TYPOLOGIE_VARIANT_TO_CANONICAL['maintenance entretien'] = 'Maintenance Entretien'
+_TYPOLOGIE_VARIANT_TO_CANONICAL['maintenance animation'] = 'Maintenance Animation'
+
+
+def normalize_typologie_tag(tag: str) -> str:
+    """
+    Normalize a typologie tag to the canonical name (9 subcategories + Autre).
+
+    Handles Furious variants and case so "Maintenance TS (+DT)", "Travaux conception"
+    map to "Maintenance TS", "Travaux Conception". Unknown tags are returned unchanged.
+
+    Args:
+        tag: Raw tag string from CRM
+
+    Returns:
+        Canonical typologie name or original tag if no mapping
+    """
+    if not tag or not str(tag).strip():
+        return tag
+    key = str(tag).strip().lower()
+    return _TYPOLOGIE_VARIANT_TO_CANONICAL.get(key, tag)
 
 
 def parse_typologie_list(raw: Any) -> List[str]:
@@ -195,6 +241,9 @@ def allocate_typologie_for_row(
     # Parse typologie column
     raw_typologie = row.get(typologie_col, '')
     tags = parse_typologie_list(raw_typologie)
+
+    # Normalize Furious variants to canonical names (e.g. "Maintenance TS (+DT)" -> "Maintenance TS")
+    tags = [normalize_typologie_tag(t) for t in tags]
 
     # Inject TS if detected from title
     title = row.get(title_col, '')

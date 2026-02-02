@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from config.settings import STATUS_WON, STATUS_WAITING, MONTH_MAP
 from .revenue_engine import RevenueEngine
+from .typologie_allocation import allocate_typologie_for_row
 
 
 @dataclass
@@ -182,11 +183,9 @@ class ViewGenerator:
         """
         Create summary aggregated by a column, with split handling.
 
-        Handles cases where a value like "DV, PAYSAGE" should be split
-        and added to both "DV" and "PAYSAGE" totals.
-
-        For typology summaries, applies TS title override rule: title-based TS
-        detection is merged into typology 'TS' category.
+        For cf_bu: one category per row (no split).
+        For cf_typologie_de_devis: uses primary typologie only (allocate_typologie_for_row);
+        each row contributes to exactly one typologie bucket. No comma-split or double-counting.
 
         Args:
             df: Filtered DataFrame
@@ -205,31 +204,28 @@ class ViewGenerator:
         else:
             cols_to_sum = ['amount'] + [c for c in self.financial_cols if 'Total' in c and c in df.columns]
 
-        # Aggregate with split handling
         agg_data: Dict[str, Dict[str, float]] = {}
 
-        for _, row in df.iterrows():
-            # For typology summaries, apply reporting typology override (TS title rule)
-            if group_col == 'cf_typologie_de_devis':
-                raw_group = self._get_reporting_typologie(row)
-            else:
+        if group_col == 'cf_typologie_de_devis':
+            # Typologie summary: primary-only allocation (one category per row)
+            for _, row in df.iterrows():
+                tags, primary = allocate_typologie_for_row(row)
+                if not primary:
+                    continue
+                if primary not in agg_data:
+                    agg_data[primary] = {c: 0.0 for c in cols_to_sum}
+                for c in cols_to_sum:
+                    if c in row.index:
+                        agg_data[primary][c] += row[c]
+        else:
+            # BU or other: one category per row (no split)
+            for _, row in df.iterrows():
                 raw_group = str(row[group_col])
-
-            # Split ONLY by comma to preserve multi-word tags (e.g., "Conception DV", "Travaux Direct")
-            # If no comma, treat entire string as single category
-            if ',' in raw_group:
-                categories = [c.strip() for c in raw_group.split(',')]
-            else:
-                categories = [raw_group.strip()]
-
-            for cat in categories:
-                cat = cat.strip()
+                cat = raw_group.strip()
                 if not cat or cat.lower() == 'nan':
                     continue
-
                 if cat not in agg_data:
                     agg_data[cat] = {c: 0.0 for c in cols_to_sum}
-
                 for c in cols_to_sum:
                     if c in row.index:
                         agg_data[cat][c] += row[c]

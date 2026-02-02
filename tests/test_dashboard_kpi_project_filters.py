@@ -21,7 +21,9 @@ from src.dashboard.app import (
     get_production_typologie_amounts_for_bu,
     filter_projects_for_typologie_bu,
     filter_projects_for_typologie_bu_production,
-    get_production_year_totals
+    get_production_year_totals,
+    calculate_realized_by_production_quarter,
+    calculate_realized_by_production_year,
 )
 
 
@@ -179,3 +181,31 @@ def test_typologie_normal_case_bu_match():
     assert actual_count == expected_count, f"Typologie {typ} in BU {bu}: list length {actual_count} != count {expected_count}"
     # Should include both TRAVAUX rows with Travaux DV (count: typ in tags)
     assert actual_count == 2, f"Should have 2 projects, got {actual_count}"
+
+
+def test_calculate_realized_by_production_quarter_typologie_primary_only():
+    """Production quarter typologie uses primary-only (no space-split, no amount division)."""
+    production_year = 2026
+    quarter_col = f'Montant Total Q1_{production_year}'
+
+    # Row with multi-word typologie "Conception Paysage" -> full amount to that key only
+    # Row with "Travaux DV" -> full amount to Travaux DV
+    df = pd.DataFrame([
+        {'cf_typologie_de_devis': 'Conception Paysage', quarter_col: 100.0},
+        {'cf_typologie_de_devis': 'Travaux DV', quarter_col: 50.0},
+    ])
+
+    con = calculate_realized_by_production_quarter(df, production_year, 'Q1', 'typologie', 'Conception Paysage', use_pondere=False)
+    trav = calculate_realized_by_production_quarter(df, production_year, 'Q1', 'typologie', 'Travaux DV', use_pondere=False)
+
+    assert con == 100.0, "Conception Paysage should get full 100 (primary-only)"
+    assert trav == 50.0, "Travaux DV should get full 50 (primary-only)"
+
+    # Multi-tag row: Conception Paysage, Maintenance Animation -> primary is Conception Paysage
+    df_multi = pd.DataFrame([
+        {'cf_typologie_de_devis': 'Conception Paysage, Maintenance Animation', quarter_col: 200.0},
+    ])
+    con_multi = calculate_realized_by_production_quarter(df_multi, production_year, 'Q1', 'typologie', 'Conception Paysage', use_pondere=False)
+    anim_multi = calculate_realized_by_production_quarter(df_multi, production_year, 'Q1', 'typologie', 'Maintenance Animation', use_pondere=False)
+    assert con_multi == 200.0, "Primary Conception Paysage gets full amount"
+    assert anim_multi == 0.0, "Maintenance Animation (demoted) gets nothing"
