@@ -66,7 +66,13 @@ from src.processing.objectives import (
     get_accounting_period_for_month, get_accounting_period_label, get_months_for_accounting_period,
     count_unique_accounting_periods, ACCOUNTING_PERIODS
 )
-from src.processing.typologie_allocation import allocate_typologie_for_row, normalize_typologie_tag
+from src.processing.typologie_allocation import allocate_typologie_for_row
+try:
+    from src.processing.typologie_allocation import normalize_typologie_tag
+except ImportError:
+    # Fallback when deployment has older typologie_allocation without normalize_typologie_tag
+    def normalize_typologie_tag(tag: str) -> str:
+        return tag if tag is not None else ""
 
 # =============================================================================
 # CONSTANTS
