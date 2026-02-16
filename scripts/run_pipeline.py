@@ -28,7 +28,7 @@ from typing import Dict, Any
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from config.settings import settings, NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER
+from config.settings import settings, NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER, STATUS_WON
 from src.api.auth import FuriousAuth, AuthenticationError
 from src.api.proposals import ProposalsClient, ProposalsAPIError
 from src.processing.cleaner import DataCleaner
@@ -319,16 +319,22 @@ class PipelineRunner:
                     logger.error(f"Notion alerts sync error: {e}")
                     self._log_step("notion_alerts_sync", "error", {"error": str(e)})
 
-            # Step 10: Sync MAINTENANCE won proposals to Notion
+            # Step 10: Sync MAINTENANCE won proposals to Notion (current year only; POST new, PATCH existing by ID Devis)
             logger.info("\n--- Step 10: Syncing MAINTENANCE won to Notion ---")
             if not self.sync_notion or not settings.notion_maintenance_won_database_id:
                 reason = "dry_run" if self.dry_run else "disabled" if not self.sync_notion else "NOTION_MAINTENANCE_WON_DATABASE_ID not set"
                 self._log_step("notion_maintenance_won_sync", "skipped", {"reason": reason})
             else:
                 try:
-                    df_won = views.won_month.data
-                    df_maintenance_won = df_won[df_won["final_bu"] == "MAINTENANCE"] if not df_won.empty and "final_bu" in df_won.columns else df_won.iloc[0:0]
+                    current_year = datetime.now().year
+                    mask_won = df_processed["statut_clean"].isin(STATUS_WON)
+                    mask_year_effective = df_processed["date_effective_won"].dt.year == current_year
+                    mask_year_date = df_processed["date"].dt.year == current_year
+                    mask_year = mask_year_effective | mask_year_date
+                    mask_maintenance = df_processed["final_bu"] == "MAINTENANCE"
+                    df_maintenance_won = df_processed.loc[mask_won & mask_year & mask_maintenance].copy()
                     maintenance_won_items = df_maintenance_won.to_dict("records") if not df_maintenance_won.empty else []
+                    logger.info(f"MAINTENANCE won (current year {current_year}): {len(maintenance_won_items)} proposal(s)")
                     notion_maintenance_won_sync = NotionMaintenanceWonSync()
                     maintenance_won_stats = notion_maintenance_won_sync.sync_maintenance_won(maintenance_won_items)
                     self._log_step("notion_maintenance_won_sync", "success", {

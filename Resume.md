@@ -135,7 +135,7 @@ The original system was built in **n8n** (workflow automation tool) with Python 
 5. **View Generation**: Filter and aggregate into 3 main views
 
 **Pipeline-Specific Outputs**:
-- **Daily Pipeline**: Writes to "État actuel" (stable snapshot) and monthly sheets. Syncs Notion databases (alerts, TRAVAUX, MAINTENANCE won). MAINTENANCE won: current month’s proposals won by MAINTENANCE BU; upsert by ID Devis (no duplicates); no archiving (all months kept for grouping in Notion).
+- **Daily Pipeline**: Writes to "État actuel" (stable snapshot) and monthly sheets. Syncs Notion databases (alerts, TRAVAUX, MAINTENANCE won). MAINTENANCE won: all proposals won in the current year with BU MAINTENANCE; POST if ID Devis not in Notion, PATCH if already present; no archiving (all years/months kept for grouping in Notion).
 - **Bi-Monthly Pipeline**: Sends emails only (objectives + alerts). No external writes to avoid overwriting daily data.
 - **Weekly Pipeline**: Dedicated TRAVAUX projection email + Notion sync.
 
@@ -364,9 +364,10 @@ myrium/
 - **Assignee Visibility**: Shows all assignees in alert tables
 
 ### 7.6 Notion Integration
-- **5 Databases**: Weird Proposals, Follow-up, TRAVAUX Projection, Recent TRAVAUX Projects, MAINTENANCE Won (current month)
+- **5 Databases**: Weird Proposals, Follow-up, TRAVAUX Projection, Recent TRAVAUX Projects, MAINTENANCE Won (current year)
 - **Commercial/Chef de projet Split**: People properties for clear responsibility
 - **Schema-Aware Sync**: Only sets properties that exist in database schema (prevents 400 errors)
+- **Typologie devis**: Furious `cf_typologie_de_devis` synced as Notion **Multi-select** property "Typologie devis" (comma-separated in Furious → multiple options); schema-aware in Weird, Follow-up, TRAVAUX Projection, MAINTENANCE Won (create property with exact name in each DB to enable)
 - **Property Preservation**: Preserves user-edited notes/checkboxes during sync
 - **Notion API 2025-09-03**: All clients pinned to latest API version with data_sources support
 - **Fail-Closed Behavior**: Refuses to create pages when schema cannot be loaded (prevents blank page spam)
@@ -431,7 +432,7 @@ The pipeline supports granular flags to control execution components:
 0 6 * * * cd /path/to/myrium && /path/to/venv/bin/python3 scripts/run_pipeline.py --skip-emails --live-snapshot >> logs/pipeline_daily.log 2>&1
 ```
 - Runs full pipeline daily: Auth → Fetch → Clean → Revenue → Views → Sheets + Notion sync
-- **Step 10**: Syncs current month’s MAINTENANCE won proposals to Notion (when `NOTION_MAINTENANCE_WON_DATABASE_ID` is set); upsert by ID Devis (no duplicates); no archiving
+- **Step 10**: Syncs current year’s MAINTENANCE won proposals to Notion (when `NOTION_MAINTENANCE_WON_DATABASE_ID` is set); POST new by ID Devis, PATCH existing; no archiving
 - Skips all emails (objectives + alerts) to avoid daily email noise
 - Uses stable "État actuel" snapshot (no daily dated sheets)
 - Provides complete data refresh including Notion sync for dashboard
@@ -470,17 +471,7 @@ Core fields from Furious + Computed fields (final_bu, alert_owner) + Financial f
 `ViewResult` dataclass containing DataFrame, BU summary, Typologie summary, and TS total.
 
 ### 10.3 Alert Data Structure
-```python
-{
-    'title': str,
-    'amount': float,
-    'statut': str,
-    'date': str,
-    'assigned_to': str,  # All assignees
-    'reason': str,       # Weird reason
-    'probability': float # Follow-up prob
-}
-```
+Alert and proposal payloads to Notion include `cf_typologie_de_devis` (from Furious). Structure: `title`, `amount`, `statut`, `date`, `assigned_to`, `reason` (weird), `probability`, `cf_typologie_de_devis`.
 
 ---
 
