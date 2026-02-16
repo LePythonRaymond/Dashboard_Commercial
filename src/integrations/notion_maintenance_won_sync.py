@@ -276,7 +276,16 @@ class NotionMaintenanceWonSync:
         if signature_value and self._schema_allows(schema, "Mois signé"):
             properties["Mois signé"] = {"date": {"start": signature_value}}
         if furious_url and self._schema_allows(schema, "Lien Furious"):
-            properties["Lien Furious"] = {"url": furious_url}
+            prop_type = schema.get("Lien Furious", {}).get("type", "url")
+            if prop_type == "rich_text":
+                properties["Lien Furious"] = {
+                    "rich_text": [{
+                        "type": "text",
+                        "text": {"content": "Voir Furious", "link": {"url": furious_url}}
+                    }]
+                }
+            else:
+                properties["Lien Furious"] = {"url": furious_url}
 
         # Typologie devis (from Furious cf_typologie_de_devis) - multi_select (comma-separated in Furious)
         if self._schema_allows(schema, "Typologie devis"):

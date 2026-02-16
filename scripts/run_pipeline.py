@@ -329,10 +329,11 @@ class PipelineRunner:
                 try:
                     current_year = datetime.now().year
                     mask_won = df_processed["statut_clean"].isin(STATUS_WON)
-                    mask_year_effective = df_processed["date_effective_won"].dt.year == current_year
-                    mask_year_date = df_processed["date"].dt.year == current_year
-                    mask_year = mask_year_effective | mask_year_date
-                    mask_maintenance = df_processed["final_bu"] == "MAINTENANCE"
+                    mask_year = df_processed["date"].dt.year == current_year
+                    mask_maintenance = (
+                        (df_processed["final_bu"] == "MAINTENANCE")
+                        | ((df_processed["final_bu"] == "TRAVAUX") & df_processed["title"].str.contains("TS", case=False, na=False))
+                    )
                     df_maintenance_won = df_processed.loc[mask_won & mask_year & mask_maintenance].copy()
                     maintenance_won_items = df_maintenance_won.to_dict("records") if not df_maintenance_won.empty else []
                     logger.info(f"MAINTENANCE won (current year {current_year}): {len(maintenance_won_items)} proposal(s)")
