@@ -222,10 +222,20 @@ class NotionMaintenanceWonSync:
             return prop_name in schema
         safe = {
             "Name", "ID Devis", "Client", "Montant", "Statut", "Probabilite",
-            "Date", "Début projet", "Fin projet", "Lien Furious", "Commercial", "Chef de projet",
-            "Mois signé",
+            "Date", "Début projet", "Fin projet", "Début Projet", "Fin Projet",
+            "Lien Furious", "Commercial", "Chef de projet", "Mois signé",
         }
         return prop_name in safe
+
+    @staticmethod
+    def _get_schema_key(schema: Dict[str, Any], candidates: tuple) -> Optional[str]:
+        """Return the first candidate that exists in schema (for case-sensitive Notion property names)."""
+        if not schema:
+            return None
+        for c in candidates:
+            if c in schema:
+                return c
+        return None
 
     @staticmethod
     def _build_typologie_devis_multi_select(value: str) -> Dict[str, Any]:
@@ -269,10 +279,12 @@ class NotionMaintenanceWonSync:
                 properties["Probabilite"] = {"number": 0.0}
         if date_value and self._schema_allows(schema, "Date"):
             properties["Date"] = {"date": {"start": date_value}}
-        if start_value and self._schema_allows(schema, "Début projet"):
-            properties["Début projet"] = {"date": {"start": start_value}}
-        if end_value and self._schema_allows(schema, "Fin projet"):
-            properties["Fin projet"] = {"date": {"start": end_value}}
+        start_key = self._get_schema_key(schema, ("Début Projet", "Début projet"))
+        if start_value and start_key:
+            properties[start_key] = {"date": {"start": start_value}}
+        end_key = self._get_schema_key(schema, ("Fin Projet", "Fin projet"))
+        if end_value and end_key:
+            properties[end_key] = {"date": {"start": end_value}}
         if signature_value and self._schema_allows(schema, "Mois signé"):
             properties["Mois signé"] = {"date": {"start": signature_value}}
         if furious_url and self._schema_allows(schema, "Lien Furious"):
