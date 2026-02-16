@@ -311,6 +311,8 @@ class NotionTravauxSync:
         date_value = self._format_date(proposal.get('date'))
         start_date_value = self._format_date(proposal.get('projet_start'))
         signature_date_value = self._format_date(proposal.get('signature_date'))
+        # Date Signature in Notion: use signature_date when present, else fall back to proposal date (always there)
+        date_signature_value = signature_date_value or date_value
         furious_url = proposal.get('furious_url', '')
 
         properties = {}
@@ -376,9 +378,9 @@ class NotionTravauxSync:
         if "Début Chantier" in schema and start_date_value:
             properties["Début Chantier"] = {"date": {"start": start_date_value}}
 
-        # Date Signature - from Furious signature_date (Notion DB may use this name)
-        if "Date Signature" in schema and signature_date_value:
-            properties["Date Signature"] = {"date": {"start": signature_date_value}}
+        # Date Signature - from Furious signature_date when present, else proposal date (always set when we have either)
+        if "Date Signature" in schema and date_signature_value:
+            properties["Date Signature"] = {"date": {"start": date_signature_value}}
 
         # Lien Furious - only if property exists and value is available
         if "Lien Furious" in schema and furious_url:
