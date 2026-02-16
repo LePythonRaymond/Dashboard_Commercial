@@ -146,6 +146,10 @@ class Settings:
     notion_travaux_recent_projects_database_id: str = field(
         default_factory=lambda: get_secret("NOTION_TRAVAUX_RECENT_PROJECTS_DATABASE_ID", "")
     )
+    # Notion database/datasource for MAINTENANCE won proposals (current month, daily sync)
+    notion_maintenance_won_database_id: str = field(
+        default_factory=lambda: get_secret("NOTION_MAINTENANCE_WON_DATABASE_ID", "")
+    )
 
     # API Request Settings
     api_timeout: int = 30

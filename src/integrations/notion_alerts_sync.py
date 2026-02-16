@@ -316,6 +316,19 @@ class NotionAlertsSync:
 
         return {"multi_select": select_options}
 
+    @staticmethod
+    def _build_typologie_devis_multi_select(value: str) -> Dict[str, Any]:
+        """
+        Build Notion multi-select property from Furious cf_typologie_de_devis (comma-separated).
+
+        Returns:
+            Notion multi_select property value
+        """
+        if not value or not str(value).strip():
+            return {"multi_select": []}
+        parts = [p.strip()[:100] for p in str(value).split(",") if p.strip()]
+        return {"multi_select": [{"name": p} for p in parts]}
+
     def _build_weird_page_properties(self, item: Dict[str, Any], schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Build Notion page properties for a weird proposal alert.
@@ -368,6 +381,12 @@ class NotionAlertsSync:
         # Add Furious URL if available
         if furious_url and self._schema_allows(schema, "Lien Furious"):
             properties["Lien Furious"] = {"url": furious_url}
+
+        # Typologie devis (from Furious cf_typologie_de_devis) - multi_select (comma-separated in Furious)
+        if self._schema_allows(schema, "Typologie devis"):
+            properties["Typologie devis"] = self._build_typologie_devis_multi_select(
+                item.get("cf_typologie_de_devis", "")
+            )
 
         # All assignees (Commercial / Chef de projet) from assigned_to
         assigned_to_str = item.get("assigned_to", "")
@@ -437,6 +456,12 @@ class NotionAlertsSync:
         # Add Furious URL if available
         if furious_url and self._schema_allows(schema, "Lien Furious"):
             properties["Lien Furious"] = {"url": furious_url}
+
+        # Typologie devis (from Furious cf_typologie_de_devis) - multi_select (comma-separated in Furious)
+        if self._schema_allows(schema, "Typologie devis"):
+            properties["Typologie devis"] = self._build_typologie_devis_multi_select(
+                item.get("cf_typologie_de_devis", "")
+            )
 
         # All assignees (Commercial / Chef de projet) from assigned_to
         assigned_to_str = item.get("assigned_to", "")

@@ -38,6 +38,7 @@ from src.processing.alerts import AlertsGenerator
 from src.integrations.google_sheets import GoogleSheetsClient
 from src.integrations.email_sender import EmailSender
 from src.integrations.notion_alerts_sync import NotionAlertsSync
+from src.integrations.notion_maintenance_won_sync import NotionMaintenanceWonSync
 
 
 # Configure logging
@@ -317,6 +318,29 @@ class PipelineRunner:
                 except Exception as e:
                     logger.error(f"Notion alerts sync error: {e}")
                     self._log_step("notion_alerts_sync", "error", {"error": str(e)})
+
+            # Step 10: Sync MAINTENANCE won proposals to Notion
+            logger.info("\n--- Step 10: Syncing MAINTENANCE won to Notion ---")
+            if not self.sync_notion or not settings.notion_maintenance_won_database_id:
+                reason = "dry_run" if self.dry_run else "disabled" if not self.sync_notion else "NOTION_MAINTENANCE_WON_DATABASE_ID not set"
+                self._log_step("notion_maintenance_won_sync", "skipped", {"reason": reason})
+            else:
+                try:
+                    df_won = views.won_month.data
+                    df_maintenance_won = df_won[df_won["final_bu"] == "MAINTENANCE"] if not df_won.empty and "final_bu" in df_won.columns else df_won.iloc[0:0]
+                    maintenance_won_items = df_maintenance_won.to_dict("records") if not df_maintenance_won.empty else []
+                    notion_maintenance_won_sync = NotionMaintenanceWonSync()
+                    maintenance_won_stats = notion_maintenance_won_sync.sync_maintenance_won(maintenance_won_items)
+                    self._log_step("notion_maintenance_won_sync", "success", {
+                        "created": maintenance_won_stats["created"],
+                        "updated": maintenance_won_stats["updated"],
+                        "errors": maintenance_won_stats["errors"],
+                        "count": len(maintenance_won_items),
+                    })
+                except Exception as e:
+                    logger.error(f"Notion MAINTENANCE won sync error: {e}")
+                    import traceback
+                    self._log_step("notion_maintenance_won_sync", "error", {"error": str(e), "traceback": traceback.format_exc()})
 
             # Pipeline completed
             self.results["status"] = "completed"

@@ -240,7 +240,8 @@ class AlertsGenerator:
                 'signature_date': self._format_date(row.get('signature_date')),
                 'created_at': self._format_date(row.get('created_at')),
                 'reason': row['flag_reason'],
-                'alert_owner': owner
+                'alert_owner': owner,
+                'cf_typologie_de_devis': row.get('cf_typologie_de_devis', ''),
             })
 
         return alerts_grouped
@@ -290,7 +291,8 @@ class AlertsGenerator:
                 'probability': row.get('probability', 0),
                 'sign_url': row.get('sign_url', ''),
                 'assigned_to': row.get('assigned_to', 'N/A'),
-                'alert_owner': owner
+                'alert_owner': owner,
+                'cf_typologie_de_devis': row.get('cf_typologie_de_devis', ''),
             })
 
         return alerts_grouped

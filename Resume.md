@@ -111,7 +111,7 @@ The original system was built in **n8n** (workflow automation tool) with Python 
          │
          ├──► Daily Full Pipeline (run_pipeline.py --skip-emails)
          │    ├──► Google Sheets (État actuel + monthly views)
-         │    └──► Notion Sync (Alerts + TRAVAUX)
+         │    └──► Notion Sync (Alerts + TRAVAUX + MAINTENANCE won)
          │
          ├──► Bi-Monthly Emails (run_pipeline_scheduled.py --emails-only)
          │    ├──► Email Alerts (Weird + Follow-ups)
@@ -135,7 +135,7 @@ The original system was built in **n8n** (workflow automation tool) with Python 
 5. **View Generation**: Filter and aggregate into 3 main views
 
 **Pipeline-Specific Outputs**:
-- **Daily Pipeline**: Writes to "État actuel" (stable snapshot) and monthly sheets. Syncs Notion databases.
+- **Daily Pipeline**: Writes to "État actuel" (stable snapshot) and monthly sheets. Syncs Notion databases (alerts, TRAVAUX, MAINTENANCE won). MAINTENANCE won: current month’s proposals won by MAINTENANCE BU; upsert by ID Devis (no duplicates); no archiving (all months kept for grouping in Notion).
 - **Bi-Monthly Pipeline**: Sends emails only (objectives + alerts). No external writes to avoid overwriting daily data.
 - **Weekly Pipeline**: Dedicated TRAVAUX projection email + Notion sync.
 
@@ -245,13 +245,15 @@ For each proposal, the system generates:
 
 Each view includes summaries at the bottom:
 - **By BU**: Aggregated by Business Unit
-- **By Typologie**: Aggregated by `cf_typologie_de_devis`
-- **TS Total**: Sum of all proposals with "TS" in title
+- **By Typologie**: Aggregated by primary typologie only (see below)
+- **TS Total**: Deprecated; TS merged into typologie summary
 
-**Primary Typologie Allocation**:
-- **Logic**: Deterministic selection (no equal splitting)
-- **Priority**: TS (highest) → First non-Animation tag → Animation (if only tag)
-- **Result**: Each project amount lands in exactly one typology category
+**Primary Typologie Allocation** (9 subcategories: Conception Concours/DV/Paysage, Travaux Direct/DV/Conception, Maintenance TS/Entretien/Animation):
+- **Logic**: Deterministic selection via `typologie_allocation.allocate_typologie_for_row`; each row contributes to exactly one typologie bucket (no comma-split, no amount division)
+- **Priority**: Maintenance TS (highest) → First non-Maintenance Animation tag → Maintenance Animation (if only tag)
+- **Views** (`src/processing/views.py`): Typologie summary uses primary-only; BU summary unchanged
+- **Dashboard** (`src/dashboard/app.py`): Year and quarter typologie both use primary-only (no space-split)
+- **Variants**: Furious labels (e.g. "Maintenance TS (+DT)", "Travaux conception") normalized to canonical names in `typologie_allocation.normalize_typologie_tag`
 
 ---
 
@@ -362,7 +364,7 @@ myrium/
 - **Assignee Visibility**: Shows all assignees in alert tables
 
 ### 7.6 Notion Integration
-- **4 Databases**: Weird Proposals, Follow-up, TRAVAUX Projection, Recent TRAVAUX Projects
+- **5 Databases**: Weird Proposals, Follow-up, TRAVAUX Projection, Recent TRAVAUX Projects, MAINTENANCE Won (current month)
 - **Commercial/Chef de projet Split**: People properties for clear responsibility
 - **Schema-Aware Sync**: Only sets properties that exist in database schema (prevents 400 errors)
 - **Property Preservation**: Preserves user-edited notes/checkboxes during sync
@@ -396,6 +398,7 @@ NOTION_API_KEY=...
 NOTION_DATABASE_ID=...
 NOTION_TRAVAUX_PROJECTION_DATABASE_ID=...
 NOTION_TRAVAUX_RECENT_PROJECTS_DATABASE_ID=...
+NOTION_MAINTENANCE_WON_DATABASE_ID=...
 ```
 
 ### 8.2 Business Constants
@@ -428,6 +431,7 @@ The pipeline supports granular flags to control execution components:
 0 6 * * * cd /path/to/myrium && /path/to/venv/bin/python3 scripts/run_pipeline.py --skip-emails --live-snapshot >> logs/pipeline_daily.log 2>&1
 ```
 - Runs full pipeline daily: Auth → Fetch → Clean → Revenue → Views → Sheets + Notion sync
+- **Step 10**: Syncs current month’s MAINTENANCE won proposals to Notion (when `NOTION_MAINTENANCE_WON_DATABASE_ID` is set); upsert by ID Devis (no duplicates); no archiving
 - Skips all emails (objectives + alerts) to avoid daily email noise
 - Uses stable "État actuel" snapshot (no daily dated sheets)
 - Provides complete data refresh including Notion sync for dashboard
@@ -715,6 +719,24 @@ See original documentation for details on performance, security, error handling,
 - Notion API 2025-09-03 compatibility ensures reliable sync with multi-data-source databases
 - Fail-closed behavior prevents blank page spam when schema cannot be retrieved
 
+### 18.5 Typologie Summary & Dashboard Fix (February 2026)
+
+**Problem**: After moving to 9 typologie subcategories in Furious, "Résumé par Typologie" in Sheets and dashboard showed fragmented/duplicate buckets (DV, Paysage, TS, Animation, Entretien as standalone; Conception vs conception; same amount under Conception and Paysage).
+
+**Root causes**:
+1. **Dashboard** `calculate_realized_by_production_quarter` (typologie branch) used `typo_str.replace(',', ' ').split()` and divided amount by number of tokens → multi-word typologies (e.g. "Conception Paysage") were split into words and amounts misallocated
+2. **Views** typologie summary used raw `cf_typologie_de_devis` + comma-split and added full row amount to each tag → double-counting and case-sensitive rows (Conception vs conception)
+3. **No variant normalization**: Furious values like "Maintenance TS (+DT)" or "Travaux conception" were not mapped to canonical 9 subcategories
+
+**Solution**:
+- **Dashboard** (`src/dashboard/app.py`): Typologie branch of `calculate_realized_by_production_quarter` now uses `allocate_typologie_for_row` and primary-only (same as `calculate_realized_by_production_year`); no space-split, no amount division
+- **Views** (`src/processing/views.py`): For `group_col == 'cf_typologie_de_devis'`, `_create_split_summary` uses `allocate_typologie_for_row` and assigns each row to one primary key only; BU branch unchanged
+- **Typologie allocation** (`src/processing/typologie_allocation.py`): Added `CANONICAL_TYPOLOGIES`, `_TYPOLOGIE_VARIANT_TO_CANONICAL`, `normalize_typologie_tag()`; in `allocate_typologie_for_row`, tags are normalized after parse (e.g. "Maintenance TS (+DT)" → "Maintenance TS", "Travaux conception" → "Travaux Conception")
+
+**Tests**: `test_typologie_allocation.py` (normalize_typologie_tag, variant allocation, inject_ts_tag expectation); `test_view_generator_summary_years.py` (`test_typologie_summary_uses_primary_only`); `test_dashboard_kpi_project_filters.py` (`test_calculate_realized_by_production_quarter_typologie_primary_only`)
+
+**Reloading historical sheets**: To refresh "Signé Janvier 2026" (or any month) with the new typologie logic, run `scripts/backfill_google_sheets_2025.py --year 2026 --months 1 --overwrite-existing` (requires `SPREADSHEET_SIGNE_2026` in `.env`).
+
 ---
 
 ## 17. Conclusion
@@ -730,7 +752,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.30
-**Last Updated**: January 2026
+**Document Version**: 1.31
+**Last Updated**: February 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System
