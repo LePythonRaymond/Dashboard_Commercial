@@ -144,6 +144,7 @@ class TravauxProjectionGenerator:
                 'assigned_to': row.get('assigned_to', 'N/A'),
                 'date': self._format_date(row.get('date')),
                 'projet_start': self._format_date(row.get('projet_start')),
+                'signature_date': self._format_date(row.get('signature_date')),
                 'probability': float(row.get('probability', 0)),
                 'furious_url': self._build_furious_url(proposal_id),
                 'cf_typologie_de_devis': row.get('cf_typologie_de_devis', ''),

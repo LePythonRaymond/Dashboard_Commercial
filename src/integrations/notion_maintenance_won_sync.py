@@ -154,12 +154,14 @@ class NotionMaintenanceWonSync:
 
     @staticmethod
     def _format_date(value: Any) -> Optional[str]:
-        """Format date for Notion API (YYYY-MM-DD). Handles pandas Timestamp and strings."""
+        """Format date for Notion API (YYYY-MM-DD). Handles pandas Timestamp, NaT, and strings."""
         if value is None or (isinstance(value, float) and pd.isna(value)):
             return None
         if value == 'None':
             return None
         if hasattr(value, 'strftime'):
+            if pd.isna(value):
+                return None
             return value.strftime('%Y-%m-%d')
         if isinstance(value, str) and len(value) >= 10:
             return value[:10]

@@ -699,7 +699,7 @@ class NotionAlertsSync:
         Returns:
             Sync statistics
         """
-        stats = {"created": 0, "updated": 0, "archived": 0, "errors": 0}
+        stats = {"created": 0, "updated": 0, "archived": 0, "errors": 0, "marked_taken_charge": 0}
 
         if not self.followup_database_id:
             print("  Skipping follow-up sync: NOTION_FOLLOWUP_DATABASE_ID not configured")
@@ -727,16 +727,19 @@ class NotionAlertsSync:
                     item_copy['alert_owner'] = owner
                 all_items.append(item_copy)
 
+        current_run_ids = {str(item.get("id", "")).strip() for item in all_items if item.get("id")}
+
         print(f"    Upserting {len(all_items)} alert(s)...")
         for item in all_items:
             properties = self._build_followup_page_properties(item, schema=schema)
             proposal_id = str(item.get("id", "")).strip()
             existing_page_id = existing_by_id.get(proposal_id)
+            # Current-run pages: keep visible by setting "Pris en charge" = false when schema allows
+            if schema and self._schema_allows(schema, "Pris en charge"):
+                properties["Pris en charge"] = {"checkbox": False}
             if existing_page_id:
-                # Keep Name/title and "Pris en charge" tickbox for comment continuity
-                # "Pris en charge" is a Notion-only property used for meeting tracking
+                # Keep Name/title for comment continuity
                 properties.pop("Name", None)
-                properties.pop("Pris en charge", None)
                 if self._update_page(existing_page_id, properties):
                     stats["updated"] += 1
                 else:
@@ -748,9 +751,20 @@ class NotionAlertsSync:
                 else:
                     stats["errors"] += 1
 
+        # Leftover pages (in Notion but not in current run): tick "Pris en charge" so they are filtered out
+        leftover_ids = set(existing_by_id.keys()) - current_run_ids
+        if leftover_ids and schema and self._schema_allows(schema, "Pris en charge"):
+            print(f"    Marking {len(leftover_ids)} leftover page(s) as Pris en charge (filtered out in Notion)...")
+            for proposal_id in leftover_ids:
+                page_id = existing_by_id[proposal_id]
+                if self._update_page(page_id, {"Pris en charge": {"checkbox": True}}):
+                    stats["marked_taken_charge"] += 1
+                else:
+                    stats["errors"] += 1
+
         print(
             f"    Done: {stats['created']} created, {stats['updated']} updated, "
-            f"{stats['archived']} archived, {stats['errors']} errors"
+            f"{stats['archived']} archived, {stats['marked_taken_charge']} marked Pris en charge, {stats['errors']} errors"
         )
         return stats
 
@@ -777,11 +791,13 @@ class NotionAlertsSync:
         total_created = results["weird_proposals"]["created"] + results["commercial_followup"]["created"]
         total_archived = results["weird_proposals"]["archived"] + results["commercial_followup"]["archived"]
         total_errors = results["weird_proposals"]["errors"] + results["commercial_followup"]["errors"]
+        total_marked_taken_charge = results["commercial_followup"].get("marked_taken_charge", 0)
 
         print("\n" + "=" * 50)
         print("Notion Alerts Sync Complete")
         print(f"  Total created: {total_created}")
         print(f"  Total archived: {total_archived}")
+        print(f"  Follow-up leftovers marked Pris en charge: {total_marked_taken_charge}")
         print(f"  Total errors: {total_errors}")
         print("=" * 50)
 

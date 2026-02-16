@@ -310,6 +310,7 @@ class NotionTravauxSync:
         proposal_id = proposal.get('id', '')
         date_value = self._format_date(proposal.get('date'))
         start_date_value = self._format_date(proposal.get('projet_start'))
+        signature_date_value = self._format_date(proposal.get('signature_date'))
         furious_url = proposal.get('furious_url', '')
 
         properties = {}
@@ -370,6 +371,14 @@ class NotionTravauxSync:
         # Début projet - only if property exists and value is available
         if "Début projet" in schema and start_date_value:
             properties["Début projet"] = {"date": {"start": start_date_value}}
+
+        # Début Chantier - same as projet_start (Notion DB may use this name)
+        if "Début Chantier" in schema and start_date_value:
+            properties["Début Chantier"] = {"date": {"start": start_date_value}}
+
+        # Date Signature - from Furious signature_date (Notion DB may use this name)
+        if "Date Signature" in schema and signature_date_value:
+            properties["Date Signature"] = {"date": {"start": signature_date_value}}
 
         # Lien Furious - only if property exists and value is available
         if "Lien Furious" in schema and furious_url:
@@ -511,7 +520,7 @@ class NotionTravauxSync:
         Returns:
             Sync statistics
         """
-        stats = {"created": 0, "updated": 0, "archived": 0, "errors": 0}
+        stats = {"created": 0, "updated": 0, "archived": 0, "errors": 0, "marked_taken_charge": 0}
 
         if not self.database_id:
             print("  Skipping TRAVAUX projection sync: NOTION_TRAVAUX_PROJECTION_DATABASE_ID not configured")
@@ -537,9 +546,17 @@ class NotionTravauxSync:
         existing_by_id = self._get_existing_pages_by_id()
         print(f"    Found {len(existing_by_id)} existing page(s) with ID Devis/Lien Furious.")
 
+        projection_ids = {str(p.get("id", "")).strip() for p in proposals if p.get("id")}
+        existing_not_in_projection = set(existing_by_id.keys()) - projection_ids
+        if existing_not_in_projection:
+            print(f"    {len(existing_not_in_projection)} existing page(s) not in current projection (no update this run).")
+
         print(f"    Upserting {len(proposals)} proposal(s)...")
         for proposal in proposals:
             properties = self._build_page_properties(proposal, schema)
+            # Current-run pages: keep visible by setting "Pris en charge" = false when schema allows
+            if "Pris en charge" in schema:
+                properties["Pris en charge"] = {"checkbox": False}
             proposal_id = str(proposal.get("id", "")).strip()
             existing_page_id = existing_by_id.get(proposal_id)
             if existing_page_id:
@@ -559,9 +576,19 @@ class NotionTravauxSync:
                 else:
                     stats["errors"] += 1
 
+        # Leftover pages (in Notion but not in current projection): tick "Pris en charge" so they are filtered out
+        if existing_not_in_projection and "Pris en charge" in schema:
+            print(f"    Marking {len(existing_not_in_projection)} leftover page(s) as Pris en charge (filtered out in Notion)...")
+            for proposal_id in existing_not_in_projection:
+                page_id = existing_by_id[proposal_id]
+                if self._update_page(page_id, {"Pris en charge": {"checkbox": True}}):
+                    stats["marked_taken_charge"] += 1
+                else:
+                    stats["errors"] += 1
+
         print(
             f"    Done: {stats['created']} created, {stats['updated']} updated, "
-            f"{stats['archived']} archived, {stats['errors']} errors"
+            f"{stats['archived']} archived, {stats['marked_taken_charge']} marked Pris en charge, {stats['errors']} errors"
         )
         return stats
 

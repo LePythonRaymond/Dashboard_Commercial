@@ -313,7 +313,8 @@ class PipelineRunner:
                         "weird_created": alerts_sync_stats["weird_proposals"]["created"],
                         "weird_archived": alerts_sync_stats["weird_proposals"]["archived"],
                         "followup_created": alerts_sync_stats["commercial_followup"]["created"],
-                        "followup_archived": alerts_sync_stats["commercial_followup"]["archived"]
+                        "followup_archived": alerts_sync_stats["commercial_followup"]["archived"],
+                        "followup_marked_taken_charge": alerts_sync_stats["commercial_followup"].get("marked_taken_charge", 0),
                     })
                 except Exception as e:
                     logger.error(f"Notion alerts sync error: {e}")
