@@ -1793,7 +1793,7 @@ def plot_objectives_line_chart(
                 x=months,
                 y=pure_brut_total,
                 mode='lines+markers',
-                name='Pur signature (brut)',
+                name='Pur (brut)',
                 line=dict(color='#3498db', width=2, dash='dot'),
                 marker=dict(size=6, symbol='circle'),
                 opacity=0.7
@@ -1803,7 +1803,7 @@ def plot_objectives_line_chart(
                     x=months,
                     y=pure_pondere_total,
                     mode='lines+markers',
-                    name='Pur signature (pondéré)',
+                    name='Pur (pondéré)',
                     line=dict(color='#9b59b6', width=2, dash='dot'),
                     marker=dict(size=6, symbol='square'),
                     opacity=0.7
@@ -1861,7 +1861,7 @@ def plot_objectives_line_chart(
                 x=months,
                 y=pure_brut,
                 mode='lines+markers',
-                name='Pur signature (brut)',
+                name='Pur (brut)',
                 line=dict(color='#3498db', width=2, dash='dot'),
                 marker=dict(size=6, symbol='circle'),
                 opacity=0.7
@@ -1871,7 +1871,7 @@ def plot_objectives_line_chart(
                     x=months,
                     y=pure_pondere,
                     mode='lines+markers',
-                    name='Pur signature (pondéré)',
+                    name='Pur (pondéré)',
                     line=dict(color='#9b59b6', width=2, dash='dot'),
                     marker=dict(size=6, symbol='square'),
                     opacity=0.7
@@ -4594,7 +4594,7 @@ def main():
                             "BU": bu,
                             "Objectif": f"{objective:,.0f}€",
                             "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                            "Pur signature": pure_display,
+                            "Pur": pure_display,
                             "Reste": f"{reste:,.0f}€",
                             "%": f"{percent:.1f}%"
                         })
@@ -4636,7 +4636,7 @@ def main():
                             "Typologie": typo,
                             "Objectif": f"{objective:,.0f}€",
                             "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                            "Pur signature": pure_display,
+                            "Pur": pure_display,
                             "Reste": f"{reste:,.0f}€",
                             "%": f"{percent:.1f}%"
                         })
@@ -4690,7 +4690,7 @@ def main():
                             "BU": bu,
                             "Objectif": f"{objective:,.0f}€",
                             "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                            "Pur signature": pure_display,
+                            "Pur": pure_display,
                             "Reste": f"{reste:,.0f}€",
                             "%": f"{percent:.1f}%"
                         })
@@ -4721,7 +4721,7 @@ def main():
                             "Typologie": typo,
                             "Objectif": f"{objective:,.0f}€",
                             "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                            "Pur signature": pure_display,
+                            "Pur": pure_display,
                             "Reste": f"{reste:,.0f}€",
                             "%": f"{percent:.1f}%"
                         })
@@ -4763,7 +4763,7 @@ def main():
                             "BU": bu,
                             "Objectif": f"{objective:,.0f}€",
                             "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                            "Pur signature": pure_display,
+                            "Pur": pure_display,
                             "Reste": f"{reste:,.0f}€",
                             "%": f"{percent:.1f}%"
                         })
@@ -4794,7 +4794,7 @@ def main():
                             "Typologie": typo,
                             "Objectif": f"{objective:,.0f}€",
                             "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                            "Pur signature": pure_display,
+                            "Pur": pure_display,
                             "Reste": f"{reste:,.0f}€",
                             "%": f"{percent:.1f}%"
                         })
@@ -4809,7 +4809,7 @@ def main():
 
                     # Checkbox to show/hide pure signature lines
                     show_pure_lines = st.checkbox(
-                        "Afficher les courbes Pur signature (brut/pondéré)",
+                        "Afficher les courbes Pur (brut/pondéré)",
                         value=False,
                         key=f"show_pure_{metric_key}"
                     )
