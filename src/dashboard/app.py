@@ -57,14 +57,15 @@ def increment_run():
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from config.settings import settings, MONTH_MAP
+from config.settings import settings, MONTH_MAP, get_secret
 from src.integrations.google_sheets import GoogleSheetsClient
 from src.processing.objectives import (
     objective_for_month, objective_for_quarter, objective_for_year,
     get_quarter_for_month, quarter_start_dates, quarter_end_dates, get_all_objectives_for_dimension,
     EXPECTED_BUS, EXPECTED_TYPOLOGIES,
     get_accounting_period_for_month, get_accounting_period_label, get_months_for_accounting_period,
-    count_unique_accounting_periods, ACCOUNTING_PERIODS
+    count_unique_accounting_periods, ACCOUNTING_PERIODS,
+    OBJECTIVES,
 )
 from src.processing.typologie_allocation import allocate_typologie_for_row
 
@@ -1693,7 +1694,8 @@ def plot_objectives_line_chart(
     key: str,
     df: pd.DataFrame,
     use_pondere: bool = False,
-    show_pure: bool = False
+    show_pure: bool = False,
+    show_signature_objective: bool = False
 ) -> go.Figure:
     """
     Create a line chart comparing realized vs objectives by month.
@@ -1708,14 +1710,17 @@ def plot_objectives_line_chart(
         df: DataFrame with production-year columns
         use_pondere: Whether to use weighted amounts (for Envoyé)
         show_pure: Whether to show pure signature lines
+        show_signature_objective: If True, add Objectif Signature series and use "Signature" in legend
     """
     months = MONTH_NAMES
     fig = go.Figure()
+    sig_label = "Signature" if show_signature_objective else "Pur"
 
     if key == "all":
         # All view: show cumulative realized vs cumulative objective, and individual lines
         realized_total = [0.0] * 12
         objective_total = [0.0] * 12
+        objective_sig_total = [0.0] * 12
         pure_brut_total = [0.0] * 12
         pure_pondere_total = [0.0] * 12
 
@@ -1732,6 +1737,8 @@ def plot_objectives_line_chart(
                 item_realized.append(val)
                 realized_total[month_num-1] += val
                 objective_total[month_num-1] += objective_for_month(year, metric, dimension, item, month_num)
+                if show_signature_objective and year in OBJECTIVES and "signature" in OBJECTIVES[year]:
+                    objective_sig_total[month_num-1] += objective_for_month(year, "signature", dimension, item, month_num)
 
                 # Pure signature for this month
                 if show_pure:
@@ -1783,9 +1790,18 @@ def plot_objectives_line_chart(
             x=months,
             y=objective_total,
             mode='lines',
-            name='Total Objectif',
+            name='Total Objectif Production',
             line=dict(color='#e74c3c', width=3, dash='dash')
         ))
+        if show_signature_objective and year in OBJECTIVES and "signature" in OBJECTIVES[year]:
+            fig.add_trace(go.Scatter(
+                x=months,
+                y=objective_sig_total,
+                mode='lines',
+                name='Total Objectif Signature',
+                line=dict(color='#e67e22', width=2.5, dash='dash'),
+                opacity=0.9
+            ))
 
         # Pure signature lines (if enabled)
         if show_pure:
@@ -1793,7 +1809,7 @@ def plot_objectives_line_chart(
                 x=months,
                 y=pure_brut_total,
                 mode='lines+markers',
-                name='Pur (brut)',
+                name=f'{sig_label} (brut)',
                 line=dict(color='#3498db', width=2, dash='dot'),
                 marker=dict(size=6, symbol='circle'),
                 opacity=0.7
@@ -1803,7 +1819,7 @@ def plot_objectives_line_chart(
                     x=months,
                     y=pure_pondere_total,
                     mode='lines+markers',
-                    name='Pur (pondéré)',
+                    name=f'{sig_label} (pondéré)',
                     line=dict(color='#9b59b6', width=2, dash='dot'),
                     marker=dict(size=6, symbol='square'),
                     opacity=0.7
@@ -1814,6 +1830,7 @@ def plot_objectives_line_chart(
         # Single item view
         realized = []
         objectives = []
+        objectives_sig = []
         pure_brut = []
         pure_pondere = []
 
@@ -1825,6 +1842,8 @@ def plot_objectives_line_chart(
             objective_val = objective_for_month(year, metric, dimension, key, month_num)
             realized.append(realized_val)
             objectives.append(objective_val)
+            if show_signature_objective and year in OBJECTIVES and "signature" in OBJECTIVES[year]:
+                objectives_sig.append(objective_for_month(year, "signature", dimension, key, month_num))
 
             # Pure signature for this month
             if show_pure:
@@ -1850,10 +1869,20 @@ def plot_objectives_line_chart(
             x=months,
             y=objectives,
             mode='lines+markers',
-            name='Objectif',
+            name='Objectif Production',
             line=dict(color='#e74c3c', width=2, dash='dash'),
             marker=dict(size=6, symbol='diamond')
         ))
+        if show_signature_objective and objectives_sig:
+            fig.add_trace(go.Scatter(
+                x=months,
+                y=objectives_sig,
+                mode='lines+markers',
+                name='Objectif Signature',
+                line=dict(color='#e67e22', width=2, dash='dash'),
+                marker=dict(size=6, symbol='diamond'),
+                opacity=0.9
+            ))
 
         # Pure signature lines (if enabled)
         if show_pure:
@@ -1861,7 +1890,7 @@ def plot_objectives_line_chart(
                 x=months,
                 y=pure_brut,
                 mode='lines+markers',
-                name='Pur (brut)',
+                name=f'{sig_label} (brut)',
                 line=dict(color='#3498db', width=2, dash='dot'),
                 marker=dict(size=6, symbol='circle'),
                 opacity=0.7
@@ -1871,7 +1900,7 @@ def plot_objectives_line_chart(
                     x=months,
                     y=pure_pondere,
                     mode='lines+markers',
-                    name='Pur (pondéré)',
+                    name=f'{sig_label} (pondéré)',
                     line=dict(color='#9b59b6', width=2, dash='dot'),
                     marker=dict(size=6, symbol='square'),
                     opacity=0.7
@@ -3892,8 +3921,9 @@ def plot_bu_bar(df: pd.DataFrame, title: str = "Montant par BU", show_count: boo
 # MAIN APPLICATION
 # =============================================================================
 
-def style_objectives_df(df: pd.DataFrame):
-    """Apply conditional formatting to objectives DataFrame."""
+def style_objectives_df(df: pd.DataFrame, signed_two_blocks: bool = False):
+    """Apply conditional formatting to objectives DataFrame.
+    If signed_two_blocks=True, also style Reste Sig and % Sig columns."""
     def color_reste(val):
         try:
             num = float(val.replace('€', '').replace(',', ''))
@@ -3910,7 +3940,10 @@ def style_objectives_df(df: pd.DataFrame):
         except:
             return ''
 
-    return df.style.applymap(color_reste, subset=['Reste']).applymap(color_percent, subset=['%'])
+    style = df.style.applymap(color_reste, subset=['Reste']).applymap(color_percent, subset=['%'])
+    if signed_two_blocks and 'Reste Sig' in df.columns and '% Sig' in df.columns:
+        style = style.applymap(color_reste, subset=['Reste Sig']).applymap(color_percent, subset=['% Sig'])
+    return style
 
 
 # =============================================================================
@@ -4549,6 +4582,16 @@ def main():
                     selected_period_idx = all_periods[period_options.index(selected_period_str)]
                     selected_period_label = get_accounting_period_label(selected_period_idx)
 
+                    # Maintenance Entretien – début d'année 2026 (from Notion / secret)
+                    if is_signed and selected_year == 2026:
+                        start_2026_val = get_secret("MAINTENANCE_ENTRETIEN_START_2026", "").strip()
+                        if start_2026_val:
+                            try:
+                                start_2026_num = float(start_2026_val.replace(",", ".").replace(" ", ""))
+                                st.info(f"**Maintenance Entretien – Début d'année 2026 :** {start_2026_num:,.0f} €")
+                            except ValueError:
+                                st.info(f"**Maintenance Entretien – Début d'année 2026 :** {start_2026_val}")
+
                     # =============================================================
                     # SECTION 1: PÉRIODE (Production period)
                     # =============================================================
@@ -4559,6 +4602,7 @@ def main():
 
                     # BU Table
                     st.markdown("#### Par Business Unit")
+                    has_signature_obj = is_signed and selected_year in OBJECTIVES and "signature" in OBJECTIVES[selected_year]
                     bu_data = []
                     for bu in BU_ORDER:
                         # Realized = production-period amount using quarter columns / 3
@@ -4584,22 +4628,41 @@ def main():
                             pure_brut += brut
                             pure_pondere += pond
 
-                        # Format pure column
+                        # Format pure/signature column
                         if use_pondere:
                             pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
                         else:
                             pure_display = f"{pure_brut:,.0f}€"
 
-                        bu_data.append({
-                            "BU": bu,
-                            "Objectif": f"{objective:,.0f}€",
-                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                            "Pur": pure_display,
-                            "Reste": f"{reste:,.0f}€",
-                            "%": f"{percent:.1f}%"
-                        })
+                        if has_signature_obj:
+                            objective_sig = sum(
+                                objective_for_month(selected_year, "signature", "bu", bu, m)
+                                for m in period_months
+                            )
+                            reste_sig = objective_sig - pure_brut
+                            percent_sig = (pure_brut / objective_sig * 100) if objective_sig > 0 else 0.0
+                            bu_data.append({
+                                "BU": bu,
+                                "Objectif Production": f"{objective:,.0f}€",
+                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                                "Reste": f"{reste:,.0f}€",
+                                "%": f"{percent:.1f}%",
+                                "Objectif Signature": f"{objective_sig:,.0f}€",
+                                "Signature": pure_display,
+                                "Reste Sig": f"{reste_sig:,.0f}€",
+                                "% Sig": f"{percent_sig:.1f}%"
+                            })
+                        else:
+                            bu_data.append({
+                                "BU": bu,
+                                "Objectif": f"{objective:,.0f}€",
+                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                                "Pur": pure_display,
+                                "Reste": f"{reste:,.0f}€",
+                                "%": f"{percent:.1f}%"
+                            })
 
-                    st.dataframe(style_objectives_df(pd.DataFrame(bu_data)), use_container_width=True, hide_index=True)
+                    st.dataframe(style_objectives_df(pd.DataFrame(bu_data), signed_two_blocks=has_signature_obj), use_container_width=True, hide_index=True)
 
                     # Typologie Table
                     st.markdown("#### Par Typologie")
@@ -4626,22 +4689,41 @@ def main():
                             pure_brut += brut
                             pure_pondere += pond
 
-                        # Format pure column
+                        # Format pure/signature column
                         if use_pondere:
                             pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
                         else:
                             pure_display = f"{pure_brut:,.0f}€"
 
-                        typo_data.append({
-                            "Typologie": typo,
-                            "Objectif": f"{objective:,.0f}€",
-                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                            "Pur": pure_display,
-                            "Reste": f"{reste:,.0f}€",
-                            "%": f"{percent:.1f}%"
-                        })
+                        if has_signature_obj:
+                            objective_sig = sum(
+                                objective_for_month(selected_year, "signature", "typologie", typo, m)
+                                for m in period_months
+                            )
+                            reste_sig = objective_sig - pure_brut
+                            percent_sig = (pure_brut / objective_sig * 100) if objective_sig > 0 else 0.0
+                            typo_data.append({
+                                "Typologie": typo,
+                                "Objectif Production": f"{objective:,.0f}€",
+                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                                "Reste": f"{reste:,.0f}€",
+                                "%": f"{percent:.1f}%",
+                                "Objectif Signature": f"{objective_sig:,.0f}€",
+                                "Signature": pure_display,
+                                "Reste Sig": f"{reste_sig:,.0f}€",
+                                "% Sig": f"{percent_sig:.1f}%"
+                            })
+                        else:
+                            typo_data.append({
+                                "Typologie": typo,
+                                "Objectif": f"{objective:,.0f}€",
+                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                                "Pur": pure_display,
+                                "Reste": f"{reste:,.0f}€",
+                                "%": f"{percent:.1f}%"
+                            })
 
-                    st.dataframe(style_objectives_df(pd.DataFrame(typo_data)), use_container_width=True, hide_index=True)
+                    st.dataframe(style_objectives_df(pd.DataFrame(typo_data), signed_two_blocks=has_signature_obj), use_container_width=True, hide_index=True)
 
                     # =============================================================
                     # SECTION 2: TRIMESTRE (Production year)
@@ -4686,16 +4768,32 @@ def main():
                         else:
                             pure_display = f"{pure_brut:,.0f}€"
 
-                        bu_quarter_data.append({
-                            "BU": bu,
-                            "Objectif": f"{objective:,.0f}€",
-                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                            "Pur": pure_display,
-                            "Reste": f"{reste:,.0f}€",
-                            "%": f"{percent:.1f}%"
-                        })
+                        if has_signature_obj:
+                            objective_sig = objective_for_quarter(selected_year, "signature", "bu", bu, current_quarter)
+                            reste_sig = objective_sig - pure_brut
+                            percent_sig = (pure_brut / objective_sig * 100) if objective_sig > 0 else 0.0
+                            bu_quarter_data.append({
+                                "BU": bu,
+                                "Objectif Production": f"{objective:,.0f}€",
+                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                                "Reste": f"{reste:,.0f}€",
+                                "%": f"{percent:.1f}%",
+                                "Objectif Signature": f"{objective_sig:,.0f}€",
+                                "Signature": pure_display,
+                                "Reste Sig": f"{reste_sig:,.0f}€",
+                                "% Sig": f"{percent_sig:.1f}%"
+                            })
+                        else:
+                            bu_quarter_data.append({
+                                "BU": bu,
+                                "Objectif": f"{objective:,.0f}€",
+                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                                "Pur": pure_display,
+                                "Reste": f"{reste:,.0f}€",
+                                "%": f"{percent:.1f}%"
+                            })
 
-                    st.dataframe(style_objectives_df(pd.DataFrame(bu_quarter_data)), use_container_width=True, hide_index=True)
+                    st.dataframe(style_objectives_df(pd.DataFrame(bu_quarter_data), signed_two_blocks=has_signature_obj), use_container_width=True, hide_index=True)
 
                     # Typologie Table (Quarter)
                     st.markdown("#### Par Typologie (Trimestre de production)")
@@ -4717,16 +4815,32 @@ def main():
                         else:
                             pure_display = f"{pure_brut:,.0f}€"
 
-                        typo_quarter_data.append({
-                            "Typologie": typo,
-                            "Objectif": f"{objective:,.0f}€",
-                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                            "Pur": pure_display,
-                            "Reste": f"{reste:,.0f}€",
-                            "%": f"{percent:.1f}%"
-                        })
+                        if has_signature_obj:
+                            objective_sig = objective_for_quarter(selected_year, "signature", "typologie", typo, current_quarter)
+                            reste_sig = objective_sig - pure_brut
+                            percent_sig = (pure_brut / objective_sig * 100) if objective_sig > 0 else 0.0
+                            typo_quarter_data.append({
+                                "Typologie": typo,
+                                "Objectif Production": f"{objective:,.0f}€",
+                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                                "Reste": f"{reste:,.0f}€",
+                                "%": f"{percent:.1f}%",
+                                "Objectif Signature": f"{objective_sig:,.0f}€",
+                                "Signature": pure_display,
+                                "Reste Sig": f"{reste_sig:,.0f}€",
+                                "% Sig": f"{percent_sig:.1f}%"
+                            })
+                        else:
+                            typo_quarter_data.append({
+                                "Typologie": typo,
+                                "Objectif": f"{objective:,.0f}€",
+                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                                "Pur": pure_display,
+                                "Reste": f"{reste:,.0f}€",
+                                "%": f"{percent:.1f}%"
+                            })
 
-                    st.dataframe(style_objectives_df(pd.DataFrame(typo_quarter_data)), use_container_width=True, hide_index=True)
+                    st.dataframe(style_objectives_df(pd.DataFrame(typo_quarter_data), signed_two_blocks=has_signature_obj), use_container_width=True, hide_index=True)
 
                     # =============================================================
                     # SECTION 3: ANNÉE (Production year)
@@ -4759,16 +4873,32 @@ def main():
                         else:
                             pure_display = f"{pure_brut:,.0f}€"
 
-                        bu_year_data.append({
-                            "BU": bu,
-                            "Objectif": f"{objective:,.0f}€",
-                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                            "Pur": pure_display,
-                            "Reste": f"{reste:,.0f}€",
-                            "%": f"{percent:.1f}%"
-                        })
+                        if has_signature_obj:
+                            objective_sig = objective_for_year(selected_year, "signature", "bu", bu)
+                            reste_sig = objective_sig - pure_brut
+                            percent_sig = (pure_brut / objective_sig * 100) if objective_sig > 0 else 0.0
+                            bu_year_data.append({
+                                "BU": bu,
+                                "Objectif Production": f"{objective:,.0f}€",
+                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                                "Reste": f"{reste:,.0f}€",
+                                "%": f"{percent:.1f}%",
+                                "Objectif Signature": f"{objective_sig:,.0f}€",
+                                "Signature": pure_display,
+                                "Reste Sig": f"{reste_sig:,.0f}€",
+                                "% Sig": f"{percent_sig:.1f}%"
+                            })
+                        else:
+                            bu_year_data.append({
+                                "BU": bu,
+                                "Objectif": f"{objective:,.0f}€",
+                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                                "Pur": pure_display,
+                                "Reste": f"{reste:,.0f}€",
+                                "%": f"{percent:.1f}%"
+                            })
 
-                    st.dataframe(style_objectives_df(pd.DataFrame(bu_year_data)), use_container_width=True, hide_index=True)
+                    st.dataframe(style_objectives_df(pd.DataFrame(bu_year_data), signed_two_blocks=has_signature_obj), use_container_width=True, hide_index=True)
 
                     # Typologie Table (Year)
                     st.markdown("#### Par Typologie (Année de production)")
@@ -4790,16 +4920,32 @@ def main():
                         else:
                             pure_display = f"{pure_brut:,.0f}€"
 
-                        typo_year_data.append({
-                            "Typologie": typo,
-                            "Objectif": f"{objective:,.0f}€",
-                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                            "Pur": pure_display,
-                            "Reste": f"{reste:,.0f}€",
-                            "%": f"{percent:.1f}%"
-                        })
+                        if has_signature_obj:
+                            objective_sig = objective_for_year(selected_year, "signature", "typologie", typo)
+                            reste_sig = objective_sig - pure_brut
+                            percent_sig = (pure_brut / objective_sig * 100) if objective_sig > 0 else 0.0
+                            typo_year_data.append({
+                                "Typologie": typo,
+                                "Objectif Production": f"{objective:,.0f}€",
+                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                                "Reste": f"{reste:,.0f}€",
+                                "%": f"{percent:.1f}%",
+                                "Objectif Signature": f"{objective_sig:,.0f}€",
+                                "Signature": pure_display,
+                                "Reste Sig": f"{reste_sig:,.0f}€",
+                                "% Sig": f"{percent_sig:.1f}%"
+                            })
+                        else:
+                            typo_year_data.append({
+                                "Typologie": typo,
+                                "Objectif": f"{objective:,.0f}€",
+                                "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                                "Pur": pure_display,
+                                "Reste": f"{reste:,.0f}€",
+                                "%": f"{percent:.1f}%"
+                            })
 
-                    st.dataframe(style_objectives_df(pd.DataFrame(typo_year_data)), use_container_width=True, hide_index=True)
+                    st.dataframe(style_objectives_df(pd.DataFrame(typo_year_data), signed_two_blocks=has_signature_obj), use_container_width=True, hide_index=True)
 
                     # =============================================================
                     # LINE CHARTS
@@ -4808,8 +4954,9 @@ def main():
                     st.markdown("### 📉 Évolution Mensuelle")
 
                     # Checkbox to show/hide pure signature lines
+                    pure_label = "Signature" if has_signature_obj else "Pur"
                     show_pure_lines = st.checkbox(
-                        "Afficher les courbes Pur (brut/pondéré)",
+                        f"Afficher les courbes {pure_label} (brut/pondéré)",
                         value=False,
                         key=f"show_pure_{metric_key}"
                     )
@@ -4826,7 +4973,8 @@ def main():
 
                     fig_bu = plot_objectives_line_chart(
                         selected_year, metric_key, "bu", selected_bu_key, metric_df,
-                        use_pondere=use_pondere, show_pure=show_pure_lines
+                        use_pondere=use_pondere, show_pure=show_pure_lines,
+                        show_signature_objective=has_signature_obj
                     )
                     st.plotly_chart(fig_bu, use_container_width=True, key=f"obj_bu_chart_{metric_key}")
 
@@ -4842,7 +4990,8 @@ def main():
 
                     fig_typo = plot_objectives_line_chart(
                         selected_year, metric_key, "typologie", selected_typo_key, metric_df,
-                        use_pondere=use_pondere, show_pure=show_pure_lines
+                        use_pondere=use_pondere, show_pure=show_pure_lines,
+                        show_signature_objective=has_signature_obj
                     )
                     st.plotly_chart(fig_typo, use_container_width=True, key=f"obj_typo_chart_{metric_key}")
 

@@ -11,7 +11,7 @@ from calendar import monthrange
 import warnings
 
 # Type aliases
-ObjectiveMetric = Literal["envoye", "signe"]
+ObjectiveMetric = Literal["envoye", "signe", "signature"]
 ObjectiveDimension = Literal["bu", "typologie"]
 
 # Expected BU keys (must match dashboard BU_ORDER)
@@ -66,8 +66,9 @@ def generate_11_month_distribution(annual_total: float = None, monthly_amount: f
 # =============================================================================
 # Structure: OBJECTIVES[year][metric][dimension][key] = [12 monthly values]
 # Example: OBJECTIVES[2026]["envoye"]["bu"]["CONCEPTION"] = [10000, 12000, ...]
+# For Signé view: "signe" = Objectif Production (vs Réalisé), "signature" = Objectif Signature (vs Signature ex-Pur)
 
-OBJECTIVES: Dict[int, Dict[ObjectiveMetric, Dict[ObjectiveDimension, Dict[str, List[float]]]]] = {
+OBJECTIVES: Dict[int, Dict[str, Dict[ObjectiveDimension, Dict[str, List[float]]]]] = {
     2025: {
         "envoye": {
             "bu": {
@@ -111,29 +112,54 @@ OBJECTIVES: Dict[int, Dict[ObjectiveMetric, Dict[ObjectiveDimension, Dict[str, L
         }
     },
     2026: {
+        # Objectif Production (vs Réalisé) - signed-to-produce during the period
         "signe": {
             "typologie": {
                 # CONCEPTION
                 "Conception DV": generate_11_month_distribution(50000),
                 "Conception Concours": generate_11_month_distribution(100000),
-                "Conception Paysage": generate_11_month_distribution(650000),
+                "Conception Paysage": generate_11_month_distribution(700000),
                 # TRAVAUX
-                "Travaux DV": generate_11_month_distribution(1000000),
-                "Travaux Conception": generate_11_month_distribution(500000),
-                "Travaux Direct": generate_11_month_distribution(1500000),
-                # MAINTENANCE
-                "Maintenance Entretien": generate_11_month_distribution(495000),
-                "Maintenance TS": generate_11_month_distribution(137500),  # 137,500 per year
-                "Maintenance Animation": generate_11_month_distribution(50000),  # 50,000 per year
+                "Travaux DV": generate_11_month_distribution(1300000),
+                "Travaux Conception": generate_11_month_distribution(800000),
+                "Travaux Direct": generate_11_month_distribution(1700000),
+                # MAINTENANCE (TS counted in travaux for some reports; typologie kept for production objective)
+                "Maintenance Entretien": generate_11_month_distribution(1250000),
+                "Maintenance TS": generate_11_month_distribution(300000),
+                "Maintenance Animation": generate_11_month_distribution(50000),
                 # AUTRE
                 "Autre": [0.0] * 12,
             },
             "bu": {
-                # BU totals: CONCEPTION (800k), TRAVAUX (3M), MAINTENANCE (682.5k)
-                # Computed as sum of typologies and stored directly
-                "CONCEPTION": generate_11_month_distribution(800000),  # Conception DV 50k + Conception Concours 100k + Conception Paysage 650k
-                "TRAVAUX": generate_11_month_distribution(3000000),     # Travaux DV 1M + Travaux Conception 500k + Travaux Direct 1.5M
-                "MAINTENANCE": generate_11_month_distribution(682500), # Maintenance Entretien 495k + Maintenance TS 137.5k + Maintenance Animation 50k
+                # BU totals: CONCEPTION 850k, TRAVAUX 4.1M, MAINTENANCE 1.3M
+                "CONCEPTION": generate_11_month_distribution(850000),
+                "TRAVAUX": generate_11_month_distribution(4100000),
+                "MAINTENANCE": generate_11_month_distribution(1300000),
+                "AUTRE": [0.0] * 12,
+            }
+        },
+        # Objectif Signature (vs Signature ex-Pur) - amount signed in the period
+        "signature": {
+            "typologie": {
+                # CONCEPTION: prorated from BU total 822745 (ratio 50:700:100)
+                "Conception DV": generate_11_month_distribution(round(822745 * 50 / 850, 2)),
+                "Conception Paysage": generate_11_month_distribution(round(822745 * 700 / 850, 2)),
+                "Conception Concours": generate_11_month_distribution(round(822745 * 100 / 850, 2)),
+                # TRAVAUX
+                "Travaux DV": generate_11_month_distribution(1347500),
+                "Travaux Conception": generate_11_month_distribution(924000),
+                "Travaux Direct": generate_11_month_distribution(2429163),
+                # MAINTENANCE
+                "Maintenance TS": generate_11_month_distribution(220000),
+                "Maintenance Entretien": generate_11_month_distribution(459800),
+                "Maintenance Animation": generate_11_month_distribution(27500),
+                # AUTRE
+                "Autre": [0.0] * 12,
+            },
+            "bu": {
+                "CONCEPTION": generate_11_month_distribution(822745),
+                "TRAVAUX": generate_11_month_distribution(4920663),
+                "MAINTENANCE": generate_11_month_distribution(459800),
                 "AUTRE": [0.0] * 12,
             }
         },
@@ -235,6 +261,24 @@ def validate_objectives() -> List[str]:
                         if len(values) != 12:
                             issues.append(
                                 f"Year {year}, {metric}, {dimension}, {key}: "
+                                f"Expected 12 values, got {len(values)}"
+                            )
+
+        # Optional "signature" metric (e.g. 2026 for Signé view)
+        if "signature" in year_data:
+            for dimension in ["bu", "typologie"]:
+                if dimension not in year_data["signature"]:
+                    issues.append(f"Year {year}, signature: Missing dimension '{dimension}'")
+                    continue
+                expected_keys = EXPECTED_BUS if dimension == "bu" else EXPECTED_TYPOLOGIES
+                for key in expected_keys:
+                    if key not in year_data["signature"][dimension]:
+                        issues.append(f"Year {year}, signature, {dimension}: Missing key '{key}'")
+                    else:
+                        values = year_data["signature"][dimension][key]
+                        if len(values) != 12:
+                            issues.append(
+                                f"Year {year}, signature, {dimension}, {key}: "
                                 f"Expected 12 values, got {len(values)}"
                             )
 
