@@ -113,50 +113,48 @@ OBJECTIVES: Dict[int, Dict[ObjectiveMetric, Dict[ObjectiveDimension, Dict[str, L
     2026: {
         "signe": {
             "typologie": {
-                # CONCEPTION
-                "Conception DV": generate_11_month_distribution(50000),
-                "Conception Concours": generate_11_month_distribution(100000),
-                "Conception Paysage": generate_11_month_distribution(650000),
-                # TRAVAUX
-                "Travaux DV": generate_11_month_distribution(1000000),
-                "Travaux Conception": generate_11_month_distribution(500000),
-                "Travaux Direct": generate_11_month_distribution(1500000),
-                # MAINTENANCE
-                "Maintenance Entretien": generate_11_month_distribution(495000),
-                "Maintenance TS": generate_11_month_distribution(137500),  # 137,500 per year
-                "Maintenance Animation": generate_11_month_distribution(50000),  # 50,000 per year
+                # Signé = objectives of signature (monthly targets). User-provided monthly amounts.
+                # CONCEPTION 74 795€/month total - split ratio DV:Concours:Paysage ≈ 6.25%:12.5%:81.25%
+                "Conception DV": generate_11_month_distribution(monthly_amount=4675),
+                "Conception Concours": generate_11_month_distribution(monthly_amount=9349),
+                "Conception Paysage": generate_11_month_distribution(monthly_amount=60771),
+                # TRAVAUX (user-provided monthly targets)
+                "Travaux DV": generate_11_month_distribution(monthly_amount=122500),
+                "Travaux Conception": generate_11_month_distribution(monthly_amount=84000),
+                "Travaux Direct": generate_11_month_distribution(monthly_amount=220833),
+                # MAINTENANCE: TS 20k, remainder Entretien+Animation (41.8k - 20k = 21.8k)
+                "Maintenance Entretien": generate_11_month_distribution(monthly_amount=20000),
+                "Maintenance TS": generate_11_month_distribution(monthly_amount=20000),
+                "Maintenance Animation": generate_11_month_distribution(monthly_amount=1800),
                 # AUTRE
                 "Autre": [0.0] * 12,
             },
             "bu": {
-                # BU totals: CONCEPTION (800k), TRAVAUX (3M), MAINTENANCE (682.5k)
-                # Computed as sum of typologies and stored directly
-                "CONCEPTION": generate_11_month_distribution(800000),  # Conception DV 50k + Conception Concours 100k + Conception Paysage 650k
-                "TRAVAUX": generate_11_month_distribution(3000000),     # Travaux DV 1M + Travaux Conception 500k + Travaux Direct 1.5M
-                "MAINTENANCE": generate_11_month_distribution(682500), # Maintenance Entretien 495k + Maintenance TS 137.5k + Maintenance Animation 50k
+                # BU monthly targets (objectives of signature, not production)
+                "CONCEPTION": generate_11_month_distribution(monthly_amount=74795),
+                "TRAVAUX": generate_11_month_distribution(monthly_amount=447333),
+                "MAINTENANCE": generate_11_month_distribution(monthly_amount=41800),
                 "AUTRE": [0.0] * 12,
             }
         },
         "envoye": {
             # Envoyé objectives = Signed objectives (same monthly distributions)
             "typologie": {
-                "DV": generate_11_month_distribution(50000),
-                "Concours": generate_11_month_distribution(100000),
-                "Paysage": generate_11_month_distribution(650000),
-                "DV(Travaux)": generate_11_month_distribution(1000000),
-                "Travaux conception": generate_11_month_distribution(500000),
-                "Travaux Vincent": generate_11_month_distribution(1500000),
-                "Entretien": generate_11_month_distribution(495000),
-                "TS": generate_11_month_distribution(137500),  # 137,500 per year
-                "Animation": generate_11_month_distribution(50000),  # 50,000 per year
+                "Conception DV": generate_11_month_distribution(monthly_amount=4675),
+                "Conception Concours": generate_11_month_distribution(monthly_amount=9349),
+                "Conception Paysage": generate_11_month_distribution(monthly_amount=60771),
+                "Travaux DV": generate_11_month_distribution(monthly_amount=122500),
+                "Travaux Conception": generate_11_month_distribution(monthly_amount=84000),
+                "Travaux Direct": generate_11_month_distribution(monthly_amount=220833),
+                "Maintenance Entretien": generate_11_month_distribution(monthly_amount=20000),
+                "Maintenance TS": generate_11_month_distribution(monthly_amount=20000),
+                "Maintenance Animation": generate_11_month_distribution(monthly_amount=1800),
                 "Autre": [0.0] * 12,
             },
             "bu": {
-                # BU totals: CONCEPTION (800k), TRAVAUX (3M), MAINTENANCE (682.5k)
-                # Same as signe (Envoyé = Signé)
-                "CONCEPTION": generate_11_month_distribution(800000),
-                "TRAVAUX": generate_11_month_distribution(3000000),
-                "MAINTENANCE": generate_11_month_distribution(682500),
+                "CONCEPTION": generate_11_month_distribution(monthly_amount=74795),
+                "TRAVAUX": generate_11_month_distribution(monthly_amount=447333),
+                "MAINTENANCE": generate_11_month_distribution(monthly_amount=41800),
                 "AUTRE": [0.0] * 12,
             }
         }
