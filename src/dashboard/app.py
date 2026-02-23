@@ -3948,46 +3948,94 @@ def _pct_circle_svg(percent: float, size: int = 28) -> str:
     )
 
 
-def _objectives_table_cell_html(val: str, col: str, signed_two_blocks: bool) -> str:
+# Column groupings for two-block layout
+_PROD_COLS = {"Objectif Production", "Réalisé", "Reste", "%"}
+_SIG_COLS  = {"Objectif Signature", "Signature", "Reste Sig", "% Sig"}
+# First col of the Signature block (gets the divider border)
+_SIG_FIRST_COL = "Objectif Signature"
+
+
+def _objectives_table_cell_html(val: str, col: str, is_sig_block: bool) -> str:
     """Escape and optionally style a cell for the objectives HTML table."""
     escaped = html.escape(str(val))
     if col in ("Reste", "Reste Sig"):
         try:
             num = float(val.replace("€", "").replace(",", "").replace(" ", ""))
             color = "#27ae60" if num <= 0 else "#e74c3c"
-            return f'<span style="color:{color}">{escaped}</span>'
+            return f'<span style="color:{color};font-weight:500">{escaped}</span>'
         except (ValueError, TypeError):
             return escaped
     if col in ("%", "% Sig"):
         pct = _parse_pct(val)
         color = "#27ae60" if pct >= 100 else "#e74c3c"
         circle = _pct_circle_svg(pct)
-        return f'<span style="white-space:nowrap">{circle}<span style="color:{color}">{escaped}</span></span>'
+        return f'<span style="white-space:nowrap">{circle}<span style="color:{color};font-weight:600">{escaped}</span></span>'
+    if col in ("Objectif Production", "Objectif Signature", "Objectif"):
+        return f'<span style="opacity:0.75;font-size:0.92em">{escaped}</span>'
+    if col in ("Réalisé",):
+        return f'<strong>{escaped}</strong>'
+    if col in ("Signature",):
+        return f'<em>{escaped}</em>'
     return escaped
 
 
+def _col_cell_style(col: str, is_first_sig: bool, row_idx: int) -> str:
+    """Return inline CSS for a <td> based on column and position."""
+    bg = "#fafafa" if row_idx % 2 == 0 else "#ffffff"
+    base = f"padding:8px 10px;border-bottom:1px solid #e8e8e8;background:{bg};vertical-align:middle;"
+    if col in ("Réalisé", "Signature"):
+        base += "font-weight:600;"
+    if col in ("Objectif Production", "Objectif Signature", "Objectif"):
+        base += "color:#555;font-size:0.9em;"
+    if is_first_sig:
+        base += "border-left:3px solid #222;"
+    return base
+
+
+def _col_head_style(col: str, is_first_sig: bool, has_two_blocks: bool) -> str:
+    """Return inline CSS for a <th>."""
+    if col in _SIG_COLS and has_two_blocks:
+        bg = "#1a1a2e"
+        fg = "#ffffff"
+    else:
+        bg = "#2d5a3f"
+        fg = "#ffffff"
+    base = f"padding:9px 10px;text-align:left;font-weight:700;font-size:0.88em;letter-spacing:0.04em;color:{fg};background:{bg};"
+    if is_first_sig:
+        base += "border-left:3px solid #222;"
+    return base
+
+
 def render_objectives_table_html(df: pd.DataFrame, signed_two_blocks: bool = False) -> str:
-    """Render objectives DataFrame as HTML table with circular progress in % columns."""
+    """Render objectives DataFrame as a polished HTML table with visual divider between production and signature blocks."""
     if df.empty:
         return ""
     cols = list(df.columns)
-    table_style = "width:100%; border-collapse:collapse; font-size:0.9em"
-    cell_style = "padding:6px 8px; border:1px solid #ddd; text-align:left"
-    head_style = "padding:8px; border:1px solid #ddd; background:#f5f5f5; font-weight:600"
-    rows = ["<table style='%s'>" % table_style]
-    rows.append("<thead><tr>")
+    has_two_blocks = signed_two_blocks and _SIG_FIRST_COL in cols
+    wrapper = (
+        "<div style='overflow-x:auto;margin:4px 0 18px 0;border-radius:8px;"
+        "box-shadow:0 1px 4px rgba(0,0,0,0.08);border:1px solid #ddd'>"
+    )
+    table = "<table style='width:100%;border-collapse:collapse;font-size:0.9em'>"
+    # Header
+    head = "<thead><tr>"
     for c in cols:
-        rows.append(f"<th style='%s'>%s</th>" % (head_style, html.escape(str(c))))
-    rows.append("</tr></thead><tbody>")
-    for _, row in df.iterrows():
-        rows.append("<tr>")
+        is_first_sig = has_two_blocks and c == _SIG_FIRST_COL
+        head += f"<th style='{_col_head_style(c, is_first_sig, has_two_blocks)}'>{html.escape(str(c))}</th>"
+    head += "</tr></thead>"
+    # Body
+    body = "<tbody>"
+    for ridx, (_, row) in enumerate(df.iterrows()):
+        body += "<tr>"
         for c in cols:
-            val = row[c]
-            cell_content = _objectives_table_cell_html(str(val) if pd.notna(val) else "", c, signed_two_blocks)
-            rows.append(f"<td style='%s'>%s</td>" % (cell_style, cell_content))
-        rows.append("</tr>")
-    rows.append("</tbody></table>")
-    return "\n".join(rows)
+            is_first_sig = has_two_blocks and c == _SIG_FIRST_COL
+            is_sig = c in _SIG_COLS
+            val = str(row[c]) if pd.notna(row[c]) else ""
+            content = _objectives_table_cell_html(val, c, is_sig)
+            body += f"<td style='{_col_cell_style(c, is_first_sig, ridx)}'>{content}</td>"
+        body += "</tr>"
+    body += "</tbody>"
+    return wrapper + table + head + body + "</table></div>"
 
 
 def style_objectives_df(df: pd.DataFrame, signed_two_blocks: bool = False):
