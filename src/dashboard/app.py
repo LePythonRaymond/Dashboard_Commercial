@@ -20,6 +20,7 @@ from pathlib import Path
 import time
 import json
 import uuid
+import html
 import numpy as np
 
 # #region agent log - Debug instrumentation
@@ -3922,6 +3923,73 @@ def plot_bu_bar(df: pd.DataFrame, title: str = "Montant par BU", show_count: boo
 # MAIN APPLICATION
 # =============================================================================
 
+def _parse_pct(pct_str: str) -> float:
+    """Parse percent string like '85.2%' to float."""
+    try:
+        return float(str(pct_str).replace("%", "").replace(",", ".").strip())
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _pct_circle_svg(percent: float, size: int = 28) -> str:
+    """Return inline SVG for a circular progress (0-100+). Ring fills by percent; caps at 100 for the ring."""
+    r = (size - 4) // 2
+    c = 2 * 3.14159 * r
+    fill = min(100.0, max(0.0, percent))
+    dash = (fill / 100.0) * c
+    gap = c - dash
+    color = "#27ae60" if percent >= 100 else "#e74c3c"
+    return (
+        f'<svg width="{size}" height="{size}" viewBox="0 0 {size} {size}" style="vertical-align:middle;margin-right:6px">'
+        f'<circle cx="{size//2}" cy="{size//2}" r="{r}" fill="none" stroke="#eee" stroke-width="3"/>'
+        f'<circle cx="{size//2}" cy="{size//2}" r="{r}" fill="none" stroke="{color}" stroke-width="3" '
+        f'stroke-dasharray="{dash:.2f} {gap:.2f}" stroke-linecap="round" transform="rotate(-90 {size//2} {size//2})"/>'
+        f'</svg>'
+    )
+
+
+def _objectives_table_cell_html(val: str, col: str, signed_two_blocks: bool) -> str:
+    """Escape and optionally style a cell for the objectives HTML table."""
+    escaped = html.escape(str(val))
+    if col in ("Reste", "Reste Sig"):
+        try:
+            num = float(val.replace("€", "").replace(",", "").replace(" ", ""))
+            color = "#27ae60" if num <= 0 else "#e74c3c"
+            return f'<span style="color:{color}">{escaped}</span>'
+        except (ValueError, TypeError):
+            return escaped
+    if col in ("%", "% Sig"):
+        pct = _parse_pct(val)
+        color = "#27ae60" if pct >= 100 else "#e74c3c"
+        circle = _pct_circle_svg(pct)
+        return f'<span style="white-space:nowrap">{circle}<span style="color:{color}">{escaped}</span></span>'
+    return escaped
+
+
+def render_objectives_table_html(df: pd.DataFrame, signed_two_blocks: bool = False) -> str:
+    """Render objectives DataFrame as HTML table with circular progress in % columns."""
+    if df.empty:
+        return ""
+    cols = list(df.columns)
+    table_style = "width:100%; border-collapse:collapse; font-size:0.9em"
+    cell_style = "padding:6px 8px; border:1px solid #ddd; text-align:left"
+    head_style = "padding:8px; border:1px solid #ddd; background:#f5f5f5; font-weight:600"
+    rows = ["<table style='%s'>" % table_style]
+    rows.append("<thead><tr>")
+    for c in cols:
+        rows.append(f"<th style='%s'>%s</th>" % (head_style, html.escape(str(c))))
+    rows.append("</tr></thead><tbody>")
+    for _, row in df.iterrows():
+        rows.append("<tr>")
+        for c in cols:
+            val = row[c]
+            cell_content = _objectives_table_cell_html(str(val) if pd.notna(val) else "", c, signed_two_blocks)
+            rows.append(f"<td style='%s'>%s</td>" % (cell_style, cell_content))
+        rows.append("</tr>")
+    rows.append("</tbody></table>")
+    return "\n".join(rows)
+
+
 def style_objectives_df(df: pd.DataFrame, signed_two_blocks: bool = False):
     """Apply conditional formatting to objectives DataFrame.
     If signed_two_blocks=True, also style Reste Sig and % Sig columns."""
@@ -4618,12 +4686,12 @@ def main():
                     if is_signed and selected_year == 2026:
                         entretien_start_2026 = _get_entretien_start_2026_value()
                         if entretien_start_2026 is not None:
-                            st.info(f"**Maintenance Entretien – Début d'année 2026 :** {entretien_start_2026:,.0f} € *(inclus dans Réalisé)*")
+                            st.info(f"**Maintenance Entretien – Début d'année 2026 :** {entretien_start_2026:,.0f} € *(réparti dans Réalisé : 1/11 par période, 3/11 par trimestre, total sur l'année)*")
                         else:
                             start_2026_val = get_secret("MAINTENANCE_ENTRETIEN_START_2026", "").strip()
                             if start_2026_val:
                                 try:
-                                    st.info(f"**Maintenance Entretien – Début d'année 2026 :** {float(start_2026_val.replace(',', '.').replace(' ', '')):,.0f} € *(inclus dans Réalisé)*")
+                                    st.info(f"**Maintenance Entretien – Début d'année 2026 :** {float(start_2026_val.replace(',', '.').replace(' ', '')):,.0f} € *(réparti dans Réalisé : 1/11 par période, 3/11 par trimestre, total sur l'année)*")
                                     entretien_start_2026 = float(start_2026_val.replace(",", ".").replace(" ", ""))
                                 except ValueError:
                                     st.info(f"**Maintenance Entretien – Début d'année 2026 :** {start_2026_val}")
@@ -4645,9 +4713,9 @@ def main():
                         realized_total, realized_prev = calculate_production_period_with_carryover(
                             metric_df, selected_year, selected_period_idx, "bu", bu, use_pondere
                         )
-                        # Include portfolio start-of-year value for MAINTENANCE (already signed contracts)
+                        # Include portfolio start-of-year value for MAINTENANCE (spread: 1/11 per accounting period)
                         if bu == "MAINTENANCE" and entretien_start_2026 is not None:
-                            realized_total = realized_total + entretien_start_2026
+                            realized_total = realized_total + (entretien_start_2026 / 11.0)
                         # Objective = sum of objectives for months in this accounting period
                         period_months = get_months_for_accounting_period(selected_period_idx)
                         objective = sum(
@@ -4701,7 +4769,7 @@ def main():
                                 "%": f"{percent:.1f}%"
                             })
 
-                    st.dataframe(style_objectives_df(pd.DataFrame(bu_data), signed_two_blocks=has_signature_obj), use_container_width=True, hide_index=True)
+                    st.markdown(render_objectives_table_html(pd.DataFrame(bu_data), signed_two_blocks=has_signature_obj), unsafe_allow_html=True)
 
                     # Typologie Table
                     st.markdown("#### Par Typologie")
@@ -4710,9 +4778,9 @@ def main():
                         realized_total, realized_prev = calculate_production_period_with_carryover(
                             metric_df, selected_year, selected_period_idx, "typologie", typo, use_pondere
                         )
-                        # Include portfolio start-of-year value for Maintenance Entretien
+                        # Include portfolio start-of-year value for Maintenance Entretien (spread: 1/11 per period)
                         if typo == "Maintenance Entretien" and entretien_start_2026 is not None:
-                            realized_total = realized_total + entretien_start_2026
+                            realized_total = realized_total + (entretien_start_2026 / 11.0)
                         period_months = get_months_for_accounting_period(selected_period_idx)
                         objective = sum(
                             objective_for_month(selected_year, metric_key, "typologie", typo, m)
@@ -4765,7 +4833,7 @@ def main():
                                 "%": f"{percent:.1f}%"
                             })
 
-                    st.dataframe(style_objectives_df(pd.DataFrame(typo_data), signed_two_blocks=has_signature_obj), use_container_width=True, hide_index=True)
+                    st.markdown(render_objectives_table_html(pd.DataFrame(typo_data), signed_two_blocks=has_signature_obj), unsafe_allow_html=True)
 
                     # =============================================================
                     # SECTION 2: TRIMESTRE (Production year)
@@ -4797,8 +4865,9 @@ def main():
                         realized_total, realized_prev = calculate_production_amount_with_carryover(
                             metric_df, selected_year, quarter_amount_col, "bu", bu
                         )
+                        # Include portfolio start for MAINTENANCE (spread: 3/11 per quarter)
                         if bu == "MAINTENANCE" and entretien_start_2026 is not None:
-                            realized_total = realized_total + entretien_start_2026
+                            realized_total = realized_total + (entretien_start_2026 * 3.0 / 11.0)
                         objective = objective_for_quarter(selected_year, metric_key, "bu", bu, current_quarter)
                         reste = objective - realized_total
                         percent = (realized_total / objective * 100) if objective > 0 else 0.0
@@ -4837,7 +4906,7 @@ def main():
                                 "%": f"{percent:.1f}%"
                             })
 
-                    st.dataframe(style_objectives_df(pd.DataFrame(bu_quarter_data), signed_two_blocks=has_signature_obj), use_container_width=True, hide_index=True)
+                    st.markdown(render_objectives_table_html(pd.DataFrame(bu_quarter_data), signed_two_blocks=has_signature_obj), unsafe_allow_html=True)
 
                     # Typologie Table (Quarter)
                     st.markdown("#### Par Typologie (Trimestre de production)")
@@ -4847,7 +4916,7 @@ def main():
                             metric_df, selected_year, quarter_amount_col, "typologie", typo
                         )
                         if typo == "Maintenance Entretien" and entretien_start_2026 is not None:
-                            realized_total = realized_total + entretien_start_2026
+                            realized_total = realized_total + (entretien_start_2026 * 3.0 / 11.0)
                         objective = objective_for_quarter(selected_year, metric_key, "typologie", typo, current_quarter)
                         reste = objective - realized_total
                         percent = (realized_total / objective * 100) if objective > 0 else 0.0
@@ -4886,7 +4955,7 @@ def main():
                                 "%": f"{percent:.1f}%"
                             })
 
-                    st.dataframe(style_objectives_df(pd.DataFrame(typo_quarter_data), signed_two_blocks=has_signature_obj), use_container_width=True, hide_index=True)
+                    st.markdown(render_objectives_table_html(pd.DataFrame(typo_quarter_data), signed_two_blocks=has_signature_obj), unsafe_allow_html=True)
 
                     # =============================================================
                     # SECTION 3: ANNÉE (Production year)
@@ -4906,6 +4975,7 @@ def main():
                         realized_total, realized_prev = calculate_production_amount_with_carryover(
                             metric_df, selected_year, year_amount_col, "bu", bu
                         )
+                        # Include full portfolio start for MAINTENANCE (year total)
                         if bu == "MAINTENANCE" and entretien_start_2026 is not None:
                             realized_total = realized_total + entretien_start_2026
                         objective = objective_for_year(selected_year, metric_key, "bu", bu)
@@ -4946,7 +5016,7 @@ def main():
                                 "%": f"{percent:.1f}%"
                             })
 
-                    st.dataframe(style_objectives_df(pd.DataFrame(bu_year_data), signed_two_blocks=has_signature_obj), use_container_width=True, hide_index=True)
+                    st.markdown(render_objectives_table_html(pd.DataFrame(bu_year_data), signed_two_blocks=has_signature_obj), unsafe_allow_html=True)
 
                     # Typologie Table (Year)
                     st.markdown("#### Par Typologie (Année de production)")
@@ -4955,6 +5025,7 @@ def main():
                         realized_total, realized_prev = calculate_production_amount_with_carryover(
                             metric_df, selected_year, year_amount_col, "typologie", typo
                         )
+                        # Include full portfolio start for Maintenance Entretien (year total)
                         if typo == "Maintenance Entretien" and entretien_start_2026 is not None:
                             realized_total = realized_total + entretien_start_2026
                         objective = objective_for_year(selected_year, metric_key, "typologie", typo)
@@ -4995,7 +5066,7 @@ def main():
                                 "%": f"{percent:.1f}%"
                             })
 
-                    st.dataframe(style_objectives_df(pd.DataFrame(typo_year_data), signed_two_blocks=has_signature_obj), use_container_width=True, hide_index=True)
+                    st.markdown(render_objectives_table_html(pd.DataFrame(typo_year_data), signed_two_blocks=has_signature_obj), unsafe_allow_html=True)
 
                     # =============================================================
                     # LINE CHARTS
