@@ -1689,6 +1689,83 @@ def calculate_pure_signature_for_year(
     return float(brut), float(pondere)
 
 
+def calculate_avg_probability_for_sent(
+    df: pd.DataFrame,
+    sent_year: int,
+    months: List[int],
+    dimension: str,
+    key: str,
+    fallback: float = 25.0,
+) -> float:
+    """
+    Compute the simple average probability (%) of all sent proposals
+    in the given signing months / year for a given dimension/key.
+
+    Uses the 'probability' column (Pondération %) from the Envoyé data.
+    Falls back to `fallback` (default 25%) if no proposals found.
+
+    Args:
+        df: Envoyé DataFrame with source_sheet and probability columns
+        sent_year: Year to filter on (signed_year column)
+        months: List of calendar month numbers to include
+        dimension: "bu" or "typologie"
+        key: BU name or typologie name
+        fallback: Default probability % when no data (default 25.0)
+
+    Returns:
+        Simple average probability as a percentage (e.g., 65.0 for 65%)
+    """
+    if df.empty or "source_sheet" not in df.columns:
+        return fallback
+
+    # Filter to sent_year if column present
+    work_df = df
+    if "signed_year" in df.columns:
+        work_df = df[df["signed_year"] == sent_year]
+    if work_df.empty:
+        return fallback
+
+    # Filter to requested months via source_sheet
+    month_set = set(months)
+    month_df = pd.DataFrame()
+    for sheet in work_df["source_sheet"].unique():
+        _, sheet_month_num = extract_month_from_sheet(sheet)
+        if sheet_month_num in month_set:
+            month_df = pd.concat(
+                [month_df, work_df[work_df["source_sheet"] == sheet]],
+                ignore_index=True,
+            )
+
+    if month_df.empty or "probability" not in month_df.columns:
+        return fallback
+
+    # Filter by dimension / key and collect individual probabilities
+    probs: List[float] = []
+    if dimension == "bu":
+        filtered = _filter_df_for_dimension(month_df, dimension, key)
+        for p in filtered["probability"].dropna():
+            try:
+                probs.append(float(p))
+            except (ValueError, TypeError):
+                pass
+    else:
+        # Typologie - use primary allocation
+        for _, row in month_df.iterrows():
+            _, primary = allocate_typologie_for_row(row)
+            if primary == key:
+                p = row.get("probability")
+                if p is not None:
+                    try:
+                        probs.append(float(p))
+                    except (ValueError, TypeError):
+                        pass
+
+    if not probs:
+        return fallback
+
+    return float(sum(probs) / len(probs))
+
+
 def plot_objectives_line_chart(
     year: int,
     metric: str,
@@ -3949,32 +4026,37 @@ def _pct_circle_svg(percent: float, size: int = 28) -> str:
 
 
 # Column groupings for two-block layout
-_PROD_COLS = {"Objectif Production", "Réalisé", "Reste", "%"}
-_SIG_COLS  = {"Objectif Signature", "Signature", "Reste Sig", "% Sig"}
-# First col of the Signature block (gets the divider border)
+_PROD_COLS = {"Objectif Production", "Réalisé", "Reste", "%", "Objectif Envoi", "Envoyé Brut"}
+_SIG_COLS  = {"Objectif Signature", "Signature", "Reste Sig", "% Sig", "Envoyé Pondéré", "Reste Pond", "% Pond"}
+# First col of the second block (gets the divider border) – same for both Signé and Envoyé two-block views
 _SIG_FIRST_COL = "Objectif Signature"
 
 
 def _objectives_table_cell_html(val: str, col: str, is_sig_block: bool) -> str:
     """Escape and optionally style a cell for the objectives HTML table."""
     escaped = html.escape(str(val))
-    if col in ("Reste", "Reste Sig"):
+    # Colored Reste columns (green when ≤ 0, red otherwise)
+    if col in ("Reste", "Reste Sig", "Reste Pond"):
         try:
             num = float(val.replace("€", "").replace(",", "").replace(" ", ""))
             color = "#27ae60" if num <= 0 else "#e74c3c"
             return f'<span style="color:{color};font-weight:500">{escaped}</span>'
         except (ValueError, TypeError):
             return escaped
-    if col in ("%", "% Sig"):
+    # Percentage columns – circular progress + color
+    if col in ("%", "% Sig", "% Pond"):
         pct = _parse_pct(val)
         color = "#27ae60" if pct >= 100 else "#e74c3c"
         circle = _pct_circle_svg(pct)
         return f'<span style="white-space:nowrap">{circle}<span style="color:{color};font-weight:600">{escaped}</span></span>'
-    if col in ("Objectif Production", "Objectif Signature", "Objectif"):
+    # Objective columns – dimmed
+    if col in ("Objectif Production", "Objectif Signature", "Objectif", "Objectif Envoi"):
         return f'<span style="opacity:0.75;font-size:0.92em">{escaped}</span>'
-    if col in ("Réalisé",):
+    # Bold "actual" columns
+    if col in ("Réalisé", "Envoyé Brut"):
         return f'<strong>{escaped}</strong>'
-    if col in ("Signature",):
+    # Italic "pondéré" columns
+    if col in ("Signature", "Envoyé Pondéré"):
         return f'<em>{escaped}</em>'
     return escaped
 
@@ -3983,9 +4065,9 @@ def _col_cell_style(col: str, is_first_sig: bool, row_idx: int) -> str:
     """Return inline CSS for a <td> based on column and position."""
     bg = "#fafafa" if row_idx % 2 == 0 else "#ffffff"
     base = f"padding:8px 10px;border-bottom:1px solid #e8e8e8;background:{bg};vertical-align:middle;"
-    if col in ("Réalisé", "Signature"):
+    if col in ("Réalisé", "Signature", "Envoyé Brut", "Envoyé Pondéré"):
         base += "font-weight:600;"
-    if col in ("Objectif Production", "Objectif Signature", "Objectif"):
+    if col in ("Objectif Production", "Objectif Signature", "Objectif", "Objectif Envoi"):
         base += "color:#555;font-size:0.9em;"
     if is_first_sig:
         base += "border-left:3px solid #222;"
@@ -4755,6 +4837,7 @@ def main():
                     # BU Table
                     st.markdown("#### Par Business Unit")
                     has_signature_obj = is_signed and selected_year in OBJECTIVES and "signature" in OBJECTIVES[selected_year]
+                    has_envoye_dual_block = is_sent and selected_year in OBJECTIVES and "signature" in OBJECTIVES[selected_year]
                     bu_data = []
                     for bu in BU_ORDER:
                         # Realized = production-period amount using quarter columns / 3
@@ -4807,6 +4890,33 @@ def main():
                                 "Reste Sig": f"{reste_sig:,.0f}€",
                                 "% Sig": f"{percent_sig:.1f}%"
                             })
+                        elif has_envoye_dual_block:
+                            avg_prob = calculate_avg_probability_for_sent(
+                                metric_df, selected_year, period_months, "bu", bu
+                            )
+                            avg_prob_rate = avg_prob / 100.0
+                            objective_sig = sum(
+                                objective_for_month(selected_year, "signature", "bu", bu, m)
+                                for m in period_months
+                            )
+                            objective_envoi = (
+                                objective_sig / avg_prob_rate if avg_prob_rate > 0 else objective_sig / 0.25
+                            )
+                            reste_envoi = objective_envoi - pure_brut
+                            percent_envoi = (pure_brut / objective_envoi * 100) if objective_envoi > 0 else 0.0
+                            reste_pond = objective_sig - pure_pondere
+                            percent_pond = (pure_pondere / objective_sig * 100) if objective_sig > 0 else 0.0
+                            bu_data.append({
+                                "BU": bu,
+                                "Objectif Envoi": f"{objective_envoi:,.0f}€",
+                                "Envoyé Brut": f"{pure_brut:,.0f}€",
+                                "Reste": f"{reste_envoi:,.0f}€",
+                                "%": f"{percent_envoi:.1f}%",
+                                "Objectif Signature": f"{objective_sig:,.0f}€",
+                                "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
+                                "Reste Pond": f"{reste_pond:,.0f}€",
+                                "% Pond": f"{percent_pond:.1f}%"
+                            })
                         else:
                             bu_data.append({
                                 "BU": bu,
@@ -4817,7 +4927,7 @@ def main():
                                 "%": f"{percent:.1f}%"
                             })
 
-                    st.markdown(render_objectives_table_html(pd.DataFrame(bu_data), signed_two_blocks=has_signature_obj), unsafe_allow_html=True)
+                    st.markdown(render_objectives_table_html(pd.DataFrame(bu_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
 
                     # Typologie Table
                     st.markdown("#### Par Typologie")
@@ -4871,6 +4981,33 @@ def main():
                                 "Reste Sig": f"{reste_sig:,.0f}€",
                                 "% Sig": f"{percent_sig:.1f}%"
                             })
+                        elif has_envoye_dual_block:
+                            avg_prob = calculate_avg_probability_for_sent(
+                                metric_df, selected_year, period_months, "typologie", typo
+                            )
+                            avg_prob_rate = avg_prob / 100.0
+                            objective_sig = sum(
+                                objective_for_month(selected_year, "signature", "typologie", typo, m)
+                                for m in period_months
+                            )
+                            objective_envoi = (
+                                objective_sig / avg_prob_rate if avg_prob_rate > 0 else objective_sig / 0.25
+                            )
+                            reste_envoi = objective_envoi - pure_brut
+                            percent_envoi = (pure_brut / objective_envoi * 100) if objective_envoi > 0 else 0.0
+                            reste_pond = objective_sig - pure_pondere
+                            percent_pond = (pure_pondere / objective_sig * 100) if objective_sig > 0 else 0.0
+                            typo_data.append({
+                                "Typologie": typo,
+                                "Objectif Envoi": f"{objective_envoi:,.0f}€",
+                                "Envoyé Brut": f"{pure_brut:,.0f}€",
+                                "Reste": f"{reste_envoi:,.0f}€",
+                                "%": f"{percent_envoi:.1f}%",
+                                "Objectif Signature": f"{objective_sig:,.0f}€",
+                                "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
+                                "Reste Pond": f"{reste_pond:,.0f}€",
+                                "% Pond": f"{percent_pond:.1f}%"
+                            })
                         else:
                             typo_data.append({
                                 "Typologie": typo,
@@ -4881,7 +5018,7 @@ def main():
                                 "%": f"{percent:.1f}%"
                             })
 
-                    st.markdown(render_objectives_table_html(pd.DataFrame(typo_data), signed_two_blocks=has_signature_obj), unsafe_allow_html=True)
+                    st.markdown(render_objectives_table_html(pd.DataFrame(typo_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
 
                     # =============================================================
                     # SECTION 2: TRIMESTRE (Production year)
@@ -4944,6 +5081,31 @@ def main():
                                 "Reste Sig": f"{reste_sig:,.0f}€",
                                 "% Sig": f"{percent_sig:.1f}%"
                             })
+                        elif has_envoye_dual_block:
+                            quarter_months_list = {"Q1": [1,2,3], "Q2": [4,5,6], "Q3": [7,8,9], "Q4": [10,11,12]}[current_quarter]
+                            avg_prob = calculate_avg_probability_for_sent(
+                                metric_df, selected_year, quarter_months_list, "bu", bu
+                            )
+                            avg_prob_rate = avg_prob / 100.0
+                            objective_sig = objective_for_quarter(selected_year, "signature", "bu", bu, current_quarter)
+                            objective_envoi = (
+                                objective_sig / avg_prob_rate if avg_prob_rate > 0 else objective_sig / 0.25
+                            )
+                            reste_envoi = objective_envoi - pure_brut
+                            percent_envoi = (pure_brut / objective_envoi * 100) if objective_envoi > 0 else 0.0
+                            reste_pond = objective_sig - pure_pondere
+                            percent_pond = (pure_pondere / objective_sig * 100) if objective_sig > 0 else 0.0
+                            bu_quarter_data.append({
+                                "BU": bu,
+                                "Objectif Envoi": f"{objective_envoi:,.0f}€",
+                                "Envoyé Brut": f"{pure_brut:,.0f}€",
+                                "Reste": f"{reste_envoi:,.0f}€",
+                                "%": f"{percent_envoi:.1f}%",
+                                "Objectif Signature": f"{objective_sig:,.0f}€",
+                                "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
+                                "Reste Pond": f"{reste_pond:,.0f}€",
+                                "% Pond": f"{percent_pond:.1f}%"
+                            })
                         else:
                             bu_quarter_data.append({
                                 "BU": bu,
@@ -4954,7 +5116,7 @@ def main():
                                 "%": f"{percent:.1f}%"
                             })
 
-                    st.markdown(render_objectives_table_html(pd.DataFrame(bu_quarter_data), signed_two_blocks=has_signature_obj), unsafe_allow_html=True)
+                    st.markdown(render_objectives_table_html(pd.DataFrame(bu_quarter_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
 
                     # Typologie Table (Quarter)
                     st.markdown("#### Par Typologie (Trimestre de production)")
@@ -4993,6 +5155,31 @@ def main():
                                 "Reste Sig": f"{reste_sig:,.0f}€",
                                 "% Sig": f"{percent_sig:.1f}%"
                             })
+                        elif has_envoye_dual_block:
+                            quarter_months_list = {"Q1": [1,2,3], "Q2": [4,5,6], "Q3": [7,8,9], "Q4": [10,11,12]}[current_quarter]
+                            avg_prob = calculate_avg_probability_for_sent(
+                                metric_df, selected_year, quarter_months_list, "typologie", typo
+                            )
+                            avg_prob_rate = avg_prob / 100.0
+                            objective_sig = objective_for_quarter(selected_year, "signature", "typologie", typo, current_quarter)
+                            objective_envoi = (
+                                objective_sig / avg_prob_rate if avg_prob_rate > 0 else objective_sig / 0.25
+                            )
+                            reste_envoi = objective_envoi - pure_brut
+                            percent_envoi = (pure_brut / objective_envoi * 100) if objective_envoi > 0 else 0.0
+                            reste_pond = objective_sig - pure_pondere
+                            percent_pond = (pure_pondere / objective_sig * 100) if objective_sig > 0 else 0.0
+                            typo_quarter_data.append({
+                                "Typologie": typo,
+                                "Objectif Envoi": f"{objective_envoi:,.0f}€",
+                                "Envoyé Brut": f"{pure_brut:,.0f}€",
+                                "Reste": f"{reste_envoi:,.0f}€",
+                                "%": f"{percent_envoi:.1f}%",
+                                "Objectif Signature": f"{objective_sig:,.0f}€",
+                                "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
+                                "Reste Pond": f"{reste_pond:,.0f}€",
+                                "% Pond": f"{percent_pond:.1f}%"
+                            })
                         else:
                             typo_quarter_data.append({
                                 "Typologie": typo,
@@ -5003,7 +5190,7 @@ def main():
                                 "%": f"{percent:.1f}%"
                             })
 
-                    st.markdown(render_objectives_table_html(pd.DataFrame(typo_quarter_data), signed_two_blocks=has_signature_obj), unsafe_allow_html=True)
+                    st.markdown(render_objectives_table_html(pd.DataFrame(typo_quarter_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
 
                     # =============================================================
                     # SECTION 3: ANNÉE (Production year)
@@ -5054,6 +5241,30 @@ def main():
                                 "Reste Sig": f"{reste_sig:,.0f}€",
                                 "% Sig": f"{percent_sig:.1f}%"
                             })
+                        elif has_envoye_dual_block:
+                            avg_prob = calculate_avg_probability_for_sent(
+                                metric_df, selected_year, list(range(1, 13)), "bu", bu
+                            )
+                            avg_prob_rate = avg_prob / 100.0
+                            objective_sig = objective_for_year(selected_year, "signature", "bu", bu)
+                            objective_envoi = (
+                                objective_sig / avg_prob_rate if avg_prob_rate > 0 else objective_sig / 0.25
+                            )
+                            reste_envoi = objective_envoi - pure_brut
+                            percent_envoi = (pure_brut / objective_envoi * 100) if objective_envoi > 0 else 0.0
+                            reste_pond = objective_sig - pure_pondere
+                            percent_pond = (pure_pondere / objective_sig * 100) if objective_sig > 0 else 0.0
+                            bu_year_data.append({
+                                "BU": bu,
+                                "Objectif Envoi": f"{objective_envoi:,.0f}€",
+                                "Envoyé Brut": f"{pure_brut:,.0f}€",
+                                "Reste": f"{reste_envoi:,.0f}€",
+                                "%": f"{percent_envoi:.1f}%",
+                                "Objectif Signature": f"{objective_sig:,.0f}€",
+                                "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
+                                "Reste Pond": f"{reste_pond:,.0f}€",
+                                "% Pond": f"{percent_pond:.1f}%"
+                            })
                         else:
                             bu_year_data.append({
                                 "BU": bu,
@@ -5064,7 +5275,7 @@ def main():
                                 "%": f"{percent:.1f}%"
                             })
 
-                    st.markdown(render_objectives_table_html(pd.DataFrame(bu_year_data), signed_two_blocks=has_signature_obj), unsafe_allow_html=True)
+                    st.markdown(render_objectives_table_html(pd.DataFrame(bu_year_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
 
                     # Typologie Table (Year)
                     st.markdown("#### Par Typologie (Année de production)")
@@ -5104,6 +5315,30 @@ def main():
                                 "Reste Sig": f"{reste_sig:,.0f}€",
                                 "% Sig": f"{percent_sig:.1f}%"
                             })
+                        elif has_envoye_dual_block:
+                            avg_prob = calculate_avg_probability_for_sent(
+                                metric_df, selected_year, list(range(1, 13)), "typologie", typo
+                            )
+                            avg_prob_rate = avg_prob / 100.0
+                            objective_sig = objective_for_year(selected_year, "signature", "typologie", typo)
+                            objective_envoi = (
+                                objective_sig / avg_prob_rate if avg_prob_rate > 0 else objective_sig / 0.25
+                            )
+                            reste_envoi = objective_envoi - pure_brut
+                            percent_envoi = (pure_brut / objective_envoi * 100) if objective_envoi > 0 else 0.0
+                            reste_pond = objective_sig - pure_pondere
+                            percent_pond = (pure_pondere / objective_sig * 100) if objective_sig > 0 else 0.0
+                            typo_year_data.append({
+                                "Typologie": typo,
+                                "Objectif Envoi": f"{objective_envoi:,.0f}€",
+                                "Envoyé Brut": f"{pure_brut:,.0f}€",
+                                "Reste": f"{reste_envoi:,.0f}€",
+                                "%": f"{percent_envoi:.1f}%",
+                                "Objectif Signature": f"{objective_sig:,.0f}€",
+                                "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
+                                "Reste Pond": f"{reste_pond:,.0f}€",
+                                "% Pond": f"{percent_pond:.1f}%"
+                            })
                         else:
                             typo_year_data.append({
                                 "Typologie": typo,
@@ -5114,7 +5349,7 @@ def main():
                                 "%": f"{percent:.1f}%"
                             })
 
-                    st.markdown(render_objectives_table_html(pd.DataFrame(typo_year_data), signed_two_blocks=has_signature_obj), unsafe_allow_html=True)
+                    st.markdown(render_objectives_table_html(pd.DataFrame(typo_year_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
 
                     # =============================================================
                     # LINE CHARTS
@@ -5122,8 +5357,13 @@ def main():
                     st.markdown("---")
                     st.markdown("### 📉 Évolution Mensuelle")
 
-                    # Checkbox to show/hide pure signature lines
-                    pure_label = "Signature" if has_signature_obj else "Pur"
+                    # Checkbox to show/hide pure/pondéré lines
+                    if has_envoye_dual_block:
+                        pure_label = "Envoyé Pondéré"
+                    elif has_signature_obj:
+                        pure_label = "Signature"
+                    else:
+                        pure_label = "Pur"
                     show_pure_lines = st.checkbox(
                         f"Afficher les courbes {pure_label} (brut/pondéré)",
                         value=False,
@@ -5143,7 +5383,7 @@ def main():
                     fig_bu = plot_objectives_line_chart(
                         selected_year, metric_key, "bu", selected_bu_key, metric_df,
                         use_pondere=use_pondere, show_pure=show_pure_lines,
-                        show_signature_objective=has_signature_obj
+                        show_signature_objective=(has_signature_obj or has_envoye_dual_block)
                     )
                     st.plotly_chart(fig_bu, use_container_width=True, key=f"obj_bu_chart_{metric_key}")
 
@@ -5160,7 +5400,7 @@ def main():
                     fig_typo = plot_objectives_line_chart(
                         selected_year, metric_key, "typologie", selected_typo_key, metric_df,
                         use_pondere=use_pondere, show_pure=show_pure_lines,
-                        show_signature_objective=has_signature_obj
+                        show_signature_objective=(has_signature_obj or has_envoye_dual_block)
                     )
                     st.plotly_chart(fig_typo, use_container_width=True, key=f"obj_typo_chart_{metric_key}")
 
