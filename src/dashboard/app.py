@@ -59,6 +59,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from config.settings import settings, MONTH_MAP, get_secret
 from src.integrations.google_sheets import GoogleSheetsClient
+from src.integrations.notion_entretien_start import fetch_maintenance_entretien_start_2026
 from src.processing.objectives import (
     objective_for_month, objective_for_quarter, objective_for_year,
     get_quarter_for_month, quarter_start_dates, quarter_end_dates, get_all_objectives_for_dimension,
@@ -3946,6 +3947,36 @@ def style_objectives_df(df: pd.DataFrame, signed_two_blocks: bool = False):
     return style
 
 
+@st.cache_data(ttl=300)
+def _get_entretien_start_2026_from_notion(_api_key: str, _datasource_id: str):
+    """Cached fetch of Maintenance Entretien start 2026 from Notion (sum of Total HT Cette année)."""
+    if not _api_key or not _datasource_id:
+        return None
+    try:
+        return fetch_maintenance_entretien_start_2026(_api_key, _datasource_id)
+    except Exception:
+        return None
+
+
+def _get_entretien_start_2026_value() -> Optional[float]:
+    """Return Maintenance Entretien start-of-year 2026 from Notion or secret. Used for Réalisé and info box."""
+    api_key = get_secret("NOTION_API_KEY", "")
+    ds_id = (
+        get_secret("NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID", "").strip()
+        or get_secret("NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATABASE_ID", "").strip()
+    )
+    from_notion = _get_entretien_start_2026_from_notion(api_key, ds_id) if (api_key and ds_id) else None
+    if from_notion is not None:
+        return float(from_notion)
+    fallback = get_secret("MAINTENANCE_ENTRETIEN_START_2026", "").strip()
+    if not fallback:
+        return None
+    try:
+        return float(fallback.replace(",", ".").replace(" ", ""))
+    except ValueError:
+        return None
+
+
 # =============================================================================
 # HELPER FUNCTIONS FOR DONNÉES DÉTAILLÉES TAB
 # =============================================================================
@@ -4582,15 +4613,20 @@ def main():
                     selected_period_idx = all_periods[period_options.index(selected_period_str)]
                     selected_period_label = get_accounting_period_label(selected_period_idx)
 
-                    # Maintenance Entretien – début d'année 2026 (from Notion / secret)
+                    # Maintenance Entretien – début 2026: from Notion (sum "Total HT Cette année") or secret; included in Réalisé
+                    entretien_start_2026: Optional[float] = None
                     if is_signed and selected_year == 2026:
-                        start_2026_val = get_secret("MAINTENANCE_ENTRETIEN_START_2026", "").strip()
-                        if start_2026_val:
-                            try:
-                                start_2026_num = float(start_2026_val.replace(",", ".").replace(" ", ""))
-                                st.info(f"**Maintenance Entretien – Début d'année 2026 :** {start_2026_num:,.0f} €")
-                            except ValueError:
-                                st.info(f"**Maintenance Entretien – Début d'année 2026 :** {start_2026_val}")
+                        entretien_start_2026 = _get_entretien_start_2026_value()
+                        if entretien_start_2026 is not None:
+                            st.info(f"**Maintenance Entretien – Début d'année 2026 :** {entretien_start_2026:,.0f} € *(inclus dans Réalisé)*")
+                        else:
+                            start_2026_val = get_secret("MAINTENANCE_ENTRETIEN_START_2026", "").strip()
+                            if start_2026_val:
+                                try:
+                                    st.info(f"**Maintenance Entretien – Début d'année 2026 :** {float(start_2026_val.replace(',', '.').replace(' ', '')):,.0f} € *(inclus dans Réalisé)*")
+                                    entretien_start_2026 = float(start_2026_val.replace(",", ".").replace(" ", ""))
+                                except ValueError:
+                                    st.info(f"**Maintenance Entretien – Début d'année 2026 :** {start_2026_val}")
 
                     # =============================================================
                     # SECTION 1: PÉRIODE (Production period)
@@ -4609,6 +4645,9 @@ def main():
                         realized_total, realized_prev = calculate_production_period_with_carryover(
                             metric_df, selected_year, selected_period_idx, "bu", bu, use_pondere
                         )
+                        # Include portfolio start-of-year value for MAINTENANCE (already signed contracts)
+                        if bu == "MAINTENANCE" and entretien_start_2026 is not None:
+                            realized_total = realized_total + entretien_start_2026
                         # Objective = sum of objectives for months in this accounting period
                         period_months = get_months_for_accounting_period(selected_period_idx)
                         objective = sum(
@@ -4671,6 +4710,9 @@ def main():
                         realized_total, realized_prev = calculate_production_period_with_carryover(
                             metric_df, selected_year, selected_period_idx, "typologie", typo, use_pondere
                         )
+                        # Include portfolio start-of-year value for Maintenance Entretien
+                        if typo == "Maintenance Entretien" and entretien_start_2026 is not None:
+                            realized_total = realized_total + entretien_start_2026
                         period_months = get_months_for_accounting_period(selected_period_idx)
                         objective = sum(
                             objective_for_month(selected_year, metric_key, "typologie", typo, m)
@@ -4755,6 +4797,8 @@ def main():
                         realized_total, realized_prev = calculate_production_amount_with_carryover(
                             metric_df, selected_year, quarter_amount_col, "bu", bu
                         )
+                        if bu == "MAINTENANCE" and entretien_start_2026 is not None:
+                            realized_total = realized_total + entretien_start_2026
                         objective = objective_for_quarter(selected_year, metric_key, "bu", bu, current_quarter)
                         reste = objective - realized_total
                         percent = (realized_total / objective * 100) if objective > 0 else 0.0
@@ -4802,6 +4846,8 @@ def main():
                         realized_total, realized_prev = calculate_production_amount_with_carryover(
                             metric_df, selected_year, quarter_amount_col, "typologie", typo
                         )
+                        if typo == "Maintenance Entretien" and entretien_start_2026 is not None:
+                            realized_total = realized_total + entretien_start_2026
                         objective = objective_for_quarter(selected_year, metric_key, "typologie", typo, current_quarter)
                         reste = objective - realized_total
                         percent = (realized_total / objective * 100) if objective > 0 else 0.0
@@ -4860,6 +4906,8 @@ def main():
                         realized_total, realized_prev = calculate_production_amount_with_carryover(
                             metric_df, selected_year, year_amount_col, "bu", bu
                         )
+                        if bu == "MAINTENANCE" and entretien_start_2026 is not None:
+                            realized_total = realized_total + entretien_start_2026
                         objective = objective_for_year(selected_year, metric_key, "bu", bu)
                         reste = objective - realized_total
                         percent = (realized_total / objective * 100) if objective > 0 else 0.0
@@ -4907,6 +4955,8 @@ def main():
                         realized_total, realized_prev = calculate_production_amount_with_carryover(
                             metric_df, selected_year, year_amount_col, "typologie", typo
                         )
+                        if typo == "Maintenance Entretien" and entretien_start_2026 is not None:
+                            realized_total = realized_total + entretien_start_2026
                         objective = objective_for_year(selected_year, metric_key, "typologie", typo)
                         reste = objective - realized_total
                         percent = (realized_total / objective * 100) if objective > 0 else 0.0

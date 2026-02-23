@@ -281,6 +281,33 @@ def test_travaux_projection_or_logic_projet_start_within_date_beyond():
     assert generator._matches_criteria(row), "Should pass: projet_start within window (OR logic)"
 
 
+def test_travaux_projection_generate_includes_signature_date():
+    """generate() includes signature_date in proposal dict when row has it (formatted YYYY-MM-DD)."""
+    from config.settings import STATUS_WAITING, TRAVAUX_PROJECTION_PROBABILITY_THRESHOLD
+
+    reference_date = datetime(2026, 1, 15)
+    generator = TravauxProjectionGenerator(reference_date=reference_date)
+
+    df = pd.DataFrame([{
+        'final_bu': 'TRAVAUX',
+        'statut_clean': STATUS_WAITING[0],
+        'probability': TRAVAUX_PROJECTION_PROBABILITY_THRESHOLD,
+        'projet_start': pd.Timestamp(2026, 8, 1),
+        'date': pd.Timestamp(2026, 2, 1),
+        'signature_date': pd.Timestamp(2026, 2, 10),
+        'id': 'gen-1',
+        'title': 'Test',
+        'company_name': 'Client',
+        'amount': 10000,
+        'assigned_to': 'user',
+        'cf_typologie_de_devis': 'Travaux DV',
+    }])
+    proposals = generator.generate(df)
+    assert len(proposals) == 1
+    assert 'signature_date' in proposals[0]
+    assert proposals[0]['signature_date'] == '2026-02-10'
+
+
 if __name__ == "__main__":
     test_travaux_projection_includes_projet_start_within_365_days()
     test_travaux_projection_excludes_projet_start_beyond_365_days()

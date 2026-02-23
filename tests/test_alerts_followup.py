@@ -21,9 +21,8 @@ def test_followup_travaux_or_rule():
     reference_date = datetime(2026, 1, 15)
     generator = AlertsGenerator(reference_date=reference_date)
 
-    # Calculate window end
+    # Window: backward = 1st of current year, forward = today + 60 days
     window_end = reference_date + timedelta(days=ALERT_FOLLOWUP_DAYS_FORWARD)
-    window_start = (reference_date.replace(day=1) - timedelta(days=1)).replace(day=1)
 
     # Test case 1: date within window, projet_start outside -> should pass
     row1 = pd.Series({
@@ -37,11 +36,11 @@ def test_followup_travaux_or_rule():
     # Test case 2: date outside window, projet_start within -> should pass
     row2 = pd.Series({
         'final_bu': 'TRAVAUX',
-        'date': pd.Timestamp(2025, 11, 1),  # Before window_start
+        'date': pd.Timestamp(2025, 11, 1),  # Before 1st Jan (current year)
         'projet_start': pd.Timestamp(2026, 1, 20),  # Within window
         'statut_clean': 'waiting'
     })
-    # Note: This will fail backward check (date < window_start), so let's use a date after window_start
+    # Note: row2 fails backward check (date not in current year), so use row2b with date in current year
     row2b = pd.Series({
         'final_bu': 'TRAVAUX',
         'date': pd.Timestamp(2026, 3, 20),  # After window_end

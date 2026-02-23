@@ -367,17 +367,19 @@ myrium/
 - **5 Databases**: Weird Proposals, Follow-up, TRAVAUX Projection, Recent TRAVAUX Projects, MAINTENANCE Won (current year)
 - **Commercial/Chef de projet Split**: People properties for clear responsibility
 - **Schema-Aware Sync**: Only sets properties that exist in database schema (prevents 400 errors)
-- **Typologie devis**: Furious `cf_typologie_de_devis` synced as Notion **Multi-select** property "Typologie devis" (comma-separated in Furious → multiple options); schema-aware in Weird, Follow-up, TRAVAUX Projection, MAINTENANCE Won (create property with exact name in each DB to enable)
+- **TRAVAUX Projection dates**: Sync maps to both "Date"/"Début projet" and "Date Signature"/"Début Chantier" when present in schema; projection passes `signature_date` for "Date Signature"
 - **Property Preservation**: Preserves user-edited notes/checkboxes during sync
 - **Notion API 2025-09-03**: All clients pinned to latest API version with data_sources support
 - **Fail-Closed Behavior**: Refuses to create pages when schema cannot be loaded (prevents blank page spam)
 - **Owner-Specific Follow-up Windows**: Vincent and Adélaïde get 365-day forward windows in Notion (emails use 60 days)
+- **Leftover Marking (Follow-up & TRAVAUX Projection)**: Pages in Notion but not in current run get "Pris en charge" ticked so they are filtered out; current-run pages get "Pris en charge" unchecked (see §18.8).
 
 ### 7.7 BI Dashboard
 - **Production Tabs**: "À produire {Year}" with cross-year aggregation
 - **Time Filtering**: Filter by Month/Quarter based on source sheet
 - **Date Columns**: Full visibility of proposal dates
 - **Clickable Project Lists**: KPI cards display project counts with clickable "🔎 Voir projets" buttons that open large modal dialogs showing detailed project lists with Furious CRM links
+- **Objectifs Signé (Production vs Signature)**: For the Signé view, the Objectifs tab shows two blocks: **Objectif Production** vs **Réalisé** (signed-to-produce in the period) and **Objectif Signature** vs **Signature** (ex-Pur: amount signed in the period). Objectives data: `signe` = production (Réalisé), `signature` = signature (Signé). **Maintenance Entretien – Début 2026**: value is fetched server-side from Notion (sum of "Total HT Cette année" in the data source when `NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID` and `NOTION_API_KEY` are set), else from secret `MAINTENANCE_ENTRETIEN_START_2026`; this amount is **included in Réalisé** for MAINTENANCE and Maintenance Entretien (already signed portfolio).
 - **Optimization**: Lazy loading, caching, efficient multi-sheet reading
 - **PDF Removal**: Export feature removed for performance/simplicity
 
@@ -400,6 +402,8 @@ NOTION_DATABASE_ID=...
 NOTION_TRAVAUX_PROJECTION_DATABASE_ID=...
 NOTION_TRAVAUX_RECENT_PROJECTS_DATABASE_ID=...
 NOTION_MAINTENANCE_WON_DATABASE_ID=...
+MAINTENANCE_ENTRETIEN_START_2026=...   # Optional fallback: value for "Maintenance Entretien – Début 2026" (e.g. 1084000)
+NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID=...  # Optional: Notion data source ID to sum "Total HT Cette année" (e.g. 285d9278-02d7-808a-9395-000b04dfc654); overrides secret when set with NOTION_API_KEY
 ```
 
 ### 8.2 Business Constants
@@ -471,7 +475,17 @@ Core fields from Furious + Computed fields (final_bu, alert_owner) + Financial f
 `ViewResult` dataclass containing DataFrame, BU summary, Typologie summary, and TS total.
 
 ### 10.3 Alert Data Structure
-Alert and proposal payloads to Notion include `cf_typologie_de_devis` (from Furious). Structure: `title`, `amount`, `statut`, `date`, `assigned_to`, `reason` (weird), `probability`, `cf_typologie_de_devis`.
+```python
+{
+    'title': str,
+    'amount': float,
+    'statut': str,
+    'date': str,
+    'assigned_to': str,  # All assignees
+    'reason': str,       # Weird reason
+    'probability': float # Follow-up prob
+}
+```
 
 ---
 
@@ -728,6 +742,68 @@ See original documentation for details on performance, security, error handling,
 
 **Reloading historical sheets**: To refresh "Signé Janvier 2026" (or any month) with the new typologie logic, run `scripts/backfill_google_sheets_2025.py --year 2026 --months 1 --overwrite-existing` (requires `SPREADSHEET_SIGNE_2026` in `.env`).
 
+### 18.6 TRAVAUX Notion dates fix (February 2026)
+
+**Problem**: TRAVAUX prevision DB had missing dates (Début Chantier, Date Signature) even when data existed in Furious; rerunning the pipeline did not fill them. Logs showed 79 existing Notion pages but only 61 proposals upserted per run.
+
+**Root causes**:
+1. **Property name mismatch**: Sync wrote only to "Date" and "Début projet"; the actual TRAVAUX projection DB uses "Date Signature" and "Début Chantier". Schema-aware sync never sent those properties, so no date fields were written.
+2. **Partial update by design**: Only proposals in the current projection (BU=TRAVAUX, WAITING, probability ≥ 25%, date/projet_start in 365-day window) are synced; 18 Notion pages correspond to proposals outside that set and are never updated in a run.
+
+**Solution**:
+- **Sync** (`src/integrations/notion_travaux_sync.py`): In `_build_page_properties`, added mapping to "Début Chantier" (from `projet_start`) and "Date Signature" (from `proposal.signature_date`) when those properties exist in schema; kept "Date" and "Début projet" for backward compatibility. Added diagnostic log: count of existing pages not in current projection (no update this run).
+- **Projection** (`src/processing/travaux_projection.py`): In `generate()`, proposal dict now includes `signature_date` (formatted from row) so sync can populate "Date Signature".
+- **Debug script** (`scripts/debug_travaux_notion_sync.py`): Read-only script that fetches proposals, generates projection, queries Notion, prints overlap (in both / only in Notion / only in projection) and checks known project titles (e.g. Etude Axa Kennedy, Rue saint-florentin) for in-projection and in-Notion status.
+
+**Tests**: `test_notion_typologie_devis.py`: `test_notion_travaux_sync_build_page_properties_debut_chantier_date_signature`, `test_notion_travaux_sync_build_page_properties_both_old_and_new_date_names`. `test_travaux_projection_window.py`: `test_travaux_projection_generate_includes_signature_date`.
+
+**Impact**: Rerunning the TRAVAUX pipeline now fills "Début Chantier" and "Date Signature" in Notion for the ~61 proposals in the current projection (where Furious has values). The 18 pages whose proposals are outside the projection still do not get updated unless they re-enter the filter or a future "patch existing" flow is added. Deploy: push, pull on VPS, rerun `scripts/run_travaux_pipeline.py`; optionally run `scripts/debug_travaux_notion_sync.py` first to confirm overlap.
+
+### 18.7 MAINTENANCE Won Notion Sync (February 2026)
+
+**Feature**: Daily pipeline job that syncs all proposals **won in the current year** with BU = MAINTENANCE to a dedicated Notion database/datasource (`NOTION_MAINTENANCE_WON_DATABASE_ID`). Goal: load every such proposal from Furious, then POST if ID Devis does not exist in Notion, PATCH if it already exists (upsert by ID Devis); no archiving so the DB accumulates all years/months for grouping in Notion.
+
+**Data source**: Built from full processed DataFrame (`df_processed`) in `run_pipeline.py` Step 10: filter by `statut_clean` in `STATUS_WON`, (`date_effective_won` or `date`) in current year, and `final_bu == "MAINTENANCE"`. Convert to list of dicts via `to_dict("records")` and pass to sync. Not from `views.won_month` (which is current-month only and was yielding empty lists when no MAINTENANCE won in that month).
+
+**Implementation**:
+- **New module** `src/integrations/notion_maintenance_won_sync.py`: `NotionMaintenanceWonSync` with upsert by ID Devis, schema-aware property building (Name, ID Devis, Client, Montant, Statut, Probabilite, Date, Début projet, Fin projet, Lien Furious, Commercial/Chef de projet, optional Mois signé). Supports both `database_id` and `data_source_id` (API 2025-09-03); on update, Name is not sent to preserve manual renames.
+- **Config** `config/settings.py`: `notion_maintenance_won_database_id` from env `NOTION_MAINTENANCE_WON_DATABASE_ID`.
+- **Pipeline** `scripts/run_pipeline.py`: After Step 9 (Notion alerts), Step 10 builds current-year MAINTENANCE won list from `df_processed`, calls `NotionMaintenanceWonSync().sync_maintenance_won(maintenance_won_items)` when sync_notion and DB id are set; logs count and created/updated/errors.
+- **NaT fix**: In `notion_maintenance_won_sync.py`, `_format_date()` now returns `None` when value is pandas NaT (`pd.isna(value)` before calling `strftime`) to avoid `NaTType does not support strftime` when `signature_date` or `date_effective_won` are missing.
+
+**Tests**: `tests/test_maintenance_won_sync.py` (format_database_id, format_date including NaT, extract_id_devis, schema_allows, build_page_properties, empty DB id skips, upsert strategy). Resume and env/docs: NOTION_MAINTENANCE_WON_DATABASE_ID, Step 10, and 7.6/3.2/9.2 bullets updated to "current year" and POST/PATCH.
+
+**Impact**: Daily run syncs all MAINTENANCE won for the year to Notion without duplicates; deploy by setting `NOTION_MAINTENANCE_WON_DATABASE_ID` on VPS and ensuring the Notion DB/datasource is shared with the integration and has at least Name (title) and ID Devis for dedupe.
+
+### 18.8 Follow-up & TRAVAUX Projection: "Pris en charge" for Leftovers (February 2026)
+
+**Enhancement**: Follow-up and TRAVAUX projection Notion syncs now mark **leftover** pages (in Notion but no longer in the current run—e.g. won/lost or out of window) by ticking the **"Pris en charge"** checkbox so they are filtered out in Notion. Current-run pages get "Pris en charge" = false so they stay visible.
+
+**Logic**: Leftover = existing page IDs in DB minus current run proposal IDs. For each leftover, sync calls `_update_page(page_id, {"Pris en charge": {"checkbox": True}})` (schema-aware). Current-run create/update sets "Pris en charge" = false so items reappear if they come back.
+
+**Code**: `src/integrations/notion_alerts_sync.py` — `sync_followup_alerts`: stats `marked_taken_charge`; after upsert loop, leftover set from `existing_by_id.keys() - current_run_ids`; current-run properties set Pris en charge false via `_schema_allows`. `src/integrations/notion_travaux_sync.py` — `sync_proposals`: same pattern; `existing_not_in_projection` pages get Pris en charge true; current-run properties add checkbox false when `"Pris en charge" in schema`. `scripts/run_pipeline.py`: Step 9 success log includes `followup_marked_taken_charge`.
+
+**Requirement**: Both Follow-up and TRAVAUX projection Notion DBs must have a "Pris en charge" checkbox property; Notion views use a filter on it to hide ticked rows.
+
+**Tests**: `tests/test_notion_pris_en_charge_leftover.py` (5 tests) — current-run gets false, leftovers get true, skip when property not in schema (follow-up and TRAVAUX).
+
+### 18.9 Objectifs Signé: Production vs Signature (February 2026)
+
+**Enhancement**: The Signé view Objectifs tab now clearly separates **Objectif Production** (vs Réalisé) and **Objectif Signature** (vs Signature, ex-Pur).
+
+**Objectives data** (`src/processing/objectives.py`):
+- **Production (Réalisé)**: 2026 `signe` metric updated to new BU/typologie numbers (e.g. CONCEPTION 850k, TRAVAUX 4.1M, MAINTENANCE 1.3M; typologies Conception DV 50k, Paysage 700k, Concours 100k; Travaux DV 1.3M, Conception 800k, Direct 1.7M; Maintenance Entretien 1.25M, TS 300k, Animation 50k). 11-month accounting (August 0).
+- **Signature (Signé)**: New 2026 `signature` metric with BU totals (CONCEPTION 822 745€, TRAVAUX 4 920 663€, MAINTENANCE 459 800€) and typologie breakdown; CONCEPTION typologie prorated from 822 745. Helpers `objective_for_month/quarter/year` accept metric `"signature"`; validation allows optional `signature` per year.
+
+**Dashboard** (`src/dashboard/app.py`), Signé view only when year has `signature` (e.g. 2026):
+- Tables (Par BU, Par Typologie; Période, Trimestre, Année) show one wide table: **Objectif Production | Réalisé | Reste | % | Objectif Signature | Signature | Reste Sig | % Sig**. Column "Pur" renamed to "Signature". Styling applied to both Reste and Reste Sig, % and % Sig.
+- **Maintenance Entretien – Début 2026**: Value is fetched server-side from Notion when `NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID` and `NOTION_API_KEY` are set (sum of "Total HT Cette année" over all pages, cached 5 min), else from secret `MAINTENANCE_ENTRETIEN_START_2026`. The value is shown in an info box and **included in Réalisé** for MAINTENANCE and Maintenance Entretien in all Objectifs tables (Période, Trimestre, Année). See `src/integrations/notion_entretien_start.py`.
+- **Line charts**: "Objectif Signature" series added when `show_signature_objective`; legend "Pur" → "Signature" when in Signé two-block mode.
+
+**Config**: Streamlit secrets / env can set `MAINTENANCE_ENTRETIEN_START_2026` for the special box.
+
+**Tests**: `tests/test_objectives_2026.py` updated for new production (signe) values and signature metric (BU totals, CONCEPTION typologie prorate sum); `test_2026_has_signature_metric`; `test_2026_envoye_equals_signe` replaced by 2026 signe/signature structure check.
+
 ---
 
 ## 17. Conclusion
@@ -743,7 +819,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.31
+**Document Version**: 1.35
 **Last Updated**: February 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System

@@ -68,7 +68,7 @@ def test_format_database_id():
 
 
 def test_format_date():
-    """Test date formatting for Notion (pandas Timestamp, string, None)."""
+    """Test date formatting for Notion (pandas Timestamp, NaT, string, None)."""
     from src.integrations.notion_maintenance_won_sync import NotionMaintenanceWonSync
 
     sync = NotionMaintenanceWonSync(api_key="x", database_id="db-1")
@@ -79,6 +79,7 @@ def test_format_date():
     assert sync._format_date(None) is None
     assert sync._format_date("") is None
     assert sync._format_date("None") is None
+    assert sync._format_date(pd.NaT) is None
 
 
 def test_extract_id_devis_from_page():

@@ -56,7 +56,7 @@ class AlertsGenerator:
 
     Commercial Follow-up:
     - Status must be WAITING
-    - Date window: 1st of Previous Month → Today + 60 days
+    - Date window: 1st January (current year) → Today + 60 days (backward = current year only)
     - Different date reference for CONCEPTION vs TRAVAUX/MAINTENANCE
     """
 
@@ -77,11 +77,8 @@ class AlertsGenerator:
         """
         self.today = reference_date or datetime.now()
 
-        # Calculate date windows
-        first_of_month = self.today.replace(day=1)
-        prev_month_end = first_of_month - timedelta(days=1)
-
-        self.window_start = prev_month_end.replace(day=1)  # 1st of prev month
+        # Calculate date windows: backward = current year, forward = today + N days
+        self.window_start = self.today.replace(month=1, day=1)  # 1st of current year
         self.default_window_end = self.today + timedelta(days=followup_days_forward)
 
         # Store owner-specific forward windows if provided
@@ -154,6 +151,14 @@ class AlertsGenerator:
         - TRAVAUX/MAINTENANCE: Uses OR rule: 'date' <= window_end OR 'projet_start' <= window_end
 
         The forward window can be owner-specific if configured via followup_days_forward_by_owner.
+
+        When this returns False, the proposal is excluded from the follow-up "current run".
+        In Notion sync, such pages (if they already exist) become "leftovers" and get
+        "Pris en charge" = true. Exclusion reasons:
+        - Backward: proposal date ('date') not in current year (< 1st January).
+        - Forward CONCEPTION: 'date' > window_end.
+        - Forward TRAVAUX/MAINTENANCE: both 'date' and 'projet_start' > window_end.
+        Note: past projet_start (before today) does NOT exclude here (unlike TRAVAUX projection).
 
         Args:
             row: DataFrame row

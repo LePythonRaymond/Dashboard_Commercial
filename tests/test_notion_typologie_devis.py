@@ -171,3 +171,98 @@ def test_notion_travaux_sync_build_page_properties_typologie_not_set_when_not_in
     }
     props = sync._build_page_properties(proposal, schema=schema)
     assert "Typologie devis" not in props
+
+
+def test_notion_travaux_sync_build_page_properties_debut_chantier_date_signature():
+    """TRAVAUX sync sets Début Chantier and Date Signature when in schema (Notion DB names)."""
+    from src.integrations.notion_travaux_sync import NotionTravauxSync
+
+    sync = NotionTravauxSync(api_key="x", database_id="db-1")
+    schema = {
+        "Name": {"type": "title"},
+        "ID Devis": {"type": "rich_text"},
+        "Montant": {"type": "number"},
+        "Début Chantier": {"type": "date"},
+        "Date Signature": {"type": "date"},
+    }
+    proposal = {
+        "id": "proj-dates",
+        "title": "Chantier",
+        "company_name": "Client",
+        "amount": 50000,
+        "assigned_to": "user",
+        "date": "2026-01-10",
+        "projet_start": "2026-08-01",
+        "signature_date": "2026-02-15",
+        "probability": 40,
+        "furious_url": "https://example.com",
+        "cf_typologie_de_devis": "",
+    }
+    props = sync._build_page_properties(proposal, schema=schema)
+    assert "Début Chantier" in props
+    assert props["Début Chantier"]["date"]["start"] == "2026-08-01"
+    assert "Date Signature" in props
+    assert props["Date Signature"]["date"]["start"] == "2026-02-15"
+
+
+def test_notion_travaux_sync_build_page_properties_both_old_and_new_date_names():
+    """TRAVAUX sync sets both Date/Début projet and Date Signature/Début Chantier when all in schema."""
+    from src.integrations.notion_travaux_sync import NotionTravauxSync
+
+    sync = NotionTravauxSync(api_key="x", database_id="db-1")
+    schema = {
+        "Name": {"type": "title"},
+        "ID Devis": {"type": "rich_text"},
+        "Montant": {"type": "number"},
+        "Date": {"type": "date"},
+        "Début projet": {"type": "date"},
+        "Début Chantier": {"type": "date"},
+        "Date Signature": {"type": "date"},
+    }
+    proposal = {
+        "id": "proj-both",
+        "title": "Chantier",
+        "company_name": "Client",
+        "amount": 50000,
+        "assigned_to": "user",
+        "date": "2026-01-10",
+        "projet_start": "2026-08-01",
+        "signature_date": "2026-02-15",
+        "probability": 40,
+        "furious_url": "https://example.com",
+        "cf_typologie_de_devis": "",
+    }
+    props = sync._build_page_properties(proposal, schema=schema)
+    assert props.get("Date", {}).get("date", {}).get("start") == "2026-01-10"
+    assert props.get("Début projet", {}).get("date", {}).get("start") == "2026-08-01"
+    assert props.get("Début Chantier", {}).get("date", {}).get("start") == "2026-08-01"
+    assert props.get("Date Signature", {}).get("date", {}).get("start") == "2026-02-15"
+
+
+def test_notion_travaux_sync_date_signature_fallback_to_date():
+    """Date Signature uses proposal date when signature_date is missing (date is always there)."""
+    from src.integrations.notion_travaux_sync import NotionTravauxSync
+
+    sync = NotionTravauxSync(api_key="x", database_id="db-1")
+    schema = {
+        "Name": {"type": "title"},
+        "ID Devis": {"type": "rich_text"},
+        "Montant": {"type": "number"},
+        "Date Signature": {"type": "date"},
+    }
+    proposal = {
+        "id": "proj-fallback",
+        "title": "Chantier",
+        "company_name": "Client",
+        "amount": 50000,
+        "assigned_to": "user",
+        "date": "2026-03-01",
+        "projet_start": "2026-09-01",
+        "signature_date": None,
+        "probability": 40,
+        "furious_url": "https://example.com",
+        "cf_typologie_de_devis": "",
+    }
+    props = sync._build_page_properties(proposal, schema=schema)
+    assert "Date Signature" in props
+    assert props["Date Signature"]["date"]["start"] == "2026-03-01"

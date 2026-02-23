@@ -1,5 +1,5 @@
 """
-Unit tests for 2026 objectives: 11-month distribution and Envoyé = Signé.
+Unit tests for 2026 objectives: 11-month distribution, production (signe), and signature.
 """
 
 import sys
@@ -13,7 +13,7 @@ from src.processing.objectives import (
     OBJECTIVES,
     generate_11_month_distribution,
     objective_for_month,
-    objective_for_year
+    objective_for_year,
 )
 
 
@@ -41,26 +41,27 @@ def test_11_month_distribution():
 
 
 def test_2026_signe_typologie_values():
-    """Test that 2026 Signé typologie objectives match expected values."""
-    # Check CONCEPTION
-    assert objective_for_year(2026, "signe", "typologie", "Conception DV") == 50000, "Conception DV annual should be 50000"
-    assert objective_for_year(2026, "signe", "typologie", "Conception Concours") == 100000, "Conception Concours annual should be 100000"
-    assert objective_for_year(2026, "signe", "typologie", "Conception Paysage") == 650000, "Conception Paysage annual should be 650000"
+    """Test that 2026 Signé (production / Réalisé) typologie objectives match expected values."""
+    # CONCEPTION
+    assert objective_for_year(2026, "signe", "typologie", "Conception DV") == 50000
+    assert objective_for_year(2026, "signe", "typologie", "Conception Concours") == 100000
+    assert objective_for_year(2026, "signe", "typologie", "Conception Paysage") == 700000
 
-    # Check TRAVAUX
-    assert objective_for_year(2026, "signe", "typologie", "Travaux DV") == 1000000, "Travaux DV annual should be 1000000"
-    assert objective_for_year(2026, "signe", "typologie", "Travaux Conception") == 500000, "Travaux Conception annual should be 500000"
-    assert objective_for_year(2026, "signe", "typologie", "Travaux Direct") == 1500000, "Travaux Direct annual should be 1500000"
+    # TRAVAUX
+    assert objective_for_year(2026, "signe", "typologie", "Travaux DV") == 1300000
+    assert objective_for_year(2026, "signe", "typologie", "Travaux Conception") == 800000
+    assert objective_for_year(2026, "signe", "typologie", "Travaux Direct") == 1700000
 
-    # Check MAINTENANCE
-    assert objective_for_year(2026, "signe", "typologie", "Maintenance Entretien") == 495000, "Maintenance Entretien annual should be 495000"
-    assert objective_for_year(2026, "signe", "typologie", "Maintenance TS") == 137500, "Maintenance TS annual should be 137500"
-    assert objective_for_year(2026, "signe", "typologie", "Maintenance Animation") == 50000, "Maintenance Animation annual should be 50000"
+    # MAINTENANCE
+    assert objective_for_year(2026, "signe", "typologie", "Maintenance Entretien") == 1250000
+    assert objective_for_year(2026, "signe", "typologie", "Maintenance TS") == 300000
+    assert objective_for_year(2026, "signe", "typologie", "Maintenance Animation") == 50000
 
 
 def test_2026_august_zero_july_double():
     """Test that August is 0 and July is normal for all 2026 objectives."""
-    for metric in ["signe", "envoye"]:
+    metrics_to_check = ["signe", "signature"] if "signature" in OBJECTIVES[2026] else ["signe"]
+    for metric in metrics_to_check:
         for dimension in ["bu", "typologie"]:
             for key in OBJECTIVES[2026][metric][dimension].keys():
                 months = OBJECTIVES[2026][metric][dimension][key]
@@ -74,36 +75,46 @@ def test_2026_august_zero_july_double():
                 assert months[6] == normal_month, f"{metric}/{dimension}/{key}: July should be normal ({normal_month}), got {months[6]}"
 
 
-def test_2026_envoye_equals_signe():
-    """Test that Envoyé objectives equal Signé objectives for 2026."""
+def test_2026_has_signature_metric():
+    """Test that 2026 has both signe (production) and signature (objectif signature) metrics."""
+    assert 2026 in OBJECTIVES
+    assert "signe" in OBJECTIVES[2026]
+    assert "signature" in OBJECTIVES[2026]
     for dimension in ["bu", "typologie"]:
-        for key in OBJECTIVES[2026]['signe'][dimension].keys():
-            signe_months = OBJECTIVES[2026]['signe'][dimension][key]
-            envoye_months = OBJECTIVES[2026]['envoye'][dimension][key]
-
-            assert signe_months == envoye_months, \
-                f"Envoyé should equal Signé for {dimension}/{key}, but got different values"
+        assert set(OBJECTIVES[2026]["signature"][dimension].keys()) == set(
+            OBJECTIVES[2026]["signe"][dimension].keys()
+        ), f"2026 signature and signe should have same {dimension} keys"
 
 
 def test_2026_bu_totals():
-    """Test that BU totals match expected values (sum of typologies)."""
-    # CONCEPTION = Conception DV + Conception Concours + Conception Paysage = 50k + 100k + 650k = 800k
-    assert objective_for_year(2026, "signe", "bu", "CONCEPTION") == 800000, \
-        "CONCEPTION BU should be 800000"
+    """Test that 2026 production (signe) BU totals match expected values."""
+    assert objective_for_year(2026, "signe", "bu", "CONCEPTION") == 850000
+    assert objective_for_year(2026, "signe", "bu", "TRAVAUX") == 4100000
+    assert objective_for_year(2026, "signe", "bu", "MAINTENANCE") == 1300000
 
-    # TRAVAUX = Travaux DV + Travaux Conception + Travaux Direct = 1M + 500k + 1.5M = 3M
-    assert objective_for_year(2026, "signe", "bu", "TRAVAUX") == 3000000, \
-        "TRAVAUX BU should be 3000000"
 
-    # MAINTENANCE = Maintenance Entretien + Maintenance TS + Maintenance Animation = 495k + 137.5k + 50k = 682.5k
-    assert objective_for_year(2026, "signe", "bu", "MAINTENANCE") == 682500, \
-        "MAINTENANCE BU should be 682500"
+def test_2026_signature_bu_totals():
+    """Test that 2026 signature (Objectif Signature) BU totals match expected values."""
+    assert objective_for_year(2026, "signature", "bu", "CONCEPTION") == 822745
+    assert objective_for_year(2026, "signature", "bu", "TRAVAUX") == 4920663
+    assert objective_for_year(2026, "signature", "bu", "MAINTENANCE") == 459800
+
+
+def test_2026_signature_conception_typologie_prorate():
+    """Test that CONCEPTION signature typologie objectives prorate to BU total 822745."""
+    cv = objective_for_year(2026, "signature", "typologie", "Conception DV")
+    cp = objective_for_year(2026, "signature", "typologie", "Conception Paysage")
+    cc = objective_for_year(2026, "signature", "typologie", "Conception Concours")
+    total = round(cv + cp + cc, 2)
+    assert total == 822745, f"Conception DV+Paysage+Concours should sum to 822745, got {total}"
 
 
 if __name__ == "__main__":
     test_11_month_distribution()
     test_2026_signe_typologie_values()
     test_2026_august_zero_july_double()
-    test_2026_envoye_equals_signe()
+    test_2026_has_signature_metric()
     test_2026_bu_totals()
+    test_2026_signature_bu_totals()
+    test_2026_signature_conception_typologie_prorate()
     print("✓ All 2026 objectives tests passed!")
