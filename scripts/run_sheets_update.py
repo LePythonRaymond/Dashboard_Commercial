@@ -26,12 +26,17 @@ from datetime import datetime
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from config.settings import get_secret
 from src.api.auth import FuriousAuth, AuthenticationError
 from src.api.proposals import ProposalsClient, ProposalsAPIError
 from src.processing.cleaner import DataCleaner
 from src.processing.revenue_engine import RevenueEngine
 from src.processing.views import ViewGenerator
 from src.integrations.google_sheets import GoogleSheetsClient
+from src.integrations.entretien_start_store import (
+    fetch_and_write_entretien_start_2026,
+    get_store_path,
+)
 
 
 # Configure logging
@@ -144,6 +149,30 @@ class SheetsUpdateRunner:
                     "envoye_rows": len(views.sent_month.data),
                     "signe_rows": len(views.won_month.data),
                 })
+
+            # Step 7: Fetch Maintenance Entretien start 2026 from Notion and write to file (daily read)
+            logger.info("\n--- Step 7: Maintenance Entretien start 2026 (Notion) ---")
+            if self.dry_run:
+                self._log_step("entretien_start_2026", "skipped", {"reason": "dry_run"})
+            else:
+                api_key = get_secret("NOTION_API_KEY", "").strip()
+                ds_id = (
+                    get_secret("NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID", "").strip()
+                    or get_secret("NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATABASE_ID", "").strip()
+                )
+                if not api_key or not ds_id:
+                    self._log_step("entretien_start_2026", "skipped", {"reason": "NOTION_API_KEY or datasource/database ID not set"})
+                else:
+                    try:
+                        store_path = get_store_path(PROJECT_ROOT)
+                        value = fetch_and_write_entretien_start_2026(api_key, ds_id, store_path)
+                        if value is not None:
+                            self._log_step("entretien_start_2026", "success", {"value": value, "path": str(store_path)})
+                        else:
+                            self._log_step("entretien_start_2026", "skipped", {"reason": "Notion fetch returned None"})
+                    except Exception as e:
+                        logger.warning(f"Entretien start 2026 fetch/write failed: {e}")
+                        self._log_step("entretien_start_2026", "error", {"error": str(e)})
 
             self.results["status"] = "completed"
             self.results["completed_at"] = datetime.now().isoformat()
