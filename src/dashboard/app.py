@@ -2074,22 +2074,35 @@ def compute_projection_and_objective(
     metric_key: str,
     has_signature_objective: bool,
     entretien_start_2026: Optional[float] = None,
+    avg_months_list: Optional[List[int]] = None,
+    force_pur_for_maintenance: bool = False,
 ) -> Dict[str, Any]:
     """
-    Compute cumulative so far, average per month since start_month, projected year total,
-    objective, and monthly amount to produce for one entity (BU or typologie).
+    Compute cumulative so far, average per month (over avg_months_list or start_month..m_now),
+    projected year total, objective, and monthly amount to produce for one entity (BU or typologie).
     For MAINTENANCE / Maintenance Entretien in 2026 when entretien_start_2026 is set (and not use_pur),
     cumulative is only the prorated start-of-year (no pipeline).
+    When force_pur_for_maintenance is True and (dimension, key) is (bu, MAINTENANCE), use Pur for cumulative and average.
     """
     remaining_list, remaining_count = get_remaining_months_excl_aug(m_now)
-    avg_months = get_months_range(start_month, m_now)
+    if avg_months_list is not None:
+        avg_months = avg_months_list
+    else:
+        avg_months = get_months_range(start_month, m_now)
     n_avg = len(avg_months)
 
-    obj_metric = "signature" if (use_pur and has_signature_objective and year in OBJECTIVES and "signature" in OBJECTIVES[year]) else metric_key
+    # MAINTENANCE BU: use Pur for projection and Pur (signature) objective when force_pur_for_maintenance
+    effective_use_pur = use_pur or (force_pur_for_maintenance and dimension == "bu" and key == "MAINTENANCE")
+    use_signature_objective_for_this = (
+        (effective_use_pur and has_signature_objective and year in OBJECTIVES and "signature" in OBJECTIVES[year])
+        # MAINTENANCE BU: match Pur numbers with Pur (signature) objective
+        or (force_pur_for_maintenance and dimension == "bu" and key == "MAINTENANCE" and year in OBJECTIVES and "signature" in OBJECTIVES[year])
+    )
+    obj_metric = "signature" if use_signature_objective_for_this else metric_key
     objective = objective_for_year(year, obj_metric, dimension, key)
 
     use_entretien_only = (
-        not use_pur
+        not effective_use_pur
         and year == 2026
         and entretien_start_2026 is not None
         and (
@@ -2108,7 +2121,7 @@ def compute_projection_and_objective(
         cumulative_so_far = 0.0
         sum_for_avg = 0.0
         for month_num in range(1, m_now + 1):
-            if use_pur:
+            if effective_use_pur:
                 brut, pond = calculate_pure_signature_for_month(df, year, month_num, dimension, key, use_pondere)
                 val = pond if use_pondere else brut
             else:
@@ -2145,11 +2158,14 @@ def plot_objectives_projection_chart(
     title_prefix: str,
     color_map: Dict[str, str],
     entretien_start_2026: Optional[float] = None,
+    avg_months_list: Optional[List[int]] = None,
+    force_pur_for_maintenance_bu: bool = False,
 ) -> Tuple[go.Figure, List[Dict[str, Any]]]:
     """
     Build projection chart: cumulative + projection lines per entity + Global,
     horizontal dotted objective lines. Returns (figure, produce_per_month table rows).
     For MAINTENANCE / Maintenance Entretien in 2026 with entretien_start_2026, cumulative uses only start-of-year.
+    When force_pur_for_maintenance_bu is True, MAINTENANCE (bu) uses Pur for projection regardless of use_pur.
     """
     months = MONTH_NAMES
     fig = go.Figure()
@@ -2161,6 +2177,8 @@ def plot_objectives_projection_chart(
             df, year, start_month, m_now, dimension, item, use_pur, use_pondere,
             metric_key, has_signature_objective,
             entretien_start_2026=entretien_start_2026,
+            avg_months_list=avg_months_list,
+            force_pur_for_maintenance=force_pur_for_maintenance_bu,
         )
         cumulative_so_far = rec["cumulative_so_far"]
         average_per_month = rec["average_per_month"]
@@ -2169,8 +2187,10 @@ def plot_objectives_projection_chart(
         to_produce = rec["to_produce_per_month"]
 
         # Y values: Jan..M_now = cumulative at each month; M_now+1..Dec = projected cumulative
+        # MAINTENANCE BU uses Pur for this chart even when checkbox unchecked
+        use_pur_this = use_pur or (dimension == "bu" and item == "MAINTENANCE")
         use_entretien_only = (
-            not use_pur
+            not use_pur_this
             and year == 2026
             and entretien_start_2026 is not None
             and (
@@ -2185,7 +2205,7 @@ def plot_objectives_projection_chart(
                 if use_entretien_only:
                     val = (entretien_start_2026 / 11.0) if month_num != 8 else 0.0
                     cum += val
-                elif use_pur:
+                elif use_pur_this:
                     brut, pond = calculate_pure_signature_for_month(df, year, month_num, dimension, item, use_pondere)
                     cum += (pond if use_pondere else brut)
                 else:
@@ -2218,23 +2238,20 @@ def plot_objectives_projection_chart(
             "a_produire_par_mois": to_produce,
         })
 
-    # Global line
+    # Global line (use same avg months as entities: avg_months_list or start_month..m_now)
     global_cum = 0.0
     global_sum_avg = 0.0
-    avg_months = get_months_range(start_month, m_now)
+    avg_months = avg_months_list if avg_months_list is not None else get_months_range(start_month, m_now)
     n_avg = len(avg_months)
     for month_num in range(1, m_now + 1):
-        if use_pur:
-            total_brut = 0.0
-            total_pond = 0.0
-            for item in items:
+        # Per-item: MAINTENANCE BU uses Pur when force_pur_for_maintenance_bu
+        val = 0.0
+        for item in items:
+            use_pur_item = use_pur or (force_pur_for_maintenance_bu and dimension == "bu" and item == "MAINTENANCE")
+            if use_pur_item:
                 brut, pond = calculate_pure_signature_for_month(df, year, month_num, dimension, item, use_pondere)
-                total_brut += brut
-                total_pond += pond
-            val = total_pond if use_pondere else total_brut
-        else:
-            val = 0.0
-            for item in items:
+                val += (pond if use_pondere else brut)
+            else:
                 use_ent = (
                     year == 2026
                     and entretien_start_2026 is not None
@@ -2254,21 +2271,21 @@ def plot_objectives_projection_chart(
     remaining_list, remaining_count = get_remaining_months_excl_aug(m_now)
     global_avg = (global_sum_avg / n_avg) if n_avg > 0 else 0.0
     global_projected = global_cum + global_avg * remaining_count
-    global_objective = sum(objective_for_year(year, "signature" if (use_pur and has_signature_objective and year in OBJECTIVES and "signature" in OBJECTIVES[year]) else metric_key, dimension, item) for item in items)
+    global_obj_metric = "signature" if ((use_pur or force_pur_for_maintenance_bu) and has_signature_objective and year in OBJECTIVES and "signature" in OBJECTIVES[year]) else metric_key
+    global_objective = sum(objective_for_year(year, global_obj_metric, dimension, item) for item in items)
     global_to_produce = (global_objective - global_cum) / remaining_count if remaining_count > 0 else 0.0
 
     global_ys = []
     cum = 0.0
     for month_num in range(1, 13):
         if month_num <= m_now:
-            if use_pur:
-                total = 0.0
-                for item in items:
+            total = 0.0
+            for item in items:
+                use_pur_item = use_pur or (force_pur_for_maintenance_bu and dimension == "bu" and item == "MAINTENANCE")
+                if use_pur_item:
                     brut, pond = calculate_pure_signature_for_month(df, year, month_num, dimension, item, use_pondere)
                     total += (pond if use_pondere else brut)
-                cum += total
-            else:
-                for item in items:
+                else:
                     use_ent = (
                         year == 2026
                         and entretien_start_2026 is not None
@@ -2278,10 +2295,11 @@ def plot_objectives_projection_chart(
                         )
                     )
                     if use_ent:
-                        cum += (entretien_start_2026 / 11.0) if month_num != 8 else 0.0
+                        total += (entretien_start_2026 / 11.0) if month_num != 8 else 0.0
                     else:
                         v, _ = calculate_production_month_with_carryover(df, year, month_num, dimension, item, use_pondere)
-                        cum += v
+                        total += v
+            cum += total
             global_ys.append(cum)
         else:
             proj_months = [m for m in range(m_now + 1, month_num + 1) if m != 8]
@@ -2310,8 +2328,16 @@ def plot_objectives_projection_chart(
     })
 
     metric_label = "Signature (Pur)" if use_pur else "Réalisé (Production)"
+    if avg_months_list:
+        n = len(avg_months_list)
+        if n >= 2:
+            avg_label = f"moyenne sur les {n} mois clos ({MONTH_NAMES[avg_months_list[0] - 1]}–{MONTH_NAMES[avg_months_list[-1] - 1]})"
+        else:
+            avg_label = f"moyenne sur {MONTH_NAMES[avg_months_list[0] - 1]}"
+    else:
+        avg_label = f"moyenne depuis {MONTH_NAMES[start_month - 1]}"
     fig.update_layout(
-        title=f"{title_prefix} – Projection année (moyenne depuis {MONTH_NAMES[start_month - 1]}) – {metric_label}",
+        title=f"{title_prefix} – Projection année ({avg_label}) – {metric_label}",
         xaxis_title="Mois",
         yaxis_title="Cumul (€)",
         hovermode='x unified',
@@ -2334,7 +2360,7 @@ def plot_objectives_pur_by_month_chart(
 ) -> go.Figure:
     """
     Historical Pur (signature) amount per month, Jan through m_now only.
-    One line per entity + horizontal dotted objective.
+    One line per entity + dotted line of monthly objectives (11-month accounting, August = 0).
     """
     month_labels = MONTH_NAMES[:m_now]
     fig = go.Figure()
@@ -2346,7 +2372,8 @@ def plot_objectives_pur_by_month_chart(
         for month_num in range(1, m_now + 1):
             brut, _ = calculate_pure_signature_for_month(df, year, month_num, dimension, item, False)
             ys.append(brut)
-        objective = objective_for_year(year, obj_metric, dimension, item)
+        # Objectives by month (11-month accounting: August = 0)
+        objective_ys = [objective_for_month(year, obj_metric, dimension, item, month_num) for month_num in range(1, m_now + 1)]
         fig.add_trace(go.Scatter(
             x=month_labels,
             y=ys,
@@ -2357,10 +2384,11 @@ def plot_objectives_pur_by_month_chart(
         ))
         fig.add_trace(go.Scatter(
             x=month_labels,
-            y=[objective] * m_now,
-            mode='lines',
+            y=objective_ys,
+            mode='lines+markers',
             name=f"Objectif {item}",
             line=dict(color=color, width=1.5, dash='dot'),
+            marker=dict(size=4, symbol='diamond'),
         ))
     fig.update_layout(
         title=f"{title_prefix} – Signature (Pur) par mois – année en cours",
@@ -5746,33 +5774,24 @@ def main():
                     current_calendar_month = datetime.now().month
                     m_now = max(year_months) if year_months else min(current_calendar_month, 12)
                     m_now = max(1, m_now)  # ensure at least January for selectors
-                    # Start month options: Jan through m_now
-                    start_month_options = list(range(1, m_now + 1))
-                    start_month_labels = [MONTH_NAMES[i - 1] for i in start_month_options]
+                    # Average = all ended months in the year before current date (e.g. on March 8: Jan and Feb; on May 15: Jan, Feb, Mar, Apr)
+                    avg_months_list = list(range(1, m_now)) if m_now >= 2 else []
+                    start_month = avg_months_list[0] if avg_months_list else 1
 
-                    col_proj1, col_proj2 = st.columns(2)
-                    with col_proj1:
-                        start_month_idx = st.selectbox(
-                            "Afficher les courbes à partir de",
-                            range(len(start_month_options)),
-                            format_func=lambda i: start_month_labels[i],
-                            key=f"proj_start_month_{metric_key}",
-                        )
-                        start_month = start_month_options[start_month_idx]
-                    with col_proj2:
-                        # Checkbox: when checked = use Pur (signature) for projection; when unchecked = Réalisé
-                        show_pure_lines = st.checkbox(
-                            "Afficher les courbes de signature (projection basée sur Pur)",
-                            value=False,
-                            key=f"show_pure_projection_{metric_key}",
-                        )
+                    # Checkbox: when checked = use Pur (signature) for projection; when unchecked = Réalisé (MAINTENANCE BU always uses Pur in BU chart)
+                    show_pure_lines = st.checkbox(
+                        "Afficher les courbes de signature (projection basée sur Pur)",
+                        value=False,
+                        key=f"show_pure_projection_{metric_key}",
+                    )
 
-                    # Chart 1: Projection Par BU
+                    # Chart 1: Projection Par BU (AUTRE excluded; MAINTENANCE uses Pur regardless of checkbox)
                     st.markdown("#### Par Business Unit – Projection")
+                    bu_items_no_autre = [b for b in BU_ORDER if b != "AUTRE"]
                     fig_bu, produce_bu = plot_objectives_projection_chart(
                         selected_year,
                         "bu",
-                        BU_ORDER,
+                        bu_items_no_autre,
                         metric_df,
                         m_now,
                         start_month,
@@ -5783,20 +5802,24 @@ def main():
                         title_prefix="Par BU",
                         color_map=BU_COLORS,
                         entretien_start_2026=entretien_start_2026 if (is_signed and selected_year == 2026) else None,
+                        avg_months_list=avg_months_list,
+                        force_pur_for_maintenance_bu=True,
                     )
                     st.plotly_chart(fig_bu, use_container_width=True, key=f"obj_proj_bu_{metric_key}")
                     st.markdown("**À produire par mois (jusqu'à fin d'année, hors août)**")
-                    produce_bu_df = pd.DataFrame([
+                    bu_headers = ["BU / Global", "Objectif annuel (€)", "Déjà réalisé (€)", "Reste (€)", "À produire/mois (€)"]
+                    bu_table_rows = [
                         {
-                            "BU / Global": r["label"],
-                            "Objectif annuel (€)": f"{r['objectif_annuel']:,.0f}",
-                            "Déjà réalisé (€)": f"{r['deja_realise']:,.0f}",
-                            "Reste (€)": f"{r['reste']:,.0f}",
-                            "À produire/mois (€)": f"{r['a_produire_par_mois']:,.0f}",
+                            bu_headers[0]: r["label"],
+                            bu_headers[1]: f"{r['objectif_annuel']:,.0f}",
+                            bu_headers[2]: f"{r['deja_realise']:,.0f}",
+                            bu_headers[3]: f"{r['reste']:,.0f}",
+                            bu_headers[4]: f"{r['a_produire_par_mois']:,.0f}",
                         }
                         for r in produce_bu
-                    ])
-                    st.dataframe(produce_bu_df, use_container_width=True, hide_index=True)
+                    ]
+                    bu_row_colors = {r["label"]: BU_COLORS.get(r["label"], "#1a1a1a") for r in produce_bu}
+                    st.markdown(create_colored_table_html(bu_headers, bu_table_rows, row_colors=bu_row_colors), unsafe_allow_html=True)
 
                     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -5816,20 +5839,26 @@ def main():
                         title_prefix="Par Typologie",
                         color_map={**TYPOLOGIE_COLORS, **{t: TYPOLOGIE_DEFAULT_COLOR for t in EXPECTED_TYPOLOGIES if t not in TYPOLOGIE_COLORS}},
                         entretien_start_2026=entretien_start_2026 if (is_signed and selected_year == 2026) else None,
+                        avg_months_list=avg_months_list,
                     )
                     st.plotly_chart(fig_typo, use_container_width=True, key=f"obj_proj_typo_{metric_key}")
                     st.markdown("**À produire par mois (jusqu'à fin d'année, hors août)**")
-                    produce_typo_df = pd.DataFrame([
+                    typo_headers = ["Typologie / Global", "Objectif annuel (€)", "Déjà réalisé (€)", "Reste (€)", "À produire/mois (€)"]
+                    typo_table_rows = [
                         {
-                            "Typologie / Global": r["label"],
-                            "Objectif annuel (€)": f"{r['objectif_annuel']:,.0f}",
-                            "Déjà réalisé (€)": f"{r['deja_realise']:,.0f}",
-                            "Reste (€)": f"{r['reste']:,.0f}",
-                            "À produire/mois (€)": f"{r['a_produire_par_mois']:,.0f}",
+                            typo_headers[0]: r["label"],
+                            typo_headers[1]: f"{r['objectif_annuel']:,.0f}",
+                            typo_headers[2]: f"{r['deja_realise']:,.0f}",
+                            typo_headers[3]: f"{r['reste']:,.0f}",
+                            typo_headers[4]: f"{r['a_produire_par_mois']:,.0f}",
                         }
                         for r in produce_typo
-                    ])
-                    st.dataframe(produce_typo_df, use_container_width=True, hide_index=True)
+                    ]
+                    typo_row_colors = {
+                        r["label"]: TYPOLOGIE_COLORS.get(r["label"], TYPOLOGIE_DEFAULT_COLOR) if r["label"] != "Global" else "#1a1a1a"
+                        for r in produce_typo
+                    }
+                    st.markdown(create_colored_table_html(typo_headers, typo_table_rows, row_colors=typo_row_colors), unsafe_allow_html=True)
 
                     # Chart 3: Historical Pur by month (Jan–current month) – Par BU and Par Typologie
                     st.markdown("---")
