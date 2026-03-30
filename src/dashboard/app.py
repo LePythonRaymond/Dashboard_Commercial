@@ -3125,51 +3125,26 @@ def render_single_production_view(
         display_quarterly_breakdown(df, production_year, show_pondere=show_pondere)
 
 
-def render_production_tabs(
-    df: pd.DataFrame,
-    selected_year: int,
-    show_pondere: bool = False,
-    key_prefix: str = "global"
-) -> None:
-    """
-    Render the "À produire" tabs with KPIs, BU/Typologie breakdowns, and charts.
+PRODUCTION_SCOPE_ALL = "Toute année"
 
-    Creates tabs for production years: selected_year, selected_year+1, selected_year+2
 
-    Args:
-        df: DataFrame with production year columns
-        selected_year: Base year selected in sidebar
-        show_pondere: Whether to show weighted amounts
-        key_prefix: Unique prefix for Streamlit widget keys
-    """
-    # Prefer the years that actually exist in this dataset (prevents hiding e.g. 2028 columns).
-    # Cap at +3 years from selected_year (Rule 4: track up to +3 years).
-    # Fall back to the legacy UI (selected_year..+2) if we can't detect anything.
+def compute_production_years(df: pd.DataFrame, selected_year: int) -> List[int]:
+    """Production years to offer in the dashboard (+3 window), matching former render_production_tabs logic."""
     detected_years = detect_production_years(df)
-    max_year = selected_year + 3  # Rule 4: track up to +3 years
-
+    max_year = selected_year + 3
     if detected_years:
-        # Filter to only show years within the +3 window
         years_with_data: List[int] = []
         for y in detected_years:
-            if y <= max_year:  # Cap at +3 years
+            if y <= max_year:
                 col = f"Montant Total {y}"
                 if col in df.columns and float(pd.to_numeric(df[col], errors="coerce").fillna(0).sum()) > 0:
                     years_with_data.append(y)
-        production_years = years_with_data or [y for y in detected_years if y <= max_year]
-    else:
-        # Default: show selected_year through selected_year + 3
-        production_years = [selected_year, selected_year + 1, selected_year + 2, selected_year + 3]
+        return years_with_data or [y for y in detected_years if y <= max_year]
+    return [selected_year, selected_year + 1, selected_year + 2, selected_year + 3]
 
-    legacy_years = [selected_year, selected_year + 1, selected_year + 2]
-    if detected_years and set(detected_years) != set(legacy_years):
-        filtered_detected = [y for y in detected_years if y <= max_year]
-        #st#.caption(
-         #   "ℹ️ Années détectées dans les colonnes de production (jusqu'à +3 ans): "
-          #  + ", ".join(str(y) for y in filtered_detected)
-        #)
 
-    # Reconciliation warning: explains why CA Total may not equal the sum of production years.
+def render_unallocated_production_warning(df: pd.DataFrame) -> None:
+    """Reconciliation warning when CA total does not match sum of production-year columns."""
     alloc = calculate_production_allocation_summary(df)
     if alloc["unallocated_total"] > 1.0:
         st.warning(
@@ -3187,7 +3162,6 @@ def render_production_tabs(
                 f"- **Lignes concernées**: {meta.get('unallocated_rows', 0)}"
             )
 
-            # Show flagged rows (dates_rule_applied)
             if 'dates_rule_applied' in df.columns:
                 flagged_count = int(df['dates_rule_applied'].sum()) if df['dates_rule_applied'].dtype == bool else 0
                 if flagged_count > 0:
@@ -3211,7 +3185,6 @@ def render_production_tabs(
                         if c in flagged_df.columns
                     ]
                     if flagged_cols:
-                        # Show top 50 flagged rows
                         top_flagged = flagged_df.sort_values("amount", ascending=False).head(50)
                         if not top_flagged.empty:
                             st.markdown("**Top 50 devis avec règles de dates appliquées (par montant):**")
@@ -3241,18 +3214,22 @@ def render_production_tabs(
                     st.dataframe(top[cols], use_container_width=True, hide_index=True)
                 else:
                     st.info("Aucune ligne non répartie détectée.")
-    tab_names = [f"À produire {y}" for y in production_years]
 
-    prod_tabs = st.tabs(tab_names)
 
-    for i, prod_year in enumerate(production_years):
-        with prod_tabs[i]:
-            render_single_production_view(
-                df=df,
-                production_year=prod_year,
-                show_pondere=show_pondere,
-                key_prefix=f"{key_prefix}_{i}"
-            )
+def production_scope_label(production_year: int) -> str:
+    return f"À produire {production_year}"
+
+
+def parse_production_scope_choice(choice: str) -> Optional[int]:
+    """Return production year if choice is 'À produire YYYY', else None for 'Toute année'."""
+    if choice == PRODUCTION_SCOPE_ALL:
+        return None
+    if choice.startswith("À produire "):
+        try:
+            return int(choice.replace("À produire ", "").strip())
+        except ValueError:
+            return None
+    return None
 
 
 # =============================================================================
@@ -4572,7 +4549,7 @@ def _get_entretien_start_2026_value() -> Optional[float]:
 
 
 # =============================================================================
-# HELPER FUNCTIONS FOR DONNÉES DÉTAILLÉES TAB
+# HELPERS: parse month/year from source_sheet (Objectifs + autres vues)
 # =============================================================================
 
 def parse_sheet_month_year(sheet_name: str) -> Tuple[Optional[int], Optional[int]]:
@@ -4643,30 +4620,6 @@ def get_available_months_from_sheets(df: pd.DataFrame) -> List[Tuple[int, int]]:
     return sorted(months_years, key=lambda x: (x[1], x[0]))
 
 
-def get_available_quarters_from_sheets(df: pd.DataFrame) -> List[Tuple[int, int]]:
-    """
-    Extract available (quarter, year) tuples from source_sheet column.
-
-    Args:
-        df: DataFrame with source_sheet column
-
-    Returns:
-        List of (quarter, year) tuples, sorted by year then quarter
-    """
-    if df.empty or 'source_sheet' not in df.columns:
-        return []
-
-    quarters_years = set()
-    for sheet in df['source_sheet'].unique():
-        month, year = parse_sheet_month_year(str(sheet))
-        if month is not None and year is not None:
-            quarter = get_quarter_for_month(month)
-            quarters_years.add((quarter, year))
-
-    # Sort by year then quarter
-    return sorted(quarters_years, key=lambda x: (x[1], x[0]))
-
-
 def main():
     """Main dashboard application."""
     # #region agent log - Track script reruns
@@ -4701,7 +4654,7 @@ def main():
         # View type
         view_type = st.radio(
             "Type de vue",
-            ["Signé (Won)", "Envoyé (Sent)", "État actuel (Snapshot)"],
+            ["Signé (Won)", "Envoyé (Sent)"],
             index=0
         )
         # #region agent log
@@ -4724,7 +4677,7 @@ def main():
     # Determine view configuration
     is_signed = "Signé" in view_type
     is_sent = "Envoyé" in view_type
-    show_pondere = is_sent or "État" in view_type  # Show pondéré for non-signed views
+    show_pondere = is_sent
 
     # #region agent log - Track main data loading
     data_load_start = time.time()
@@ -4736,38 +4689,9 @@ def main():
     if is_signed:
         sheet_type = "Signé"
         df = load_year_data(selected_year, sheet_type)
-    elif is_sent:
+    else:
         sheet_type = "Envoyé"
         df = load_year_data(selected_year, sheet_type)
-    else:
-        # Load latest snapshot
-        current_year = datetime.now().year
-        client = get_sheets_client()
-        snapshot_sheets = client.list_worksheets(view_type="etat", year=current_year)
-
-        # Prefer the stable daily snapshot sheet (overwritten daily)
-        if "État actuel" in snapshot_sheets:
-            df = load_worksheet_data("État actuel", view_type="etat", year=current_year)
-        else:
-            # Fallback to the most recent "État au DD-MM-YYYY" snapshot.
-            # Important: do NOT rely on lexicographic sort (DD-MM-YYYY doesn't sort correctly).
-            etat_au_sheets = [s for s in snapshot_sheets if "État au" in s]
-            best_name = None
-            best_dt = None
-            for name in etat_au_sheets:
-                try:
-                    # Expected format: "État au DD-MM-YYYY"
-                    dt = datetime.strptime(name.replace("État au ", "").strip(), "%d-%m-%Y")
-                except Exception:
-                    continue
-                if best_dt is None or dt > best_dt:
-                    best_dt = dt
-                    best_name = name
-
-            if best_name:
-                df = load_worksheet_data(best_name, view_type="etat", year=current_year)
-            else:
-                df = pd.DataFrame()
 
     # #region agent log
     debug_log("main:DATA_LOAD:DONE", f"Loaded {len(df)} rows in {time.time()-data_load_start:.2f}s",
@@ -4817,8 +4741,13 @@ def main():
 
     # Navigation with persistence (fixes tab reset bug)
     # Use both session_state and query_params for stability
-    tab_options = ["📈 Vue Globale", "📅 Vue Mensuelle", "🎯 Objectifs", "📋 Données Détaillées"]
-    tab_keys = ["globale", "mensuelle", "objectifs", "donnees"]
+    tab_options = ["📈 Vue Globale", "📅 Vue Mensuelle", "🎯 Objectifs"]
+    tab_keys = ["globale", "mensuelle", "objectifs"]
+
+    # Legacy tab "donnees" removed: normalize invalid stored navigation only
+    _prev_nav = st.session_state.get("main_nav")
+    if _prev_nav is not None and _prev_nav not in tab_keys:
+        st.session_state["main_nav"] = tab_keys[0]
 
     # Get initial tab from query_params or session_state, default to first
     if "tab" in st.query_params:
@@ -4828,7 +4757,6 @@ def main():
         else:
             default_idx = 0
     elif "main_nav" in st.session_state:
-        # Fallback to session_state if query_params not set
         if st.session_state["main_nav"] in tab_keys:
             default_idx = tab_keys.index(st.session_state["main_nav"])
         else:
@@ -4851,126 +4779,114 @@ def main():
     if selected_tab_key != st.query_params.get("tab", ""):
         st.query_params["tab"] = selected_tab_key
 
-    # Map to display name for rendering
-    selected_tab_display = tab_options[tab_keys.index(selected_tab_key)]
-
     # =========================================================================
     # TAB 1: VUE GLOBALE
     # =========================================================================
     if selected_tab_key == "globale":
         st.markdown(f"### Vue Globale {selected_year}")
 
-        # === MAIN KPIs ===
-        st.markdown('<div class="section-header">📊 Indicateurs Clés</div>', unsafe_allow_html=True)
-
-        if show_pondere:
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                create_kpi_card("CA Total", f"{total_amount:,.0f}€", "💰", "default")
-            with col2:
-                create_kpi_card("CA Pondéré", f"{total_pondere:,.0f}€", "⚖️", "default")
-            with col3:
-                create_kpi_card("Nombre de Projets", f"{total_count}", "📁", "default")
-                # Add popover for all projects
-                if not df.empty:
-                    render_projects_popover(
-                        "🔎 Voir projets",
-                        df,
-                        show_pondere=show_pondere,
-                        header_text=f"Tous les projets · {selected_year}"
-                    )
-            with col4:
-                create_kpi_card("Moyenne mensuelle", f"{monthly_avg:,.0f}€", "📅", "default")
-        else:
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                create_kpi_card("CA Total", f"{total_amount:,.0f}€", "💰", "default")
-            with col2:
-                create_kpi_card("Nombre de Projets", f"{total_count}", "📁", "default")
-                # Add popover for all projects
-                if not df.empty:
-                    render_projects_popover(
-                        "🔎 Voir projets",
-                        df,
-                        show_pondere=show_pondere,
-                        header_text=f"Tous les projets · {selected_year}"
-                    )
-            with col3:
-                create_kpi_card("Moyenne mensuelle", f"{monthly_avg:,.0f}€", "📅", "default")
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        # === BU TOTALS ===
-        st.markdown('<div class="section-header">💼 Montants par Business Unit</div>', unsafe_allow_html=True)
-        create_bu_kpi_row(df, bu_amounts, show_pondere=show_pondere, key_prefix="vue_globale")
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        # === TYPOLOGIE TOTALS (BU-Grouped) ===
-        st.markdown('<div class="section-header">🏷️ Montants par Typologie (groupés par BU)</div>', unsafe_allow_html=True)
-        create_bu_grouped_typologie_blocks(df, show_pondere=show_pondere)
-
-        # Monthly average per BU
-        st.markdown("<br>", unsafe_allow_html=True)
-        if num_months > 1:
-            st.markdown(f"**Moyenne mensuelle:** {monthly_avg:,.0f}€ (sur {num_months} mois)")
-
-        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-
-        # === SECTION: BY BU ===
-        st.markdown('<div class="section-header">📊 Analyse par Business Unit</div>', unsafe_allow_html=True)
-
-        # Vertical layout for charts
-        fig_bu_donut = plot_bu_donut(df, "Répartition par BU")
-        st.plotly_chart(fig_bu_donut, use_container_width=True, key="vue_globale_bu_donut", config={})
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        if 'source_sheet' in df.columns:
-            fig_monthly_bu = plot_monthly_stacked_bar_bu(df, selected_year, "Évolution mensuelle par BU")
-            st.plotly_chart(fig_monthly_bu, use_container_width=True, key="vue_globale_monthly_bu", config={})
-        else:
-            fig_bu_bar = plot_bu_bar(df, "Montant par BU")
-            st.plotly_chart(fig_bu_bar, use_container_width=True, key="vue_globale_bu_bar", config={})
-
-        # Sent/Pondéré chart for non-signed views
-        if show_pondere and 'source_sheet' in df.columns:
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown("#### Total vs Pondéré par mois")
-            fig_pondere = plot_sent_pondere_bar(df, selected_year)
-            st.plotly_chart(fig_pondere, use_container_width=True, key="vue_globale_pondere", config={})
-
-        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-
-        # === SECTION: BY TYPOLOGIE ===
-        st.markdown('<div class="section-header">🏷️ Analyse par Typologie</div>', unsafe_allow_html=True)
-
-        # Vertical layout for charts
-        fig_type_donut = plot_typologie_donut(df, "Répartition par Typologie")
-        st.plotly_chart(fig_type_donut, use_container_width=True, key="vue_globale_type_donut", config={})
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        # Use stacked bar chart like BU section - shows top 6 typologies monthly evolution
-        if 'source_sheet' in df.columns:
-            fig_type_stacked = plot_monthly_stacked_bar_typologie(df, selected_year, "Évolution mensuelle par Typologie", top_n=6)
-            st.plotly_chart(fig_type_stacked, use_container_width=True, key="vue_globale_monthly_type", config={})
-        else:
-            fig_type_bar = plot_typologie_bar(df, "Détail par Typologie")
-            st.plotly_chart(fig_type_bar, use_container_width=True, key="vue_globale_type_bar", config={})
-
-        # === SECTION: À PRODUIRE TABS ===
-        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-header">🏭 Répartition par Année de Production</div>', unsafe_allow_html=True)
-        #st.markdown("*Montants à produire par année basés sur les règles de revenue spreading*")
-
-        # Render production tabs for Vue Globale
-        # For Signé view: show total amounts only
-        # For Envoyé/État views: show both Total and Pondéré
-        render_production_tabs(
-            df=df,
-            selected_year=selected_year,
-            show_pondere=show_pondere,
-            key_prefix="vue_globale"
+        _prod_years_g = compute_production_years(df, selected_year)
+        _scope_opts_g = [PRODUCTION_SCOPE_ALL] + [production_scope_label(y) for y in _prod_years_g]
+        prod_scope_globale = st.radio(
+            "Année de production",
+            options=_scope_opts_g,
+            horizontal=True,
+            key="prod_scope_globale",
         )
+        prod_year_g = parse_production_scope_choice(prod_scope_globale)
+
+        if prod_year_g is not None:
+            render_unallocated_production_warning(df)
+            render_single_production_view(
+                df=df,
+                production_year=prod_year_g,
+                show_pondere=show_pondere,
+                key_prefix="vue_globale_prod",
+            )
+        else:
+            # === MAIN KPIs ===
+            st.markdown('<div class="section-header">📊 Indicateurs Clés</div>', unsafe_allow_html=True)
+
+            if show_pondere:
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    create_kpi_card("CA Total", f"{total_amount:,.0f}€", "💰", "default")
+                with col2:
+                    create_kpi_card("CA Pondéré", f"{total_pondere:,.0f}€", "⚖️", "default")
+                with col3:
+                    create_kpi_card("Nombre de Projets", f"{total_count}", "📁", "default")
+                    if not df.empty:
+                        render_projects_popover(
+                            "🔎 Voir projets",
+                            df,
+                            show_pondere=show_pondere,
+                            header_text=f"Tous les projets · {selected_year}"
+                        )
+                with col4:
+                    create_kpi_card("Moyenne mensuelle", f"{monthly_avg:,.0f}€", "📅", "default")
+            else:
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    create_kpi_card("CA Total", f"{total_amount:,.0f}€", "💰", "default")
+                with col2:
+                    create_kpi_card("Nombre de Projets", f"{total_count}", "📁", "default")
+                    if not df.empty:
+                        render_projects_popover(
+                            "🔎 Voir projets",
+                            df,
+                            show_pondere=show_pondere,
+                            header_text=f"Tous les projets · {selected_year}"
+                        )
+                with col3:
+                    create_kpi_card("Moyenne mensuelle", f"{monthly_avg:,.0f}€", "📅", "default")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            st.markdown('<div class="section-header">💼 Montants par Business Unit</div>', unsafe_allow_html=True)
+            create_bu_kpi_row(df, bu_amounts, show_pondere=show_pondere, key_prefix="vue_globale")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            with st.expander("🏷️ Analyse par typologie", expanded=False):
+                st.markdown('<div class="section-header">🏷️ Montants par Typologie (groupés par BU)</div>', unsafe_allow_html=True)
+                create_bu_grouped_typologie_blocks(df, show_pondere=show_pondere)
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown('<div class="section-header">🏷️ Analyse par Typologie</div>', unsafe_allow_html=True)
+                fig_type_donut = plot_typologie_donut(df, "Répartition par Typologie")
+                st.plotly_chart(fig_type_donut, use_container_width=True, key="vue_globale_type_donut", config={})
+                st.markdown("<br>", unsafe_allow_html=True)
+                if 'source_sheet' in df.columns:
+                    fig_type_stacked = plot_monthly_stacked_bar_typologie(
+                        df, selected_year, "Évolution mensuelle par Typologie", top_n=6
+                    )
+                    st.plotly_chart(fig_type_stacked, use_container_width=True, key="vue_globale_monthly_type", config={})
+                else:
+                    fig_type_bar = plot_typologie_bar(df, "Détail par Typologie")
+                    st.plotly_chart(fig_type_bar, use_container_width=True, key="vue_globale_type_bar", config={})
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            if num_months > 1:
+                st.markdown(f"**Moyenne mensuelle:** {monthly_avg:,.0f}€ (sur {num_months} mois)")
+
+            st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+
+            st.markdown('<div class="section-header">📊 Analyse par Business Unit</div>', unsafe_allow_html=True)
+            fig_bu_donut = plot_bu_donut(df, "Répartition par BU")
+            st.plotly_chart(fig_bu_donut, use_container_width=True, key="vue_globale_bu_donut", config={})
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            if 'source_sheet' in df.columns:
+                fig_monthly_bu = plot_monthly_stacked_bar_bu(df, selected_year, "Évolution mensuelle par BU")
+                st.plotly_chart(fig_monthly_bu, use_container_width=True, key="vue_globale_monthly_bu", config={})
+            else:
+                fig_bu_bar = plot_bu_bar(df, "Montant par BU")
+                st.plotly_chart(fig_bu_bar, use_container_width=True, key="vue_globale_bu_bar", config={})
+
+            if show_pondere and 'source_sheet' in df.columns:
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown("#### Total vs Pondéré par mois")
+                fig_pondere = plot_sent_pondere_bar(df, selected_year)
+                st.plotly_chart(fig_pondere, use_container_width=True, key="vue_globale_pondere", config={})
 
 
     # =========================================================================
@@ -5008,118 +4924,110 @@ def main():
                           {"rows_after": len(month_df), "duration_ms": round((time.time()-filter_start)*1000, 1)}, "C")
                 # #endregion
 
-                # === HEADER KPIs ===
-                st.markdown('<div class="section-header">📊 Résumé du Mois</div>', unsafe_allow_html=True)
-
-                month_total = month_df['amount'].sum()
-                month_pondere = month_df['amount_pondere'].sum() if 'amount_pondere' in month_df.columns else month_total
-                month_count = len(month_df)
-
-                # Calculate average CA per BU for this specific month
-                # Include AUTRE in MAINTENANCE to avoid skewed average
-                month_bu_amounts = get_bu_amounts(month_df, include_weighted=False)
-
-                # Combine AUTRE into MAINTENANCE for average calculation
-                maintenance_total = month_bu_amounts.get('MAINTENANCE', {}).get('total', 0.0)
-                autre_total = month_bu_amounts.get('AUTRE', {}).get('total', 0.0)
-                maintenance_combined = maintenance_total + autre_total
-
-                # Calculate average across main BUs (CONCEPTION, TRAVAUX, MAINTENANCE+AUTRE)
-                conception_total = month_bu_amounts.get('CONCEPTION', {}).get('total', 0.0)
-                travaux_total = month_bu_amounts.get('TRAVAUX', {}).get('total', 0.0)
-
-                # Count non-zero BUs for average
-                bu_totals = [conception_total, travaux_total, maintenance_combined]
-                non_zero_bus = [t for t in bu_totals if t > 0]
-                month_avg_per_bu = sum(non_zero_bus) / len(non_zero_bus) if non_zero_bus else 0.0
-
-                if show_pondere:
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        create_kpi_card("CA du mois", f"{month_total:,.0f}€", "💰", "default")
-                    with col2:
-                        create_kpi_card("CA Pondéré", f"{month_pondere:,.0f}€", "⚖️", "default")
-                    with col3:
-                        create_kpi_card("Projets", f"{month_count}", "📁", "default")
-                        # Add popover for month projects
-                        if not month_df.empty:
-                            render_projects_popover(
-                                "🔎 Voir projets",
-                                month_df,
-                                show_pondere=show_pondere,
-                                header_text=f"Projets · {selected_month}"
-                            )
-                    with col4:
-                        create_kpi_card("Moyenne du mois", f"{month_avg_per_bu:,.0f}€", "📅", "default")
-                else:
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        create_kpi_card("CA du mois", f"{month_total:,.0f}€", "💰", "default")
-                    with col2:
-                        create_kpi_card("Projets", f"{month_count}", "📁", "default")
-                        # Add popover for month projects
-                        if not month_df.empty:
-                            render_projects_popover(
-                                "🔎 Voir projets",
-                                month_df,
-                                show_pondere=show_pondere,
-                                header_text=f"Projets · {selected_month}"
-                            )
-                    with col3:
-                        create_kpi_card("Moyenne du mois", f"{month_avg_per_bu:,.0f}€", "📅", "default")
-
-                st.markdown("<br>", unsafe_allow_html=True)
-
-                # === BU AMOUNTS ===
-                st.markdown('<div class="section-header">💼 Montants par BU</div>', unsafe_allow_html=True)
-                month_bu_amounts = get_bu_amounts(month_df, include_weighted=show_pondere)
-                create_bu_kpi_row(month_df, month_bu_amounts, show_pondere=show_pondere, key_prefix=f"vue_mensuelle_{selected_month.replace(' ', '_')}")
-
-                st.markdown("<br>", unsafe_allow_html=True)
-
-                # === TYPOLOGIE AMOUNTS (BU-Grouped) ===
-                st.markdown('<div class="section-header">🏷️ Montants par Typologie (groupés par BU)</div>', unsafe_allow_html=True)
-                # Use BU-grouped typologie blocks for consistency
-                create_bu_grouped_typologie_blocks(month_df, show_pondere=show_pondere)
-
-                st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-
-                # === CHARTS ===
-                # #region agent log - Track chart rendering
-                charts_start = time.time()
-                debug_log("tab2:CHARTS:START", "Starting chart rendering", {"month": selected_month}, "C")
-                # #endregion
-
-                # Vertical layout for charts
-                st.markdown("#### Répartition par Business Unit")
-                fig_month_bu_donut = plot_bu_donut(month_df, f"BU - {selected_month}")
-                st.plotly_chart(fig_month_bu_donut, use_container_width=True, key="vue_mensuelle_bu_donut", config={})
-
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.markdown("#### Répartition par Typologie")
-                fig_month_type_bar = plot_typologie_bar(month_df, f"Répartition par Typologie")
-                st.plotly_chart(fig_month_type_bar, use_container_width=True, key="vue_mensuelle_type_bar", config={})
-
-                # === SECTION: À PRODUIRE TABS (Monthly) ===
-                st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-                st.markdown('<div class="section-header">🏭 Répartition par Année de Production</div>', unsafe_allow_html=True)
-                st.markdown(f"*Montants à produire par année pour les signatures de {selected_month}*")
-
-                # Render production tabs for this month's data only
-                # Shows how much of this month's signed deals will be produced in each year
-                render_production_tabs(
-                    df=month_df,
-                    selected_year=selected_year,
-                    show_pondere=show_pondere,
-                    key_prefix=f"vue_mensuelle_{selected_month.replace(' ', '_')}"
+                _m_prefix = f"vue_mensuelle_{selected_month.replace(' ', '_')}"
+                _prod_years_m = compute_production_years(month_df, selected_year)
+                _scope_opts_m = [PRODUCTION_SCOPE_ALL] + [production_scope_label(y) for y in _prod_years_m]
+                prod_scope_mensuelle = st.radio(
+                    "Année de production",
+                    options=_scope_opts_m,
+                    horizontal=True,
+                    key="prod_scope_mensuelle",
                 )
+                prod_year_m = parse_production_scope_choice(prod_scope_mensuelle)
 
-                # #region agent log
-                debug_log("tab2:CHARTS:DONE", f"Vue Mensuelle charts completed in {time.time()-charts_start:.2f}s",
-                          {"month": selected_month, "duration_s": round(time.time()-charts_start, 2)}, "C")
-                # #endregion
+                if prod_year_m is not None:
+                    render_unallocated_production_warning(month_df)
+                    render_single_production_view(
+                        df=month_df,
+                        production_year=prod_year_m,
+                        show_pondere=show_pondere,
+                        key_prefix=f"{_m_prefix}_prod",
+                    )
+                else:
+                    st.markdown('<div class="section-header">📊 Résumé du Mois</div>', unsafe_allow_html=True)
+
+                    month_total = month_df['amount'].sum()
+                    month_pondere = month_df['amount_pondere'].sum() if 'amount_pondere' in month_df.columns else month_total
+                    month_count = len(month_df)
+
+                    month_bu_amounts = get_bu_amounts(month_df, include_weighted=False)
+
+                    maintenance_total = month_bu_amounts.get('MAINTENANCE', {}).get('total', 0.0)
+                    autre_total = month_bu_amounts.get('AUTRE', {}).get('total', 0.0)
+                    maintenance_combined = maintenance_total + autre_total
+
+                    conception_total = month_bu_amounts.get('CONCEPTION', {}).get('total', 0.0)
+                    travaux_total = month_bu_amounts.get('TRAVAUX', {}).get('total', 0.0)
+
+                    bu_totals = [conception_total, travaux_total, maintenance_combined]
+                    non_zero_bus = [t for t in bu_totals if t > 0]
+                    month_avg_per_bu = sum(non_zero_bus) / len(non_zero_bus) if non_zero_bus else 0.0
+
+                    if show_pondere:
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            create_kpi_card("CA du mois", f"{month_total:,.0f}€", "💰", "default")
+                        with col2:
+                            create_kpi_card("CA Pondéré", f"{month_pondere:,.0f}€", "⚖️", "default")
+                        with col3:
+                            create_kpi_card("Projets", f"{month_count}", "📁", "default")
+                            if not month_df.empty:
+                                render_projects_popover(
+                                    "🔎 Voir projets",
+                                    month_df,
+                                    show_pondere=show_pondere,
+                                    header_text=f"Projets · {selected_month}"
+                                )
+                        with col4:
+                            create_kpi_card("Moyenne du mois", f"{month_avg_per_bu:,.0f}€", "📅", "default")
+                    else:
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            create_kpi_card("CA du mois", f"{month_total:,.0f}€", "💰", "default")
+                        with col2:
+                            create_kpi_card("Projets", f"{month_count}", "📁", "default")
+                            if not month_df.empty:
+                                render_projects_popover(
+                                    "🔎 Voir projets",
+                                    month_df,
+                                    show_pondere=show_pondere,
+                                    header_text=f"Projets · {selected_month}"
+                                )
+                        with col3:
+                            create_kpi_card("Moyenne du mois", f"{month_avg_per_bu:,.0f}€", "📅", "default")
+
+                    st.markdown("<br>", unsafe_allow_html=True)
+
+                    st.markdown('<div class="section-header">💼 Montants par BU</div>', unsafe_allow_html=True)
+                    month_bu_amounts_w = get_bu_amounts(month_df, include_weighted=show_pondere)
+                    create_bu_kpi_row(month_df, month_bu_amounts_w, show_pondere=show_pondere, key_prefix=_m_prefix)
+
+                    st.markdown("<br>", unsafe_allow_html=True)
+
+                    with st.expander("🏷️ Analyse par typologie", expanded=False):
+                        st.markdown(
+                            '<div class="section-header">🏷️ Montants par Typologie (groupés par BU)</div>',
+                            unsafe_allow_html=True,
+                        )
+                        create_bu_grouped_typologie_blocks(month_df, show_pondere=show_pondere)
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        st.markdown("#### Répartition par Typologie")
+                        fig_month_type_bar = plot_typologie_bar(month_df, f"Répartition par Typologie")
+                        st.plotly_chart(fig_month_type_bar, use_container_width=True, key="vue_mensuelle_type_bar", config={})
+
+                    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+
+                    charts_start = time.time()
+                    debug_log("tab2:CHARTS:START", "Starting chart rendering", {"month": selected_month}, "C")
+
+                    st.markdown("#### Répartition par Business Unit")
+                    fig_month_bu_donut = plot_bu_donut(month_df, f"BU - {selected_month}")
+                    st.plotly_chart(fig_month_bu_donut, use_container_width=True, key="vue_mensuelle_bu_donut", config={})
+
+                    debug_log("tab2:CHARTS:DONE", f"Vue Mensuelle charts completed in {time.time()-charts_start:.2f}s",
+                              {"month": selected_month, "duration_s": round(time.time()-charts_start, 2)}, "C")
         else:
-            st.info("Vue mensuelle non disponible pour l'état actuel")
+            st.info("Vue mensuelle indisponible : la colonne source_sheet est absente des données.")
 
     # =========================================================================
     # TAB 3: OBJECTIFS
@@ -5127,138 +5035,219 @@ def main():
     elif selected_tab_key == "objectifs":
         st.markdown("### 🎯 Objectifs")
 
-        # Check if objectives are available for this view type
-        if not (is_signed or is_sent):
-            # Snapshot view: objectives not available
-            st.info("Les objectifs sont disponibles uniquement pour les vues Envoyé et Signé.")
-            st.markdown("*Choisissez Envoyé ou Signé dans la barre latérale pour voir les objectifs.*")
+        if is_signed:
+            metric_name = "Signé"
+            metric_key = "signe"
+            sheet_type = "Signé"
         else:
-            # Determine which metric to use based on sidebar selection
-            if is_signed:
-                metric_name = "Signé"
-                metric_key = "signe"
-                sheet_type = "Signé"
-            elif is_sent:
-                metric_name = "Envoyé"
-                metric_key = "envoye"
-                sheet_type = "Envoyé"
+            metric_name = "Envoyé"
+            metric_key = "envoye"
+            sheet_type = "Envoyé"
+
+        if metric_name and metric_key and sheet_type:
+            # Load production-year aggregated data (includes previous-year signings)
+            metric_df = load_aggregated_production_data(production_year=selected_year, sheet_type=sheet_type)
+
+            if metric_df.empty:
+                st.warning(f"Aucune donnée disponible pour les objectifs {metric_name} {selected_year}")
             else:
-                # This should not happen, but handle gracefully
-                st.error("Erreur: type de vue non reconnu pour les objectifs")
-                metric_name = None
-                metric_key = None
-                sheet_type = None
+                # Parse numeric columns
+                metric_df = parse_numeric_columns(metric_df)
+                # For Envoyé, we use production weighted columns directly (no need to recalculate)
+                use_pondere = (metric_key == "envoye")
 
-            if metric_name and metric_key and sheet_type:
-                # Load production-year aggregated data (includes previous-year signings)
-                metric_df = load_aggregated_production_data(production_year=selected_year, sheet_type=sheet_type)
+                st.markdown(f"#### Objectifs {metric_name} - Production {selected_year}")
+                st.markdown(f"*Basés sur l'année de production (inclut les signatures des années précédentes)*")
 
-                if metric_df.empty:
-                    st.warning(f"Aucune donnée disponible pour les objectifs {metric_name} {selected_year}")
-                else:
-                    # Parse numeric columns
-                    metric_df = parse_numeric_columns(metric_df)
-                    # For Envoyé, we use production weighted columns directly (no need to recalculate)
-                    use_pondere = (metric_key == "envoye")
+                # Show carryover breakdown
+                if 'signed_year' in metric_df.columns:
+                    with st.expander("📊 Répartition par année de signature", expanded=False):
+                        signed_years = sorted(metric_df['signed_year'].unique())
+                        carryover_data = []
+                        for signed_yr in signed_years:
+                            year_df = metric_df[metric_df['signed_year'] == signed_yr]
+                            amount_col = f'Montant Pondéré {selected_year}' if use_pondere else f'Montant Total {selected_year}'
+                            if amount_col in year_df.columns:
+                                year_total = float(year_df[amount_col].sum() or 0.0)
+                                carryover_data.append({
+                                    "Année de signature": signed_yr,
+                                    "Montant (€)": year_total,
+                                })
 
-                    st.markdown(f"#### Objectifs {metric_name} - Production {selected_year}")
-                    st.markdown(f"*Basés sur l'année de production (inclut les signatures des années précédentes)*")
+                        if carryover_data:
+                            carryover_df = pd.DataFrame(carryover_data)
+                            total_production = float(carryover_df["Montant (€)"].sum() or 0.0)
+                            carryover_df["%"] = carryover_df["Montant (€)"].apply(
+                                lambda v: f"{(float(v) / total_production * 100) if total_production > 0 else 0:.1f}%"
+                            )
+                            carryover_df["Montant"] = carryover_df["Montant (€)"].apply(lambda v: f"{float(v):,.0f}€")
+                            carryover_df = carryover_df[["Année de signature", "Montant", "%"]]
+                            st.dataframe(carryover_df, use_container_width=True, hide_index=True)
+                            st.markdown(f"**Total production {selected_year}:** {total_production:,.0f}€")
 
-                    # Show carryover breakdown
-                    if 'signed_year' in metric_df.columns:
-                        with st.expander("📊 Répartition par année de signature", expanded=False):
-                            signed_years = sorted(metric_df['signed_year'].unique())
-                            carryover_data = []
-                            for signed_yr in signed_years:
-                                year_df = metric_df[metric_df['signed_year'] == signed_yr]
-                                amount_col = f'Montant Pondéré {selected_year}' if use_pondere else f'Montant Total {selected_year}'
-                                if amount_col in year_df.columns:
-                                    year_total = float(year_df[amount_col].sum() or 0.0)
-                                    carryover_data.append({
-                                        "Année de signature": signed_yr,
-                                        "Montant (€)": year_total,
-                                    })
+                # Period selector - use all accounting periods (0-10)
+                all_periods = list(range(11))  # 0-10 for all accounting periods
+                period_options = [f"{idx:02d} - {get_accounting_period_label(idx)}" for idx in all_periods]
 
-                            if carryover_data:
-                                carryover_df = pd.DataFrame(carryover_data)
-                                total_production = float(carryover_df["Montant (€)"].sum() or 0.0)
-                                carryover_df["%"] = carryover_df["Montant (€)"].apply(
-                                    lambda v: f"{(float(v) / total_production * 100) if total_production > 0 else 0:.1f}%"
-                                )
-                                carryover_df["Montant"] = carryover_df["Montant (€)"].apply(lambda v: f"{float(v):,.0f}€")
-                                carryover_df = carryover_df[["Année de signature", "Montant", "%"]]
-                                st.dataframe(carryover_df, use_container_width=True, hide_index=True)
-                                st.markdown(f"**Total production {selected_year}:** {total_production:,.0f}€")
+                current_month_num = datetime.now().month
+                current_period_idx = get_accounting_period_for_month(current_month_num)
+                default_idx = current_period_idx if current_period_idx < len(all_periods) else 0
 
-                    # Period selector - use all accounting periods (0-10)
-                    all_periods = list(range(11))  # 0-10 for all accounting periods
-                    period_options = [f"{idx:02d} - {get_accounting_period_label(idx)}" for idx in all_periods]
+                selected_period_str = st.selectbox(
+                    "Sélectionner une période",
+                    period_options,
+                    index=default_idx,
+                    key=f"period_select_{metric_key}"
+                )
+                selected_period_idx = all_periods[period_options.index(selected_period_str)]
+                selected_period_label = get_accounting_period_label(selected_period_idx)
 
-                    current_month_num = datetime.now().month
-                    current_period_idx = get_accounting_period_for_month(current_month_num)
-                    default_idx = current_period_idx if current_period_idx < len(all_periods) else 0
+                # Maintenance Entretien – début 2026: from Notion (sum "Total HT Cette année") or secret; included in Réalisé
+                entretien_start_2026: Optional[float] = None
+                if is_signed and selected_year == 2026:
+                    entretien_start_2026 = _get_entretien_start_2026_value()
+                    if entretien_start_2026 is not None:
+                        st.info(f"**Maintenance Entretien – Début d'année 2026 :** {entretien_start_2026:,.0f} € *(réparti dans Réalisé : 1/11 par période, 3/11 par trimestre, total sur l'année)*")
+                    else:
+                        start_2026_val = get_secret("MAINTENANCE_ENTRETIEN_START_2026", "").strip()
+                        if start_2026_val:
+                            try:
+                                st.info(f"**Maintenance Entretien – Début d'année 2026 :** {float(start_2026_val.replace(',', '.').replace(' ', '')):,.0f} € *(réparti dans Réalisé : 1/11 par période, 3/11 par trimestre, total sur l'année)*")
+                                entretien_start_2026 = float(start_2026_val.replace(",", ".").replace(" ", ""))
+                            except ValueError:
+                                st.info(f"**Maintenance Entretien – Début d'année 2026 :** {start_2026_val}")
 
-                    selected_period_str = st.selectbox(
-                        "Sélectionner une période",
-                        period_options,
-                        index=default_idx,
-                        key=f"period_select_{metric_key}"
+                # =============================================================
+                # SECTION 1: PÉRIODE (Production period)
+                # =============================================================
+                st.markdown("---")
+                st.markdown(f"### 📅 Production de {selected_period_label}")
+
+                st.markdown(f"*Montants de production {selected_year} pour cette période comptable*")
+
+                # BU Table
+                st.markdown("#### Par Business Unit")
+                has_signature_obj = is_signed and selected_year in OBJECTIVES and "signature" in OBJECTIVES[selected_year]
+                has_envoye_dual_block = is_sent and selected_year in OBJECTIVES and "signature" in OBJECTIVES[selected_year]
+                bu_data = []
+                for bu in BU_ORDER:
+                    # Realized = production-period amount; for MAINTENANCE use only start-of-year (1/11 per period)
+                    if bu == "MAINTENANCE" and entretien_start_2026 is not None:
+                        realized_total = entretien_start_2026 / 11.0
+                        realized_prev = 0.0
+                    else:
+                        realized_total, realized_prev = calculate_production_period_with_carryover(
+                            metric_df, selected_year, selected_period_idx, "bu", bu, use_pondere
+                        )
+                    # Objective = sum of objectives for months in this accounting period
+                    period_months = get_months_for_accounting_period(selected_period_idx)
+                    objective = sum(
+                        objective_for_month(selected_year, metric_key, "bu", bu, m)
+                        for m in period_months
                     )
-                    selected_period_idx = all_periods[period_options.index(selected_period_str)]
-                    selected_period_label = get_accounting_period_label(selected_period_idx)
+                    reste = objective - realized_total
+                    percent = (realized_total / objective * 100) if objective > 0 else 0.0
 
-                    # Maintenance Entretien – début 2026: from Notion (sum "Total HT Cette année") or secret; included in Réalisé
-                    entretien_start_2026: Optional[float] = None
-                    if is_signed and selected_year == 2026:
-                        entretien_start_2026 = _get_entretien_start_2026_value()
-                        if entretien_start_2026 is not None:
-                            st.info(f"**Maintenance Entretien – Début d'année 2026 :** {entretien_start_2026:,.0f} € *(réparti dans Réalisé : 1/11 par période, 3/11 par trimestre, total sur l'année)*")
-                        else:
-                            start_2026_val = get_secret("MAINTENANCE_ENTRETIEN_START_2026", "").strip()
-                            if start_2026_val:
-                                try:
-                                    st.info(f"**Maintenance Entretien – Début d'année 2026 :** {float(start_2026_val.replace(',', '.').replace(' ', '')):,.0f} € *(réparti dans Réalisé : 1/11 par période, 3/11 par trimestre, total sur l'année)*")
-                                    entretien_start_2026 = float(start_2026_val.replace(",", ".").replace(" ", ""))
-                                except ValueError:
-                                    st.info(f"**Maintenance Entretien – Début d'année 2026 :** {start_2026_val}")
+                    # Pure signature for this period (sum of months in period)
+                    pure_brut = 0.0
+                    pure_pondere = 0.0
+                    for m in period_months:
+                        brut, pond = calculate_pure_signature_for_month(
+                            metric_df, selected_year, m, "bu", bu, use_pondere
+                        )
+                        pure_brut += brut
+                        pure_pondere += pond
 
-                    # =============================================================
-                    # SECTION 1: PÉRIODE (Production period)
-                    # =============================================================
-                    st.markdown("---")
-                    st.markdown(f"### 📅 Production de {selected_period_label}")
+                    # Format pure/signature column
+                    if use_pondere:
+                        pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
+                    else:
+                        pure_display = f"{pure_brut:,.0f}€"
 
-                    st.markdown(f"*Montants de production {selected_year} pour cette période comptable*")
+                    if has_signature_obj:
+                        objective_sig = sum(
+                            objective_for_month(selected_year, "signature", "bu", bu, m)
+                            for m in period_months
+                        )
+                        reste_sig = objective_sig - pure_brut
+                        percent_sig = (pure_brut / objective_sig * 100) if objective_sig > 0 else 0.0
+                        bu_data.append({
+                            "BU": bu,
+                            "Objectif Production": f"{objective:,.0f}€",
+                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                            "Reste": f"{reste:,.0f}€",
+                            "%": f"{percent:.1f}%",
+                            "Objectif Signature": f"{objective_sig:,.0f}€",
+                            "Signature": pure_display,
+                            "Reste Sig": f"{reste_sig:,.0f}€",
+                            "% Sig": f"{percent_sig:.1f}%"
+                        })
+                    elif has_envoye_dual_block:
+                        avg_prob = calculate_avg_probability_for_sent(
+                            metric_df, selected_year, period_months, "bu", bu
+                        )
+                        avg_prob_rate = avg_prob / 100.0
+                        objective_sig = sum(
+                            objective_for_month(selected_year, "signature", "bu", bu, m)
+                            for m in period_months
+                        )
+                        objective_envoi = (
+                            objective_sig / avg_prob_rate if avg_prob_rate > 0 else objective_sig / 0.25
+                        )
+                        reste_envoi = objective_envoi - pure_brut
+                        percent_envoi = (pure_brut / objective_envoi * 100) if objective_envoi > 0 else 0.0
+                        reste_pond = objective_sig - pure_pondere
+                        percent_pond = (pure_pondere / objective_sig * 100) if objective_sig > 0 else 0.0
+                        bu_data.append({
+                            "BU": bu,
+                            "Objectif Envoi": f"{objective_envoi:,.0f}€",
+                            "Envoyé Brut": f"{pure_brut:,.0f}€",
+                            "Reste": f"{reste_envoi:,.0f}€",
+                            "%": f"{percent_envoi:.1f}%",
+                            "Objectif Signature": f"{objective_sig:,.0f}€",
+                            "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
+                            "Reste Pond": f"{reste_pond:,.0f}€",
+                            "% Pond": f"{percent_pond:.1f}%"
+                        })
+                    else:
+                        bu_data.append({
+                            "BU": bu,
+                            "Objectif": f"{objective:,.0f}€",
+                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                            "Pur": pure_display,
+                            "Reste": f"{reste:,.0f}€",
+                            "%": f"{percent:.1f}%"
+                        })
 
-                    # BU Table
-                    st.markdown("#### Par Business Unit")
-                    has_signature_obj = is_signed and selected_year in OBJECTIVES and "signature" in OBJECTIVES[selected_year]
-                    has_envoye_dual_block = is_sent and selected_year in OBJECTIVES and "signature" in OBJECTIVES[selected_year]
-                    bu_data = []
-                    for bu in BU_ORDER:
-                        # Realized = production-period amount; for MAINTENANCE use only start-of-year (1/11 per period)
-                        if bu == "MAINTENANCE" and entretien_start_2026 is not None:
+                st.markdown(render_objectives_table_html(pd.DataFrame(bu_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
+
+                # Typologie Table (collapsible)
+                with st.expander("Par Typologie – Période", expanded=False):
+                    st.markdown("#### Par Typologie")
+                    typo_data = []
+                    for typo in EXPECTED_TYPOLOGIES:
+                        # For Maintenance Entretien use only start-of-year (1/11 per period)
+                        if typo == "Maintenance Entretien" and entretien_start_2026 is not None:
                             realized_total = entretien_start_2026 / 11.0
                             realized_prev = 0.0
                         else:
                             realized_total, realized_prev = calculate_production_period_with_carryover(
-                                metric_df, selected_year, selected_period_idx, "bu", bu, use_pondere
+                                metric_df, selected_year, selected_period_idx, "typologie", typo, use_pondere
                             )
-                        # Objective = sum of objectives for months in this accounting period
                         period_months = get_months_for_accounting_period(selected_period_idx)
                         objective = sum(
-                            objective_for_month(selected_year, metric_key, "bu", bu, m)
+                            objective_for_month(selected_year, metric_key, "typologie", typo, m)
                             for m in period_months
                         )
                         reste = objective - realized_total
                         percent = (realized_total / objective * 100) if objective > 0 else 0.0
 
-                        # Pure signature for this period (sum of months in period)
+                        # Pure signature for this period
                         pure_brut = 0.0
                         pure_pondere = 0.0
                         for m in period_months:
                             brut, pond = calculate_pure_signature_for_month(
-                                metric_df, selected_year, m, "bu", bu, use_pondere
+                                metric_df, selected_year, m, "typologie", typo, use_pondere
                             )
                             pure_brut += brut
                             pure_pondere += pond
@@ -5271,13 +5260,13 @@ def main():
 
                         if has_signature_obj:
                             objective_sig = sum(
-                                objective_for_month(selected_year, "signature", "bu", bu, m)
+                                objective_for_month(selected_year, "signature", "typologie", typo, m)
                                 for m in period_months
                             )
                             reste_sig = objective_sig - pure_brut
                             percent_sig = (pure_brut / objective_sig * 100) if objective_sig > 0 else 0.0
-                            bu_data.append({
-                                "BU": bu,
+                            typo_data.append({
+                                "Typologie": typo,
                                 "Objectif Production": f"{objective:,.0f}€",
                                 "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
                                 "Reste": f"{reste:,.0f}€",
@@ -5289,11 +5278,11 @@ def main():
                             })
                         elif has_envoye_dual_block:
                             avg_prob = calculate_avg_probability_for_sent(
-                                metric_df, selected_year, period_months, "bu", bu
+                                metric_df, selected_year, period_months, "typologie", typo
                             )
                             avg_prob_rate = avg_prob / 100.0
                             objective_sig = sum(
-                                objective_for_month(selected_year, "signature", "bu", bu, m)
+                                objective_for_month(selected_year, "signature", "typologie", typo, m)
                                 for m in period_months
                             )
                             objective_envoi = (
@@ -5303,8 +5292,8 @@ def main():
                             percent_envoi = (pure_brut / objective_envoi * 100) if objective_envoi > 0 else 0.0
                             reste_pond = objective_sig - pure_pondere
                             percent_pond = (pure_pondere / objective_sig * 100) if objective_sig > 0 else 0.0
-                            bu_data.append({
-                                "BU": bu,
+                            typo_data.append({
+                                "Typologie": typo,
                                 "Objectif Envoi": f"{objective_envoi:,.0f}€",
                                 "Envoyé Brut": f"{pure_brut:,.0f}€",
                                 "Reste": f"{reste_envoi:,.0f}€",
@@ -5315,8 +5304,8 @@ def main():
                                 "% Pond": f"{percent_pond:.1f}%"
                             })
                         else:
-                            bu_data.append({
-                                "BU": bu,
+                            typo_data.append({
+                                "Typologie": typo,
                                 "Objectif": f"{objective:,.0f}€",
                                 "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
                                 "Pur": pure_display,
@@ -5324,144 +5313,128 @@ def main():
                                 "%": f"{percent:.1f}%"
                             })
 
-                    st.markdown(render_objectives_table_html(pd.DataFrame(bu_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
+                    st.markdown(render_objectives_table_html(pd.DataFrame(typo_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
 
-                    # Typologie Table (collapsible)
-                    with st.expander("Par Typologie – Période", expanded=False):
-                        st.markdown("#### Par Typologie")
-                        typo_data = []
-                        for typo in EXPECTED_TYPOLOGIES:
-                            # For Maintenance Entretien use only start-of-year (1/11 per period)
-                            if typo == "Maintenance Entretien" and entretien_start_2026 is not None:
-                                realized_total = entretien_start_2026 / 11.0
-                                realized_prev = 0.0
-                            else:
-                                realized_total, realized_prev = calculate_production_period_with_carryover(
-                                    metric_df, selected_year, selected_period_idx, "typologie", typo, use_pondere
-                                )
-                            period_months = get_months_for_accounting_period(selected_period_idx)
-                            objective = sum(
-                                objective_for_month(selected_year, metric_key, "typologie", typo, m)
-                                for m in period_months
-                            )
-                            reste = objective - realized_total
-                            percent = (realized_total / objective * 100) if objective > 0 else 0.0
+                # =============================================================
+                # SECTION 2: TRIMESTRE (Production year)
+                # =============================================================
+                st.markdown("---")
+                st.markdown("### 📊 Trimestre de Production")
 
-                            # Pure signature for this period
-                            pure_brut = 0.0
-                            pure_pondere = 0.0
-                            for m in period_months:
-                                brut, pond = calculate_pure_signature_for_month(
-                                    metric_df, selected_year, m, "typologie", typo, use_pondere
-                                )
-                                pure_brut += brut
-                                pure_pondere += pond
+                # Determine current quarter from selected period
+                period_months = get_months_for_accounting_period(selected_period_idx)
+                if period_months:
+                    current_quarter = get_quarter_for_month(period_months[0])
+                else:
+                    current_quarter = "Q1"  # Default
 
-                            # Format pure/signature column
-                            if use_pondere:
-                                pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
-                            else:
-                                pure_display = f"{pure_brut:,.0f}€"
+                quarter_start = quarter_start_dates(selected_year)[current_quarter]
+                quarter_end = quarter_end_dates(selected_year)[current_quarter]
 
-                            if has_signature_obj:
-                                objective_sig = sum(
-                                    objective_for_month(selected_year, "signature", "typologie", typo, m)
-                                    for m in period_months
-                                )
-                                reste_sig = objective_sig - pure_brut
-                                percent_sig = (pure_brut / objective_sig * 100) if objective_sig > 0 else 0.0
-                                typo_data.append({
-                                    "Typologie": typo,
-                                    "Objectif Production": f"{objective:,.0f}€",
-                                    "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                                    "Reste": f"{reste:,.0f}€",
-                                    "%": f"{percent:.1f}%",
-                                    "Objectif Signature": f"{objective_sig:,.0f}€",
-                                    "Signature": pure_display,
-                                    "Reste Sig": f"{reste_sig:,.0f}€",
-                                    "% Sig": f"{percent_sig:.1f}%"
-                                })
-                            elif has_envoye_dual_block:
-                                avg_prob = calculate_avg_probability_for_sent(
-                                    metric_df, selected_year, period_months, "typologie", typo
-                                )
-                                avg_prob_rate = avg_prob / 100.0
-                                objective_sig = sum(
-                                    objective_for_month(selected_year, "signature", "typologie", typo, m)
-                                    for m in period_months
-                                )
-                                objective_envoi = (
-                                    objective_sig / avg_prob_rate if avg_prob_rate > 0 else objective_sig / 0.25
-                                )
-                                reste_envoi = objective_envoi - pure_brut
-                                percent_envoi = (pure_brut / objective_envoi * 100) if objective_envoi > 0 else 0.0
-                                reste_pond = objective_sig - pure_pondere
-                                percent_pond = (pure_pondere / objective_sig * 100) if objective_sig > 0 else 0.0
-                                typo_data.append({
-                                    "Typologie": typo,
-                                    "Objectif Envoi": f"{objective_envoi:,.0f}€",
-                                    "Envoyé Brut": f"{pure_brut:,.0f}€",
-                                    "Reste": f"{reste_envoi:,.0f}€",
-                                    "%": f"{percent_envoi:.1f}%",
-                                    "Objectif Signature": f"{objective_sig:,.0f}€",
-                                    "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
-                                    "Reste Pond": f"{reste_pond:,.0f}€",
-                                    "% Pond": f"{percent_pond:.1f}%"
-                                })
-                            else:
-                                typo_data.append({
-                                    "Typologie": typo,
-                                    "Objectif": f"{objective:,.0f}€",
-                                    "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                                    "Pur": pure_display,
-                                    "Reste": f"{reste:,.0f}€",
-                                    "%": f"{percent:.1f}%"
-                                })
+                st.markdown(f"**Trimestre actuel:** {current_quarter} | **Début:** {quarter_start.strftime('%d/%m/%Y')} | **Fin:** {quarter_end.strftime('%d/%m/%Y')}")
 
-                        st.markdown(render_objectives_table_html(pd.DataFrame(typo_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
-
-                    # =============================================================
-                    # SECTION 2: TRIMESTRE (Production year)
-                    # =============================================================
-                    st.markdown("---")
-                    st.markdown("### 📊 Trimestre de Production")
-
-                    # Determine current quarter from selected period
-                    period_months = get_months_for_accounting_period(selected_period_idx)
-                    if period_months:
-                        current_quarter = get_quarter_for_month(period_months[0])
+                # BU Table (Quarter) - using production-year columns
+                st.markdown("#### Par Business Unit (Trimestre de production)")
+                bu_quarter_data = []
+                quarter_amount_col = (
+                    f"Montant Pondéré {current_quarter}_{selected_year}"
+                    if use_pondere
+                    else f"Montant Total {current_quarter}_{selected_year}"
+                )
+                for bu in BU_ORDER:
+                    # For MAINTENANCE use only start-of-year (3/11 per quarter)
+                    if bu == "MAINTENANCE" and entretien_start_2026 is not None:
+                        realized_total = entretien_start_2026 * 3.0 / 11.0
+                        realized_prev = 0.0
                     else:
-                        current_quarter = "Q1"  # Default
+                        realized_total, realized_prev = calculate_production_amount_with_carryover(
+                            metric_df, selected_year, quarter_amount_col, "bu", bu
+                        )
+                    objective = objective_for_quarter(selected_year, metric_key, "bu", bu, current_quarter)
+                    reste = objective - realized_total
+                    percent = (realized_total / objective * 100) if objective > 0 else 0.0
 
-                    quarter_start = quarter_start_dates(selected_year)[current_quarter]
-                    quarter_end = quarter_end_dates(selected_year)[current_quarter]
-
-                    st.markdown(f"**Trimestre actuel:** {current_quarter} | **Début:** {quarter_start.strftime('%d/%m/%Y')} | **Fin:** {quarter_end.strftime('%d/%m/%Y')}")
-
-                    # BU Table (Quarter) - using production-year columns
-                    st.markdown("#### Par Business Unit (Trimestre de production)")
-                    bu_quarter_data = []
-                    quarter_amount_col = (
-                        f"Montant Pondéré {current_quarter}_{selected_year}"
-                        if use_pondere
-                        else f"Montant Total {current_quarter}_{selected_year}"
+                    # Pure signature for this quarter
+                    pure_brut, pure_pondere = calculate_pure_signature_for_quarter(
+                        metric_df, selected_year, current_quarter, "bu", bu, use_pondere
                     )
-                    for bu in BU_ORDER:
-                        # For MAINTENANCE use only start-of-year (3/11 per quarter)
-                        if bu == "MAINTENANCE" and entretien_start_2026 is not None:
+                    if use_pondere:
+                        pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
+                    else:
+                        pure_display = f"{pure_brut:,.0f}€"
+
+                    if has_signature_obj:
+                        objective_sig = objective_for_quarter(selected_year, "signature", "bu", bu, current_quarter)
+                        reste_sig = objective_sig - pure_brut
+                        percent_sig = (pure_brut / objective_sig * 100) if objective_sig > 0 else 0.0
+                        bu_quarter_data.append({
+                            "BU": bu,
+                            "Objectif Production": f"{objective:,.0f}€",
+                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                            "Reste": f"{reste:,.0f}€",
+                            "%": f"{percent:.1f}%",
+                            "Objectif Signature": f"{objective_sig:,.0f}€",
+                            "Signature": pure_display,
+                            "Reste Sig": f"{reste_sig:,.0f}€",
+                            "% Sig": f"{percent_sig:.1f}%"
+                        })
+                    elif has_envoye_dual_block:
+                        quarter_months_list = {"Q1": [1,2,3], "Q2": [4,5,6], "Q3": [7,8,9], "Q4": [10,11,12]}[current_quarter]
+                        avg_prob = calculate_avg_probability_for_sent(
+                            metric_df, selected_year, quarter_months_list, "bu", bu
+                        )
+                        avg_prob_rate = avg_prob / 100.0
+                        objective_sig = objective_for_quarter(selected_year, "signature", "bu", bu, current_quarter)
+                        objective_envoi = (
+                            objective_sig / avg_prob_rate if avg_prob_rate > 0 else objective_sig / 0.25
+                        )
+                        reste_envoi = objective_envoi - pure_brut
+                        percent_envoi = (pure_brut / objective_envoi * 100) if objective_envoi > 0 else 0.0
+                        reste_pond = objective_sig - pure_pondere
+                        percent_pond = (pure_pondere / objective_sig * 100) if objective_sig > 0 else 0.0
+                        bu_quarter_data.append({
+                            "BU": bu,
+                            "Objectif Envoi": f"{objective_envoi:,.0f}€",
+                            "Envoyé Brut": f"{pure_brut:,.0f}€",
+                            "Reste": f"{reste_envoi:,.0f}€",
+                            "%": f"{percent_envoi:.1f}%",
+                            "Objectif Signature": f"{objective_sig:,.0f}€",
+                            "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
+                            "Reste Pond": f"{reste_pond:,.0f}€",
+                            "% Pond": f"{percent_pond:.1f}%"
+                        })
+                    else:
+                        bu_quarter_data.append({
+                            "BU": bu,
+                            "Objectif": f"{objective:,.0f}€",
+                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                            "Pur": pure_display,
+                            "Reste": f"{reste:,.0f}€",
+                            "%": f"{percent:.1f}%"
+                        })
+
+                st.markdown(render_objectives_table_html(pd.DataFrame(bu_quarter_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
+
+                # Typologie Table (Quarter) – collapsible
+                with st.expander("Par Typologie (Trimestre de production)", expanded=False):
+                    st.markdown("#### Par Typologie (Trimestre de production)")
+                    typo_quarter_data = []
+                    for typo in EXPECTED_TYPOLOGIES:
+                        # For Maintenance Entretien use only start-of-year (3/11 per quarter)
+                        if typo == "Maintenance Entretien" and entretien_start_2026 is not None:
                             realized_total = entretien_start_2026 * 3.0 / 11.0
                             realized_prev = 0.0
                         else:
                             realized_total, realized_prev = calculate_production_amount_with_carryover(
-                                metric_df, selected_year, quarter_amount_col, "bu", bu
+                                metric_df, selected_year, quarter_amount_col, "typologie", typo
                             )
-                        objective = objective_for_quarter(selected_year, metric_key, "bu", bu, current_quarter)
+                        objective = objective_for_quarter(selected_year, metric_key, "typologie", typo, current_quarter)
                         reste = objective - realized_total
                         percent = (realized_total / objective * 100) if objective > 0 else 0.0
 
                         # Pure signature for this quarter
                         pure_brut, pure_pondere = calculate_pure_signature_for_quarter(
-                            metric_df, selected_year, current_quarter, "bu", bu, use_pondere
+                            metric_df, selected_year, current_quarter, "typologie", typo, use_pondere
                         )
                         if use_pondere:
                             pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
@@ -5469,11 +5442,11 @@ def main():
                             pure_display = f"{pure_brut:,.0f}€"
 
                         if has_signature_obj:
-                            objective_sig = objective_for_quarter(selected_year, "signature", "bu", bu, current_quarter)
+                            objective_sig = objective_for_quarter(selected_year, "signature", "typologie", typo, current_quarter)
                             reste_sig = objective_sig - pure_brut
                             percent_sig = (pure_brut / objective_sig * 100) if objective_sig > 0 else 0.0
-                            bu_quarter_data.append({
-                                "BU": bu,
+                            typo_quarter_data.append({
+                                "Typologie": typo,
                                 "Objectif Production": f"{objective:,.0f}€",
                                 "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
                                 "Reste": f"{reste:,.0f}€",
@@ -5486,10 +5459,10 @@ def main():
                         elif has_envoye_dual_block:
                             quarter_months_list = {"Q1": [1,2,3], "Q2": [4,5,6], "Q3": [7,8,9], "Q4": [10,11,12]}[current_quarter]
                             avg_prob = calculate_avg_probability_for_sent(
-                                metric_df, selected_year, quarter_months_list, "bu", bu
+                                metric_df, selected_year, quarter_months_list, "typologie", typo
                             )
                             avg_prob_rate = avg_prob / 100.0
-                            objective_sig = objective_for_quarter(selected_year, "signature", "bu", bu, current_quarter)
+                            objective_sig = objective_for_quarter(selected_year, "signature", "typologie", typo, current_quarter)
                             objective_envoi = (
                                 objective_sig / avg_prob_rate if avg_prob_rate > 0 else objective_sig / 0.25
                             )
@@ -5497,8 +5470,8 @@ def main():
                             percent_envoi = (pure_brut / objective_envoi * 100) if objective_envoi > 0 else 0.0
                             reste_pond = objective_sig - pure_pondere
                             percent_pond = (pure_pondere / objective_sig * 100) if objective_sig > 0 else 0.0
-                            bu_quarter_data.append({
-                                "BU": bu,
+                            typo_quarter_data.append({
+                                "Typologie": typo,
                                 "Objectif Envoi": f"{objective_envoi:,.0f}€",
                                 "Envoyé Brut": f"{pure_brut:,.0f}€",
                                 "Reste": f"{reste_envoi:,.0f}€",
@@ -5509,8 +5482,8 @@ def main():
                                 "% Pond": f"{percent_pond:.1f}%"
                             })
                         else:
-                            bu_quarter_data.append({
-                                "BU": bu,
+                            typo_quarter_data.append({
+                                "Typologie": typo,
                                 "Objectif": f"{objective:,.0f}€",
                                 "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
                                 "Pur": pure_display,
@@ -5518,116 +5491,115 @@ def main():
                                 "%": f"{percent:.1f}%"
                             })
 
-                    st.markdown(render_objectives_table_html(pd.DataFrame(bu_quarter_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
+                    st.markdown(render_objectives_table_html(pd.DataFrame(typo_quarter_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
 
-                    # Typologie Table (Quarter) – collapsible
-                    with st.expander("Par Typologie (Trimestre de production)", expanded=False):
-                        st.markdown("#### Par Typologie (Trimestre de production)")
-                        typo_quarter_data = []
-                        for typo in EXPECTED_TYPOLOGIES:
-                            # For Maintenance Entretien use only start-of-year (3/11 per quarter)
-                            if typo == "Maintenance Entretien" and entretien_start_2026 is not None:
-                                realized_total = entretien_start_2026 * 3.0 / 11.0
-                                realized_prev = 0.0
-                            else:
-                                realized_total, realized_prev = calculate_production_amount_with_carryover(
-                                    metric_df, selected_year, quarter_amount_col, "typologie", typo
-                                )
-                            objective = objective_for_quarter(selected_year, metric_key, "typologie", typo, current_quarter)
-                            reste = objective - realized_total
-                            percent = (realized_total / objective * 100) if objective > 0 else 0.0
+                # =============================================================
+                # SECTION 3: ANNÉE (Production year)
+                # =============================================================
+                st.markdown("---")
+                st.markdown("### 📈 Année de Production")
 
-                            # Pure signature for this quarter
-                            pure_brut, pure_pondere = calculate_pure_signature_for_quarter(
-                                metric_df, selected_year, current_quarter, "typologie", typo, use_pondere
-                            )
-                            if use_pondere:
-                                pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
-                            else:
-                                pure_display = f"{pure_brut:,.0f}€"
+                # BU Table (Year) - using production-year columns
+                st.markdown("#### Par Business Unit (Année de production)")
+                bu_year_data = []
+                year_amount_col = (
+                    f"Montant Pondéré {selected_year}"
+                    if use_pondere
+                    else f"Montant Total {selected_year}"
+                )
+                for bu in BU_ORDER:
+                    # For MAINTENANCE use only start-of-year (full year total)
+                    if bu == "MAINTENANCE" and entretien_start_2026 is not None:
+                        realized_total = entretien_start_2026
+                        realized_prev = 0.0
+                    else:
+                        realized_total, realized_prev = calculate_production_amount_with_carryover(
+                            metric_df, selected_year, year_amount_col, "bu", bu
+                        )
+                    objective = objective_for_year(selected_year, metric_key, "bu", bu)
+                    reste = objective - realized_total
+                    percent = (realized_total / objective * 100) if objective > 0 else 0.0
 
-                            if has_signature_obj:
-                                objective_sig = objective_for_quarter(selected_year, "signature", "typologie", typo, current_quarter)
-                                reste_sig = objective_sig - pure_brut
-                                percent_sig = (pure_brut / objective_sig * 100) if objective_sig > 0 else 0.0
-                                typo_quarter_data.append({
-                                    "Typologie": typo,
-                                    "Objectif Production": f"{objective:,.0f}€",
-                                    "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                                    "Reste": f"{reste:,.0f}€",
-                                    "%": f"{percent:.1f}%",
-                                    "Objectif Signature": f"{objective_sig:,.0f}€",
-                                    "Signature": pure_display,
-                                    "Reste Sig": f"{reste_sig:,.0f}€",
-                                    "% Sig": f"{percent_sig:.1f}%"
-                                })
-                            elif has_envoye_dual_block:
-                                quarter_months_list = {"Q1": [1,2,3], "Q2": [4,5,6], "Q3": [7,8,9], "Q4": [10,11,12]}[current_quarter]
-                                avg_prob = calculate_avg_probability_for_sent(
-                                    metric_df, selected_year, quarter_months_list, "typologie", typo
-                                )
-                                avg_prob_rate = avg_prob / 100.0
-                                objective_sig = objective_for_quarter(selected_year, "signature", "typologie", typo, current_quarter)
-                                objective_envoi = (
-                                    objective_sig / avg_prob_rate if avg_prob_rate > 0 else objective_sig / 0.25
-                                )
-                                reste_envoi = objective_envoi - pure_brut
-                                percent_envoi = (pure_brut / objective_envoi * 100) if objective_envoi > 0 else 0.0
-                                reste_pond = objective_sig - pure_pondere
-                                percent_pond = (pure_pondere / objective_sig * 100) if objective_sig > 0 else 0.0
-                                typo_quarter_data.append({
-                                    "Typologie": typo,
-                                    "Objectif Envoi": f"{objective_envoi:,.0f}€",
-                                    "Envoyé Brut": f"{pure_brut:,.0f}€",
-                                    "Reste": f"{reste_envoi:,.0f}€",
-                                    "%": f"{percent_envoi:.1f}%",
-                                    "Objectif Signature": f"{objective_sig:,.0f}€",
-                                    "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
-                                    "Reste Pond": f"{reste_pond:,.0f}€",
-                                    "% Pond": f"{percent_pond:.1f}%"
-                                })
-                            else:
-                                typo_quarter_data.append({
-                                    "Typologie": typo,
-                                    "Objectif": f"{objective:,.0f}€",
-                                    "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                                    "Pur": pure_display,
-                                    "Reste": f"{reste:,.0f}€",
-                                    "%": f"{percent:.1f}%"
-                                })
-
-                        st.markdown(render_objectives_table_html(pd.DataFrame(typo_quarter_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
-
-                    # =============================================================
-                    # SECTION 3: ANNÉE (Production year)
-                    # =============================================================
-                    st.markdown("---")
-                    st.markdown("### 📈 Année de Production")
-
-                    # BU Table (Year) - using production-year columns
-                    st.markdown("#### Par Business Unit (Année de production)")
-                    bu_year_data = []
-                    year_amount_col = (
-                        f"Montant Pondéré {selected_year}"
-                        if use_pondere
-                        else f"Montant Total {selected_year}"
+                    # Pure signature for this year
+                    pure_brut, pure_pondere = calculate_pure_signature_for_year(
+                        metric_df, selected_year, "bu", bu, use_pondere
                     )
-                    for bu in BU_ORDER:
-                        # For MAINTENANCE use only start-of-year (full year total)
-                        if bu == "MAINTENANCE" and entretien_start_2026 is not None:
+                    if use_pondere:
+                        pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
+                    else:
+                        pure_display = f"{pure_brut:,.0f}€"
+
+                    if has_signature_obj:
+                        objective_sig = objective_for_year(selected_year, "signature", "bu", bu)
+                        reste_sig = objective_sig - pure_brut
+                        percent_sig = (pure_brut / objective_sig * 100) if objective_sig > 0 else 0.0
+                        bu_year_data.append({
+                            "BU": bu,
+                            "Objectif Production": f"{objective:,.0f}€",
+                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                            "Reste": f"{reste:,.0f}€",
+                            "%": f"{percent:.1f}%",
+                            "Objectif Signature": f"{objective_sig:,.0f}€",
+                            "Signature": pure_display,
+                            "Reste Sig": f"{reste_sig:,.0f}€",
+                            "% Sig": f"{percent_sig:.1f}%"
+                        })
+                    elif has_envoye_dual_block:
+                        avg_prob = calculate_avg_probability_for_sent(
+                            metric_df, selected_year, list(range(1, 13)), "bu", bu
+                        )
+                        avg_prob_rate = avg_prob / 100.0
+                        objective_sig = objective_for_year(selected_year, "signature", "bu", bu)
+                        objective_envoi = (
+                            objective_sig / avg_prob_rate if avg_prob_rate > 0 else objective_sig / 0.25
+                        )
+                        reste_envoi = objective_envoi - pure_brut
+                        percent_envoi = (pure_brut / objective_envoi * 100) if objective_envoi > 0 else 0.0
+                        reste_pond = objective_sig - pure_pondere
+                        percent_pond = (pure_pondere / objective_sig * 100) if objective_sig > 0 else 0.0
+                        bu_year_data.append({
+                            "BU": bu,
+                            "Objectif Envoi": f"{objective_envoi:,.0f}€",
+                            "Envoyé Brut": f"{pure_brut:,.0f}€",
+                            "Reste": f"{reste_envoi:,.0f}€",
+                            "%": f"{percent_envoi:.1f}%",
+                            "Objectif Signature": f"{objective_sig:,.0f}€",
+                            "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
+                            "Reste Pond": f"{reste_pond:,.0f}€",
+                            "% Pond": f"{percent_pond:.1f}%"
+                        })
+                    else:
+                        bu_year_data.append({
+                            "BU": bu,
+                            "Objectif": f"{objective:,.0f}€",
+                            "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
+                            "Pur": pure_display,
+                            "Reste": f"{reste:,.0f}€",
+                            "%": f"{percent:.1f}%"
+                        })
+
+                st.markdown(render_objectives_table_html(pd.DataFrame(bu_year_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
+
+                # Typologie Table (Year) – collapsible
+                with st.expander("Par Typologie (Année de production)", expanded=False):
+                    st.markdown("#### Par Typologie (Année de production)")
+                    typo_year_data = []
+                    for typo in EXPECTED_TYPOLOGIES:
+                        # For Maintenance Entretien use only start-of-year (full year total)
+                        if typo == "Maintenance Entretien" and entretien_start_2026 is not None:
                             realized_total = entretien_start_2026
                             realized_prev = 0.0
                         else:
                             realized_total, realized_prev = calculate_production_amount_with_carryover(
-                                metric_df, selected_year, year_amount_col, "bu", bu
+                                metric_df, selected_year, year_amount_col, "typologie", typo
                             )
-                        objective = objective_for_year(selected_year, metric_key, "bu", bu)
+                        objective = objective_for_year(selected_year, metric_key, "typologie", typo)
                         reste = objective - realized_total
                         percent = (realized_total / objective * 100) if objective > 0 else 0.0
 
                         # Pure signature for this year
                         pure_brut, pure_pondere = calculate_pure_signature_for_year(
-                            metric_df, selected_year, "bu", bu, use_pondere
+                            metric_df, selected_year, "typologie", typo, use_pondere
                         )
                         if use_pondere:
                             pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
@@ -5635,11 +5607,11 @@ def main():
                             pure_display = f"{pure_brut:,.0f}€"
 
                         if has_signature_obj:
-                            objective_sig = objective_for_year(selected_year, "signature", "bu", bu)
+                            objective_sig = objective_for_year(selected_year, "signature", "typologie", typo)
                             reste_sig = objective_sig - pure_brut
                             percent_sig = (pure_brut / objective_sig * 100) if objective_sig > 0 else 0.0
-                            bu_year_data.append({
-                                "BU": bu,
+                            typo_year_data.append({
+                                "Typologie": typo,
                                 "Objectif Production": f"{objective:,.0f}€",
                                 "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
                                 "Reste": f"{reste:,.0f}€",
@@ -5651,10 +5623,10 @@ def main():
                             })
                         elif has_envoye_dual_block:
                             avg_prob = calculate_avg_probability_for_sent(
-                                metric_df, selected_year, list(range(1, 13)), "bu", bu
+                                metric_df, selected_year, list(range(1, 13)), "typologie", typo
                             )
                             avg_prob_rate = avg_prob / 100.0
-                            objective_sig = objective_for_year(selected_year, "signature", "bu", bu)
+                            objective_sig = objective_for_year(selected_year, "signature", "typologie", typo)
                             objective_envoi = (
                                 objective_sig / avg_prob_rate if avg_prob_rate > 0 else objective_sig / 0.25
                             )
@@ -5662,8 +5634,8 @@ def main():
                             percent_envoi = (pure_brut / objective_envoi * 100) if objective_envoi > 0 else 0.0
                             reste_pond = objective_sig - pure_pondere
                             percent_pond = (pure_pondere / objective_sig * 100) if objective_sig > 0 else 0.0
-                            bu_year_data.append({
-                                "BU": bu,
+                            typo_year_data.append({
+                                "Typologie": typo,
                                 "Objectif Envoi": f"{objective_envoi:,.0f}€",
                                 "Envoyé Brut": f"{pure_brut:,.0f}€",
                                 "Reste": f"{reste_envoi:,.0f}€",
@@ -5674,8 +5646,8 @@ def main():
                                 "% Pond": f"{percent_pond:.1f}%"
                             })
                         else:
-                            bu_year_data.append({
-                                "BU": bu,
+                            typo_year_data.append({
+                                "Typologie": typo,
                                 "Objectif": f"{objective:,.0f}€",
                                 "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
                                 "Pur": pure_display,
@@ -5683,381 +5655,134 @@ def main():
                                 "%": f"{percent:.1f}%"
                             })
 
-                    st.markdown(render_objectives_table_html(pd.DataFrame(bu_year_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
+                    st.markdown(render_objectives_table_html(pd.DataFrame(typo_year_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
 
-                    # Typologie Table (Year) – collapsible
-                    with st.expander("Par Typologie (Année de production)", expanded=False):
-                        st.markdown("#### Par Typologie (Année de production)")
-                        typo_year_data = []
-                        for typo in EXPECTED_TYPOLOGIES:
-                            # For Maintenance Entretien use only start-of-year (full year total)
-                            if typo == "Maintenance Entretien" and entretien_start_2026 is not None:
-                                realized_total = entretien_start_2026
-                                realized_prev = 0.0
-                            else:
-                                realized_total, realized_prev = calculate_production_amount_with_carryover(
-                                    metric_df, selected_year, year_amount_col, "typologie", typo
-                                )
-                            objective = objective_for_year(selected_year, metric_key, "typologie", typo)
-                            reste = objective - realized_total
-                            percent = (realized_total / objective * 100) if objective > 0 else 0.0
+                # =============================================================
+                # PROJECTION CHARTS + HISTORICAL PUR PAR MOIS
+                # =============================================================
+                st.markdown("---")
+                st.markdown("### 📉 Projection année et Signature par mois")
 
-                            # Pure signature for this year
-                            pure_brut, pure_pondere = calculate_pure_signature_for_year(
-                                metric_df, selected_year, "typologie", typo, use_pondere
-                            )
-                            if use_pondere:
-                                pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
-                            else:
-                                pure_display = f"{pure_brut:,.0f}€"
+                # Available months for selected year (from source_sheet)
+                available_my = get_available_months_from_sheets(metric_df)
+                year_months = [m for m, y in available_my if y == selected_year]
+                current_calendar_month = datetime.now().month
+                m_now = max(year_months) if year_months else min(current_calendar_month, 12)
+                m_now = max(1, m_now)  # ensure at least January for selectors
+                # Average = all ended months in the year before current date (e.g. on March 8: Jan and Feb; on May 15: Jan, Feb, Mar, Apr)
+                avg_months_list = list(range(1, m_now)) if m_now >= 2 else []
+                start_month = avg_months_list[0] if avg_months_list else 1
 
-                            if has_signature_obj:
-                                objective_sig = objective_for_year(selected_year, "signature", "typologie", typo)
-                                reste_sig = objective_sig - pure_brut
-                                percent_sig = (pure_brut / objective_sig * 100) if objective_sig > 0 else 0.0
-                                typo_year_data.append({
-                                    "Typologie": typo,
-                                    "Objectif Production": f"{objective:,.0f}€",
-                                    "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                                    "Reste": f"{reste:,.0f}€",
-                                    "%": f"{percent:.1f}%",
-                                    "Objectif Signature": f"{objective_sig:,.0f}€",
-                                    "Signature": pure_display,
-                                    "Reste Sig": f"{reste_sig:,.0f}€",
-                                    "% Sig": f"{percent_sig:.1f}%"
-                                })
-                            elif has_envoye_dual_block:
-                                avg_prob = calculate_avg_probability_for_sent(
-                                    metric_df, selected_year, list(range(1, 13)), "typologie", typo
-                                )
-                                avg_prob_rate = avg_prob / 100.0
-                                objective_sig = objective_for_year(selected_year, "signature", "typologie", typo)
-                                objective_envoi = (
-                                    objective_sig / avg_prob_rate if avg_prob_rate > 0 else objective_sig / 0.25
-                                )
-                                reste_envoi = objective_envoi - pure_brut
-                                percent_envoi = (pure_brut / objective_envoi * 100) if objective_envoi > 0 else 0.0
-                                reste_pond = objective_sig - pure_pondere
-                                percent_pond = (pure_pondere / objective_sig * 100) if objective_sig > 0 else 0.0
-                                typo_year_data.append({
-                                    "Typologie": typo,
-                                    "Objectif Envoi": f"{objective_envoi:,.0f}€",
-                                    "Envoyé Brut": f"{pure_brut:,.0f}€",
-                                    "Reste": f"{reste_envoi:,.0f}€",
-                                    "%": f"{percent_envoi:.1f}%",
-                                    "Objectif Signature": f"{objective_sig:,.0f}€",
-                                    "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
-                                    "Reste Pond": f"{reste_pond:,.0f}€",
-                                    "% Pond": f"{percent_pond:.1f}%"
-                                })
-                            else:
-                                typo_year_data.append({
-                                    "Typologie": typo,
-                                    "Objectif": f"{objective:,.0f}€",
-                                    "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
-                                    "Pur": pure_display,
-                                    "Reste": f"{reste:,.0f}€",
-                                    "%": f"{percent:.1f}%"
-                                })
+                # Checkbox: when checked = use Pur (signature) for projection; when unchecked = Réalisé (MAINTENANCE BU always uses Pur in BU chart)
+                show_pure_lines = st.checkbox(
+                    "Afficher les courbes de signature (projection basée sur Pur)",
+                    value=False,
+                    key=f"show_pure_projection_{metric_key}",
+                )
 
-                        st.markdown(render_objectives_table_html(pd.DataFrame(typo_year_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
-
-                    # =============================================================
-                    # PROJECTION CHARTS + HISTORICAL PUR PAR MOIS
-                    # =============================================================
-                    st.markdown("---")
-                    st.markdown("### 📉 Projection année et Signature par mois")
-
-                    # Available months for selected year (from source_sheet)
-                    available_my = get_available_months_from_sheets(metric_df)
-                    year_months = [m for m, y in available_my if y == selected_year]
-                    current_calendar_month = datetime.now().month
-                    m_now = max(year_months) if year_months else min(current_calendar_month, 12)
-                    m_now = max(1, m_now)  # ensure at least January for selectors
-                    # Average = all ended months in the year before current date (e.g. on March 8: Jan and Feb; on May 15: Jan, Feb, Mar, Apr)
-                    avg_months_list = list(range(1, m_now)) if m_now >= 2 else []
-                    start_month = avg_months_list[0] if avg_months_list else 1
-
-                    # Checkbox: when checked = use Pur (signature) for projection; when unchecked = Réalisé (MAINTENANCE BU always uses Pur in BU chart)
-                    show_pure_lines = st.checkbox(
-                        "Afficher les courbes de signature (projection basée sur Pur)",
-                        value=False,
-                        key=f"show_pure_projection_{metric_key}",
-                    )
-
-                    # Chart 1: Projection Par BU (AUTRE excluded; MAINTENANCE uses Pur regardless of checkbox)
-                    st.markdown("#### Par Business Unit – Projection")
-                    bu_items_no_autre = [b for b in BU_ORDER if b != "AUTRE"]
-                    fig_bu, produce_bu = plot_objectives_projection_chart(
-                        selected_year,
-                        "bu",
-                        bu_items_no_autre,
-                        metric_df,
-                        m_now,
-                        start_month,
-                        use_pur=show_pure_lines,
-                        use_pondere=use_pondere,
-                        metric_key=metric_key,
-                        has_signature_objective=(has_signature_obj or has_envoye_dual_block),
-                        title_prefix="Par BU",
-                        color_map=BU_COLORS,
-                        entretien_start_2026=entretien_start_2026 if (is_signed and selected_year == 2026) else None,
-                        avg_months_list=avg_months_list,
-                        force_pur_for_maintenance_bu=True,
-                    )
-                    st.plotly_chart(fig_bu, use_container_width=True, key=f"obj_proj_bu_{metric_key}")
-                    st.markdown("**À produire par mois (jusqu'à fin d'année, hors août)**")
-                    bu_headers = ["BU / Global", "Objectif annuel (€)", "Déjà réalisé (€)", "Reste (€)", "À produire/mois (€)"]
-                    bu_table_rows = [
-                        {
-                            bu_headers[0]: r["label"],
-                            bu_headers[1]: f"{r['objectif_annuel']:,.0f}",
-                            bu_headers[2]: f"{r['deja_realise']:,.0f}",
-                            bu_headers[3]: f"{r['reste']:,.0f}",
-                            bu_headers[4]: f"{r['a_produire_par_mois']:,.0f}",
-                        }
-                        for r in produce_bu
-                    ]
-                    bu_row_colors = {r["label"]: BU_COLORS.get(r["label"], "#1a1a1a") for r in produce_bu}
-                    st.markdown(create_colored_table_html(bu_headers, bu_table_rows, row_colors=bu_row_colors), unsafe_allow_html=True)
-
-                    st.markdown("<br>", unsafe_allow_html=True)
-
-                    # Chart 2: Projection Par Typologie
-                    st.markdown("#### Par Typologie – Projection")
-                    fig_typo, produce_typo = plot_objectives_projection_chart(
-                        selected_year,
-                        "typologie",
-                        EXPECTED_TYPOLOGIES,
-                        metric_df,
-                        m_now,
-                        start_month,
-                        use_pur=show_pure_lines,
-                        use_pondere=use_pondere,
-                        metric_key=metric_key,
-                        has_signature_objective=(has_signature_obj or has_envoye_dual_block),
-                        title_prefix="Par Typologie",
-                        color_map={**TYPOLOGIE_COLORS, **{t: TYPOLOGIE_DEFAULT_COLOR for t in EXPECTED_TYPOLOGIES if t not in TYPOLOGIE_COLORS}},
-                        entretien_start_2026=entretien_start_2026 if (is_signed and selected_year == 2026) else None,
-                        avg_months_list=avg_months_list,
-                    )
-                    st.plotly_chart(fig_typo, use_container_width=True, key=f"obj_proj_typo_{metric_key}")
-                    st.markdown("**À produire par mois (jusqu'à fin d'année, hors août)**")
-                    typo_headers = ["Typologie / Global", "Objectif annuel (€)", "Déjà réalisé (€)", "Reste (€)", "À produire/mois (€)"]
-                    typo_table_rows = [
-                        {
-                            typo_headers[0]: r["label"],
-                            typo_headers[1]: f"{r['objectif_annuel']:,.0f}",
-                            typo_headers[2]: f"{r['deja_realise']:,.0f}",
-                            typo_headers[3]: f"{r['reste']:,.0f}",
-                            typo_headers[4]: f"{r['a_produire_par_mois']:,.0f}",
-                        }
-                        for r in produce_typo
-                    ]
-                    typo_row_colors = {
-                        r["label"]: TYPOLOGIE_COLORS.get(r["label"], TYPOLOGIE_DEFAULT_COLOR) if r["label"] != "Global" else "#1a1a1a"
-                        for r in produce_typo
+                # Chart 1: Projection Par BU (AUTRE excluded; MAINTENANCE uses Pur regardless of checkbox)
+                st.markdown("#### Par Business Unit – Projection")
+                bu_items_no_autre = [b for b in BU_ORDER if b != "AUTRE"]
+                fig_bu, produce_bu = plot_objectives_projection_chart(
+                    selected_year,
+                    "bu",
+                    bu_items_no_autre,
+                    metric_df,
+                    m_now,
+                    start_month,
+                    use_pur=show_pure_lines,
+                    use_pondere=use_pondere,
+                    metric_key=metric_key,
+                    has_signature_objective=(has_signature_obj or has_envoye_dual_block),
+                    title_prefix="Par BU",
+                    color_map=BU_COLORS,
+                    entretien_start_2026=entretien_start_2026 if (is_signed and selected_year == 2026) else None,
+                    avg_months_list=avg_months_list,
+                    force_pur_for_maintenance_bu=True,
+                )
+                st.plotly_chart(fig_bu, use_container_width=True, key=f"obj_proj_bu_{metric_key}")
+                st.markdown("**À produire par mois (jusqu'à fin d'année, hors août)**")
+                bu_headers = ["BU / Global", "Objectif annuel (€)", "Déjà réalisé (€)", "Reste (€)", "À produire/mois (€)"]
+                bu_table_rows = [
+                    {
+                        bu_headers[0]: r["label"],
+                        bu_headers[1]: f"{r['objectif_annuel']:,.0f}",
+                        bu_headers[2]: f"{r['deja_realise']:,.0f}",
+                        bu_headers[3]: f"{r['reste']:,.0f}",
+                        bu_headers[4]: f"{r['a_produire_par_mois']:,.0f}",
                     }
-                    st.markdown(create_colored_table_html(typo_headers, typo_table_rows, row_colors=typo_row_colors), unsafe_allow_html=True)
+                    for r in produce_bu
+                ]
+                bu_row_colors = {r["label"]: BU_COLORS.get(r["label"], "#1a1a1a") for r in produce_bu}
+                st.markdown(create_colored_table_html(bu_headers, bu_table_rows, row_colors=bu_row_colors), unsafe_allow_html=True)
 
-                    # Chart 3: Historical Pur by month (Jan–current month) – Par BU and Par Typologie
-                    st.markdown("---")
-                    st.markdown("#### Signature (Pur) par mois – année en cours")
-                    fig_pur_bu = plot_objectives_pur_by_month_chart(
-                        selected_year,
-                        "bu",
-                        BU_ORDER,
-                        metric_df,
-                        m_now,
-                        metric_key=metric_key,
-                        has_signature_objective=(has_signature_obj or has_envoye_dual_block),
-                        title_prefix="Par BU",
-                        color_map=BU_COLORS,
-                    )
-                    st.plotly_chart(fig_pur_bu, use_container_width=True, key=f"obj_pur_bu_{metric_key}")
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    fig_pur_typo = plot_objectives_pur_by_month_chart(
-                        selected_year,
-                        "typologie",
-                        EXPECTED_TYPOLOGIES,
-                        metric_df,
-                        m_now,
-                        metric_key=metric_key,
-                        has_signature_objective=(has_signature_obj or has_envoye_dual_block),
-                        title_prefix="Par Typologie",
-                        color_map={**TYPOLOGIE_COLORS, **{t: TYPOLOGIE_DEFAULT_COLOR for t in EXPECTED_TYPOLOGIES if t not in TYPOLOGIE_COLORS}},
-                    )
-                    st.plotly_chart(fig_pur_typo, use_container_width=True, key=f"obj_pur_typo_{metric_key}")
+                st.markdown("<br>", unsafe_allow_html=True)
 
-    # =========================================================================
-    # TAB 4: DONNÉES DÉTAILLÉES
-    # =========================================================================
-    elif selected_tab_key == "donnees":
-        st.markdown("### Données Détaillées")
-
-        # Filters
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            bu_filter = []
-            if 'cf_bu' in df.columns:
-                bu_filter = st.multiselect(
-                    "Filtrer par BU",
-                    options=df['cf_bu'].unique().tolist(),
-                    default=[],
-                    key="bu_filter"
+                # Chart 2: Projection Par Typologie
+                st.markdown("#### Par Typologie – Projection")
+                fig_typo, produce_typo = plot_objectives_projection_chart(
+                    selected_year,
+                    "typologie",
+                    EXPECTED_TYPOLOGIES,
+                    metric_df,
+                    m_now,
+                    start_month,
+                    use_pur=show_pure_lines,
+                    use_pondere=use_pondere,
+                    metric_key=metric_key,
+                    has_signature_objective=(has_signature_obj or has_envoye_dual_block),
+                    title_prefix="Par Typologie",
+                    color_map={**TYPOLOGIE_COLORS, **{t: TYPOLOGIE_DEFAULT_COLOR for t in EXPECTED_TYPOLOGIES if t not in TYPOLOGIE_COLORS}},
+                    entretien_start_2026=entretien_start_2026 if (is_signed and selected_year == 2026) else None,
+                    avg_months_list=avg_months_list,
                 )
+                st.plotly_chart(fig_typo, use_container_width=True, key=f"obj_proj_typo_{metric_key}")
+                st.markdown("**À produire par mois (jusqu'à fin d'année, hors août)**")
+                typo_headers = ["Typologie / Global", "Objectif annuel (€)", "Déjà réalisé (€)", "Reste (€)", "À produire/mois (€)"]
+                typo_table_rows = [
+                    {
+                        typo_headers[0]: r["label"],
+                        typo_headers[1]: f"{r['objectif_annuel']:,.0f}",
+                        typo_headers[2]: f"{r['deja_realise']:,.0f}",
+                        typo_headers[3]: f"{r['reste']:,.0f}",
+                        typo_headers[4]: f"{r['a_produire_par_mois']:,.0f}",
+                    }
+                    for r in produce_typo
+                ]
+                typo_row_colors = {
+                    r["label"]: TYPOLOGIE_COLORS.get(r["label"], TYPOLOGIE_DEFAULT_COLOR) if r["label"] != "Global" else "#1a1a1a"
+                    for r in produce_typo
+                }
+                st.markdown(create_colored_table_html(typo_headers, typo_table_rows, row_colors=typo_row_colors), unsafe_allow_html=True)
 
-        with col2:
-            # Time period filter
-            time_filter_type = st.radio(
-                "Période",
-                ["Toute l'année", "Par mois", "Par trimestre"],
-                key="time_filter_type",
-                horizontal=True
-            )
-
-            selected_month = None
-            selected_quarter = None
-
-            if time_filter_type == "Par mois":
-                # Get available months from source_sheet
-                available_months = get_available_months_from_sheets(df)
-                if available_months:
-                    # Filter to selected year
-                    year_months = [(m, y) for m, y in available_months if y == selected_year]
-                    if year_months:
-                        # Create display labels
-                        month_labels = [f"{MONTH_MAP.get(m, '')} {y}" for m, y in year_months]
-                        month_options = list(range(len(month_labels)))
-                        selected_idx = st.selectbox(
-                            "Mois",
-                            month_options,
-                            format_func=lambda i: month_labels[i],
-                            key="month_filter"
-                        )
-                        selected_month = year_months[selected_idx][0] if selected_idx < len(year_months) else None
-                    else:
-                        st.info(f"Aucun mois disponible pour {selected_year}")
-                else:
-                    st.info("Aucun mois disponible dans les données")
-
-            elif time_filter_type == "Par trimestre":
-                # Get available quarters from source_sheet
-                available_quarters = get_available_quarters_from_sheets(df)
-                if available_quarters:
-                    # Filter to selected year
-                    year_quarters = [(q, y) for q, y in available_quarters if y == selected_year]
-                    if year_quarters:
-                        # Get unique quarters for the year
-                        unique_quarters = sorted(set(q for q, y in year_quarters))
-                        quarter_labels = [f"Q{q}" for q in unique_quarters]
-                        selected_quarter = st.selectbox(
-                            "Trimestre",
-                            unique_quarters,
-                            format_func=lambda q: f"Q{q}",
-                            key="quarter_filter"
-                        )
-                    else:
-                        st.info(f"Aucun trimestre disponible pour {selected_year}")
-                else:
-                    st.info("Aucun trimestre disponible dans les données")
-
-        with col3:
-            amount_range = st.slider(
-                "Plage de montant (€)",
-                min_value=0,
-                max_value=int(df['amount'].max()) if not df.empty else 100000,
-                value=(0, int(df['amount'].max()) if not df.empty else 100000),
-                key="amount_range"
-            )
-
-        # Apply filters
-        filtered_df = df.copy()
-
-        if bu_filter:
-            filtered_df = filtered_df[filtered_df['cf_bu'].isin(bu_filter)]
-
-        filtered_df = filtered_df[
-            (filtered_df['amount'] >= amount_range[0]) &
-            (filtered_df['amount'] <= amount_range[1])
-        ]
-
-        # Apply time-based filter
-        if time_filter_type == "Par mois" and selected_month is not None:
-            # Filter by month and year from source_sheet
-            month_mask = pd.Series([False] * len(filtered_df), index=filtered_df.index)
-            if 'source_sheet' in filtered_df.columns:
-                for idx, sheet in filtered_df['source_sheet'].items():
-                    month, year = parse_sheet_month_year(str(sheet))
-                    if month == selected_month and year == selected_year:
-                        month_mask[idx] = True
-            filtered_df = filtered_df[month_mask]
-
-        elif time_filter_type == "Par trimestre" and selected_quarter is not None:
-            # Filter by quarter and year from source_sheet
-            # Q1: months 1-3, Q2: months 4-6, Q3: months 7-9, Q4: months 10-12
-            quarter_months = {
-                1: [1, 2, 3],
-                2: [4, 5, 6],
-                3: [7, 8, 9],
-                4: [10, 11, 12]
-            }.get(selected_quarter, [])
-
-            quarter_mask = pd.Series([False] * len(filtered_df), index=filtered_df.index)
-            if 'source_sheet' in filtered_df.columns:
-                for idx, sheet in filtered_df['source_sheet'].items():
-                    month, year = parse_sheet_month_year(str(sheet))
-                    if month in quarter_months and year == selected_year:
-                        quarter_mask[idx] = True
-            filtered_df = filtered_df[quarter_mask]
-
-        # Note: "Toute l'année" doesn't need additional filtering
-
-        # Format date columns for display (DD/MM/YYYY format)
-        display_df = filtered_df.copy()
-        date_cols_to_format = ['date', 'projet_start', 'projet_stop']
-        for col in date_cols_to_format:
-            if col in display_df.columns:
-                # Convert to datetime if not already
-                display_df[col] = pd.to_datetime(display_df[col], errors='coerce')
-                # Format as DD/MM/YYYY, handle NaT as empty string
-                display_df[col] = display_df[col].apply(
-                    lambda x: x.strftime('%d/%m/%Y') if pd.notna(x) else ''
+                # Chart 3: Historical Pur by month (Jan–current month) – Par BU and Par Typologie
+                st.markdown("---")
+                st.markdown("#### Signature (Pur) par mois – année en cours")
+                fig_pur_bu = plot_objectives_pur_by_month_chart(
+                    selected_year,
+                    "bu",
+                    BU_ORDER,
+                    metric_df,
+                    m_now,
+                    metric_key=metric_key,
+                    has_signature_objective=(has_signature_obj or has_envoye_dual_block),
+                    title_prefix="Par BU",
+                    color_map=BU_COLORS,
                 )
-
-        # Display columns
-        display_cols = ['title', 'company_name', 'amount']
-        if show_pondere:
-            display_cols.append('amount_pondere')
-        # Add date columns
-        display_cols.extend(['date', 'projet_start', 'projet_stop'])
-        # Add remaining columns
-        display_cols.extend(['cf_bu', 'cf_typologie_de_devis', 'probability', 'statut'])
-        # Filter to only include columns that exist in the dataframe
-        display_cols = [c for c in display_cols if c in display_df.columns]
-
-        st.dataframe(
-            display_df[display_cols].sort_values('amount', ascending=False),
-            width='stretch',
-            hide_index=True
-        )
-
-        # Export buttons
-        st.markdown("---")
-        col1, col2 = st.columns(2)
-
-        with col1:
-            # Use display_df for CSV export (already has formatted dates)
-            csv = display_df[display_cols].to_csv(index=False)
-            st.download_button(
-                label="📥 Exporter en CSV",
-                data=csv,
-                file_name=f"myrium_export_{selected_year}.csv",
-                mime="text/csv",
-                key="csv_export"
-            )
-
+                st.plotly_chart(fig_pur_bu, use_container_width=True, key=f"obj_pur_bu_{metric_key}")
+                st.markdown("<br>", unsafe_allow_html=True)
+                fig_pur_typo = plot_objectives_pur_by_month_chart(
+                    selected_year,
+                    "typologie",
+                    EXPECTED_TYPOLOGIES,
+                    metric_df,
+                    m_now,
+                    metric_key=metric_key,
+                    has_signature_objective=(has_signature_obj or has_envoye_dual_block),
+                    title_prefix="Par Typologie",
+                    color_map={**TYPOLOGIE_COLORS, **{t: TYPOLOGIE_DEFAULT_COLOR for t in EXPECTED_TYPOLOGIES if t not in TYPOLOGIE_COLORS}},
+                )
+                st.plotly_chart(fig_pur_typo, use_container_width=True, key=f"obj_pur_typo_{metric_key}")
 
 
 if __name__ == "__main__":
