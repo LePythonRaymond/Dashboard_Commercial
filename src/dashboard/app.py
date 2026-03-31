@@ -63,6 +63,7 @@ from src.integrations.google_sheets import GoogleSheetsClient
 from src.integrations.notion_entretien_start import fetch_maintenance_entretien_start_2026
 from src.integrations.entretien_start_store import (
     get_store_path,
+    read_entretien_start_2026_file_snapshot,
     read_entretien_start_2026_from_file,
 )
 from src.processing.objectives import (
@@ -2062,6 +2063,16 @@ def get_months_range(m0: int, m_now: int) -> List[int]:
     return list(range(m0, m_now + 1))
 
 
+def _effective_use_pur_projection_item(
+    use_pur: bool,
+    force_pur_for_maintenance_bu: bool,
+    dimension: str,
+    item: str,
+) -> bool:
+    """Match compute_projection_and_objective.effective_use_pur for chart Y-series and global aggregation."""
+    return use_pur or (force_pur_for_maintenance_bu and dimension == "bu" and item == "MAINTENANCE")
+
+
 def compute_projection_and_objective(
     df: pd.DataFrame,
     year: int,
@@ -2165,7 +2176,7 @@ def plot_objectives_projection_chart(
     Build projection chart: cumulative + projection lines per entity + Global,
     horizontal dotted objective lines. Returns (figure, produce_per_month table rows).
     For MAINTENANCE / Maintenance Entretien in 2026 with entretien_start_2026, cumulative uses only start-of-year.
-    When force_pur_for_maintenance_bu is True, MAINTENANCE (bu) uses Pur for projection regardless of use_pur.
+    When force_pur_for_maintenance_bu is True, MAINTENANCE (bu) uses Pur for projection even if use_pur is False.
     """
     months = MONTH_NAMES
     fig = go.Figure()
@@ -2187,10 +2198,11 @@ def plot_objectives_projection_chart(
         to_produce = rec["to_produce_per_month"]
 
         # Y values: Jan..M_now = cumulative at each month; M_now+1..Dec = projected cumulative
-        # MAINTENANCE BU uses Pur for this chart even when checkbox unchecked
-        use_pur_this = use_pur or (dimension == "bu" and item == "MAINTENANCE")
+        effective_use_pur = _effective_use_pur_projection_item(
+            use_pur, force_pur_for_maintenance_bu, dimension, item
+        )
         use_entretien_only = (
-            not use_pur_this
+            not effective_use_pur
             and year == 2026
             and entretien_start_2026 is not None
             and (
@@ -2205,7 +2217,7 @@ def plot_objectives_projection_chart(
                 if use_entretien_only:
                     val = (entretien_start_2026 / 11.0) if month_num != 8 else 0.0
                     cum += val
-                elif use_pur_this:
+                elif effective_use_pur:
                     brut, pond = calculate_pure_signature_for_month(df, year, month_num, dimension, item, use_pondere)
                     cum += (pond if use_pondere else brut)
                 else:
@@ -2244,10 +2256,11 @@ def plot_objectives_projection_chart(
     avg_months = avg_months_list if avg_months_list is not None else get_months_range(start_month, m_now)
     n_avg = len(avg_months)
     for month_num in range(1, m_now + 1):
-        # Per-item: MAINTENANCE BU uses Pur when force_pur_for_maintenance_bu
         val = 0.0
         for item in items:
-            use_pur_item = use_pur or (force_pur_for_maintenance_bu and dimension == "bu" and item == "MAINTENANCE")
+            use_pur_item = _effective_use_pur_projection_item(
+                use_pur, force_pur_for_maintenance_bu, dimension, item
+            )
             if use_pur_item:
                 brut, pond = calculate_pure_signature_for_month(df, year, month_num, dimension, item, use_pondere)
                 val += (pond if use_pondere else brut)
@@ -2271,7 +2284,16 @@ def plot_objectives_projection_chart(
     remaining_list, remaining_count = get_remaining_months_excl_aug(m_now)
     global_avg = (global_sum_avg / n_avg) if n_avg > 0 else 0.0
     global_projected = global_cum + global_avg * remaining_count
-    global_obj_metric = "signature" if ((use_pur or force_pur_for_maintenance_bu) and has_signature_objective and year in OBJECTIVES and "signature" in OBJECTIVES[year]) else metric_key
+    global_obj_metric = (
+        "signature"
+        if (
+            use_pur
+            and has_signature_objective
+            and year in OBJECTIVES
+            and "signature" in OBJECTIVES[year]
+        )
+        else metric_key
+    )
     global_objective = sum(objective_for_year(year, global_obj_metric, dimension, item) for item in items)
     global_to_produce = (global_objective - global_cum) / remaining_count if remaining_count > 0 else 0.0
 
@@ -2281,7 +2303,9 @@ def plot_objectives_projection_chart(
         if month_num <= m_now:
             total = 0.0
             for item in items:
-                use_pur_item = use_pur or (force_pur_for_maintenance_bu and dimension == "bu" and item == "MAINTENANCE")
+                use_pur_item = _effective_use_pur_projection_item(
+                    use_pur, force_pur_for_maintenance_bu, dimension, item
+                )
                 if use_pur_item:
                     brut, pond = calculate_pure_signature_for_month(df, year, month_num, dimension, item, use_pondere)
                     total += (pond if use_pondere else brut)
@@ -5658,131 +5682,230 @@ def main():
                     st.markdown(render_objectives_table_html(pd.DataFrame(typo_year_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
 
                 # =============================================================
-                # PROJECTION CHARTS + HISTORICAL PUR PAR MOIS
+                # PROJECTION CHARTS + SUIVI SIGNATURE
                 # =============================================================
                 st.markdown("---")
-                st.markdown("### 📉 Projection année et Signature par mois")
+                st.markdown("### Projection et suivi")
 
-                # Available months for selected year (from source_sheet)
                 available_my = get_available_months_from_sheets(metric_df)
                 year_months = [m for m, y in available_my if y == selected_year]
                 current_calendar_month = datetime.now().month
                 m_now = max(year_months) if year_months else min(current_calendar_month, 12)
-                m_now = max(1, m_now)  # ensure at least January for selectors
-                # Average = all ended months in the year before current date (e.g. on March 8: Jan and Feb; on May 15: Jan, Feb, Mar, Apr)
+                m_now = max(1, m_now)
                 avg_months_list = list(range(1, m_now)) if m_now >= 2 else []
                 start_month = avg_months_list[0] if avg_months_list else 1
 
-                # Checkbox: when checked = use Pur (signature) for projection; when unchecked = Réalisé (MAINTENANCE BU always uses Pur in BU chart)
-                show_pure_lines = st.checkbox(
-                    "Afficher les courbes de signature (projection basée sur Pur)",
-                    value=False,
-                    key=f"show_pure_projection_{metric_key}",
-                )
-
-                # Chart 1: Projection Par BU (AUTRE excluded; MAINTENANCE uses Pur regardless of checkbox)
-                st.markdown("#### Par Business Unit – Projection")
-                bu_items_no_autre = [b for b in BU_ORDER if b != "AUTRE"]
-                fig_bu, produce_bu = plot_objectives_projection_chart(
-                    selected_year,
-                    "bu",
-                    bu_items_no_autre,
-                    metric_df,
-                    m_now,
-                    start_month,
-                    use_pur=show_pure_lines,
-                    use_pondere=use_pondere,
-                    metric_key=metric_key,
-                    has_signature_objective=(has_signature_obj or has_envoye_dual_block),
-                    title_prefix="Par BU",
-                    color_map=BU_COLORS,
-                    entretien_start_2026=entretien_start_2026 if (is_signed and selected_year == 2026) else None,
-                    avg_months_list=avg_months_list,
-                    force_pur_for_maintenance_bu=True,
-                )
-                st.plotly_chart(fig_bu, use_container_width=True, key=f"obj_proj_bu_{metric_key}")
-                st.markdown("**À produire par mois (jusqu'à fin d'année, hors août)**")
-                bu_headers = ["BU / Global", "Objectif annuel (€)", "Déjà réalisé (€)", "Reste (€)", "À produire/mois (€)"]
-                bu_table_rows = [
-                    {
-                        bu_headers[0]: r["label"],
-                        bu_headers[1]: f"{r['objectif_annuel']:,.0f}",
-                        bu_headers[2]: f"{r['deja_realise']:,.0f}",
-                        bu_headers[3]: f"{r['reste']:,.0f}",
-                        bu_headers[4]: f"{r['a_produire_par_mois']:,.0f}",
-                    }
-                    for r in produce_bu
-                ]
-                bu_row_colors = {r["label"]: BU_COLORS.get(r["label"], "#1a1a1a") for r in produce_bu}
-                st.markdown(create_colored_table_html(bu_headers, bu_table_rows, row_colors=bu_row_colors), unsafe_allow_html=True)
-
-                st.markdown("<br>", unsafe_allow_html=True)
-
-                # Chart 2: Projection Par Typologie
-                st.markdown("#### Par Typologie – Projection")
-                fig_typo, produce_typo = plot_objectives_projection_chart(
-                    selected_year,
-                    "typologie",
-                    EXPECTED_TYPOLOGIES,
-                    metric_df,
-                    m_now,
-                    start_month,
-                    use_pur=show_pure_lines,
-                    use_pondere=use_pondere,
-                    metric_key=metric_key,
-                    has_signature_objective=(has_signature_obj or has_envoye_dual_block),
-                    title_prefix="Par Typologie",
-                    color_map={**TYPOLOGIE_COLORS, **{t: TYPOLOGIE_DEFAULT_COLOR for t in EXPECTED_TYPOLOGIES if t not in TYPOLOGIE_COLORS}},
-                    entretien_start_2026=entretien_start_2026 if (is_signed and selected_year == 2026) else None,
-                    avg_months_list=avg_months_list,
-                )
-                st.plotly_chart(fig_typo, use_container_width=True, key=f"obj_proj_typo_{metric_key}")
-                st.markdown("**À produire par mois (jusqu'à fin d'année, hors août)**")
-                typo_headers = ["Typologie / Global", "Objectif annuel (€)", "Déjà réalisé (€)", "Reste (€)", "À produire/mois (€)"]
-                typo_table_rows = [
-                    {
-                        typo_headers[0]: r["label"],
-                        typo_headers[1]: f"{r['objectif_annuel']:,.0f}",
-                        typo_headers[2]: f"{r['deja_realise']:,.0f}",
-                        typo_headers[3]: f"{r['reste']:,.0f}",
-                        typo_headers[4]: f"{r['a_produire_par_mois']:,.0f}",
-                    }
-                    for r in produce_typo
-                ]
-                typo_row_colors = {
-                    r["label"]: TYPOLOGIE_COLORS.get(r["label"], TYPOLOGIE_DEFAULT_COLOR) if r["label"] != "Global" else "#1a1a1a"
-                    for r in produce_typo
+                _proj_entretien = entretien_start_2026 if (is_signed and selected_year == 2026) else None
+                _proj_has_sig = has_signature_obj or has_envoye_dual_block
+                _proj_typo_colors = {
+                    **TYPOLOGIE_COLORS,
+                    **{t: TYPOLOGIE_DEFAULT_COLOR for t in EXPECTED_TYPOLOGIES if t not in TYPOLOGIE_COLORS},
                 }
-                st.markdown(create_colored_table_html(typo_headers, typo_table_rows, row_colors=typo_row_colors), unsafe_allow_html=True)
+                bu_items_no_autre = [b for b in BU_ORDER if b != "AUTRE"]
+                bu_headers = ["BU / Global", "Objectif annuel (€)", "Déjà réalisé (€)", "Reste (€)", "À produire/mois (€)"]
+                typo_headers = ["Typologie / Global", "Objectif annuel (€)", "Déjà réalisé (€)", "Reste (€)", "À produire/mois (€)"]
 
-                # Chart 3: Historical Pur by month (Jan–current month) – Par BU and Par Typologie
-                st.markdown("---")
-                st.markdown("#### Signature (Pur) par mois – année en cours")
-                fig_pur_bu = plot_objectives_pur_by_month_chart(
-                    selected_year,
-                    "bu",
-                    BU_ORDER,
-                    metric_df,
-                    m_now,
-                    metric_key=metric_key,
-                    has_signature_objective=(has_signature_obj or has_envoye_dual_block),
-                    title_prefix="Par BU",
-                    color_map=BU_COLORS,
-                )
-                st.plotly_chart(fig_pur_bu, use_container_width=True, key=f"obj_pur_bu_{metric_key}")
-                st.markdown("<br>", unsafe_allow_html=True)
-                fig_pur_typo = plot_objectives_pur_by_month_chart(
-                    selected_year,
-                    "typologie",
-                    EXPECTED_TYPOLOGIES,
-                    metric_df,
-                    m_now,
-                    metric_key=metric_key,
-                    has_signature_objective=(has_signature_obj or has_envoye_dual_block),
-                    title_prefix="Par Typologie",
-                    color_map={**TYPOLOGIE_COLORS, **{t: TYPOLOGIE_DEFAULT_COLOR for t in EXPECTED_TYPOLOGIES if t not in TYPOLOGIE_COLORS}},
-                )
-                st.plotly_chart(fig_pur_typo, use_container_width=True, key=f"obj_pur_typo_{metric_key}")
+                tab_proj_prod, tab_proj_sig = st.tabs(["Réalisé (production)", "Signature (Pur)"])
+
+                with tab_proj_prod:
+                    st.markdown("#### Par Business Unit – Projection")
+                    if _proj_entretien is not None:
+                        _snap = read_entretien_start_2026_file_snapshot(get_store_path(MYRIUM_ROOT))
+                        if _snap is not None:
+                            _, _iso = _snap
+                            st.caption(
+                                f"Maintenance Entretien (début d'année) : **{_proj_entretien:,.0f} €** — "
+                                f"fichier pipeline `data/entretien_start_2026.json` mis à jour **{_iso}** "
+                                "(alimenté chaque run quotidien depuis Notion)."
+                            )
+                        else:
+                            st.caption(
+                                f"Maintenance Entretien (début d'année) : **{_proj_entretien:,.0f} €** — "
+                                "source : cache Notion du dashboard (TTL 5 min) ou secret `MAINTENANCE_ENTRETIEN_START_2026`."
+                            )
+                    fig_bu_p, produce_bu_p = plot_objectives_projection_chart(
+                        selected_year,
+                        "bu",
+                        bu_items_no_autre,
+                        metric_df,
+                        m_now,
+                        start_month,
+                        use_pur=False,
+                        use_pondere=use_pondere,
+                        metric_key=metric_key,
+                        has_signature_objective=_proj_has_sig,
+                        title_prefix="Par BU",
+                        color_map=BU_COLORS,
+                        entretien_start_2026=_proj_entretien,
+                        avg_months_list=avg_months_list,
+                        force_pur_for_maintenance_bu=False,
+                    )
+                    st.plotly_chart(fig_bu_p, use_container_width=True, key=f"obj_proj_bu_prod_{metric_key}")
+                    st.markdown("**À produire par mois (jusqu'à fin d'année, hors août)**")
+                    bu_table_rows_p = [
+                        {
+                            bu_headers[0]: r["label"],
+                            bu_headers[1]: f"{r['objectif_annuel']:,.0f}",
+                            bu_headers[2]: f"{r['deja_realise']:,.0f}",
+                            bu_headers[3]: f"{r['reste']:,.0f}",
+                            bu_headers[4]: f"{r['a_produire_par_mois']:,.0f}",
+                        }
+                        for r in produce_bu_p
+                    ]
+                    bu_row_colors_p = {r["label"]: BU_COLORS.get(r["label"], "#1a1a1a") for r in produce_bu_p}
+                    st.markdown(
+                        create_colored_table_html(bu_headers, bu_table_rows_p, row_colors=bu_row_colors_p),
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    with st.expander("Par typologie – Projection (production)", expanded=False):
+                        st.markdown("#### Par Typologie – Projection")
+                        fig_typo_p, produce_typo_p = plot_objectives_projection_chart(
+                            selected_year,
+                            "typologie",
+                            EXPECTED_TYPOLOGIES,
+                            metric_df,
+                            m_now,
+                            start_month,
+                            use_pur=False,
+                            use_pondere=use_pondere,
+                            metric_key=metric_key,
+                            has_signature_objective=_proj_has_sig,
+                            title_prefix="Par Typologie",
+                            color_map=_proj_typo_colors,
+                            entretien_start_2026=_proj_entretien,
+                            avg_months_list=avg_months_list,
+                            force_pur_for_maintenance_bu=False,
+                        )
+                        st.plotly_chart(fig_typo_p, use_container_width=True, key=f"obj_proj_typo_prod_{metric_key}")
+                        st.markdown("**À produire par mois (jusqu'à fin d'année, hors août)**")
+                        typo_table_rows_p = [
+                            {
+                                typo_headers[0]: r["label"],
+                                typo_headers[1]: f"{r['objectif_annuel']:,.0f}",
+                                typo_headers[2]: f"{r['deja_realise']:,.0f}",
+                                typo_headers[3]: f"{r['reste']:,.0f}",
+                                typo_headers[4]: f"{r['a_produire_par_mois']:,.0f}",
+                            }
+                            for r in produce_typo_p
+                        ]
+                        typo_row_colors_p = {
+                            r["label"]: TYPOLOGIE_COLORS.get(r["label"], TYPOLOGIE_DEFAULT_COLOR)
+                            if r["label"] != "Global"
+                            else "#1a1a1a"
+                            for r in produce_typo_p
+                        }
+                        st.markdown(
+                            create_colored_table_html(typo_headers, typo_table_rows_p, row_colors=typo_row_colors_p),
+                            unsafe_allow_html=True,
+                        )
+
+                with tab_proj_sig:
+                    st.markdown("#### Par Business Unit – Projection")
+                    fig_bu_s, produce_bu_s = plot_objectives_projection_chart(
+                        selected_year,
+                        "bu",
+                        bu_items_no_autre,
+                        metric_df,
+                        m_now,
+                        start_month,
+                        use_pur=True,
+                        use_pondere=use_pondere,
+                        metric_key=metric_key,
+                        has_signature_objective=_proj_has_sig,
+                        title_prefix="Par BU",
+                        color_map=BU_COLORS,
+                        entretien_start_2026=_proj_entretien,
+                        avg_months_list=avg_months_list,
+                        force_pur_for_maintenance_bu=False,
+                    )
+                    st.plotly_chart(fig_bu_s, use_container_width=True, key=f"obj_proj_bu_sig_{metric_key}")
+                    st.markdown("**À produire par mois (jusqu'à fin d'année, hors août)**")
+                    bu_table_rows_s = [
+                        {
+                            bu_headers[0]: r["label"],
+                            bu_headers[1]: f"{r['objectif_annuel']:,.0f}",
+                            bu_headers[2]: f"{r['deja_realise']:,.0f}",
+                            bu_headers[3]: f"{r['reste']:,.0f}",
+                            bu_headers[4]: f"{r['a_produire_par_mois']:,.0f}",
+                        }
+                        for r in produce_bu_s
+                    ]
+                    bu_row_colors_s = {r["label"]: BU_COLORS.get(r["label"], "#1a1a1a") for r in produce_bu_s}
+                    st.markdown(
+                        create_colored_table_html(bu_headers, bu_table_rows_s, row_colors=bu_row_colors_s),
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    with st.expander("Par typologie – Projection (signature)", expanded=False):
+                        st.markdown("#### Par Typologie – Projection")
+                        fig_typo_s, produce_typo_s = plot_objectives_projection_chart(
+                            selected_year,
+                            "typologie",
+                            EXPECTED_TYPOLOGIES,
+                            metric_df,
+                            m_now,
+                            start_month,
+                            use_pur=True,
+                            use_pondere=use_pondere,
+                            metric_key=metric_key,
+                            has_signature_objective=_proj_has_sig,
+                            title_prefix="Par Typologie",
+                            color_map=_proj_typo_colors,
+                            entretien_start_2026=_proj_entretien,
+                            avg_months_list=avg_months_list,
+                            force_pur_for_maintenance_bu=False,
+                        )
+                        st.plotly_chart(fig_typo_s, use_container_width=True, key=f"obj_proj_typo_sig_{metric_key}")
+                        st.markdown("**À produire par mois (jusqu'à fin d'année, hors août)**")
+                        typo_table_rows_s = [
+                            {
+                                typo_headers[0]: r["label"],
+                                typo_headers[1]: f"{r['objectif_annuel']:,.0f}",
+                                typo_headers[2]: f"{r['deja_realise']:,.0f}",
+                                typo_headers[3]: f"{r['reste']:,.0f}",
+                                typo_headers[4]: f"{r['a_produire_par_mois']:,.0f}",
+                            }
+                            for r in produce_typo_s
+                        ]
+                        typo_row_colors_s = {
+                            r["label"]: TYPOLOGIE_COLORS.get(r["label"], TYPOLOGIE_DEFAULT_COLOR)
+                            if r["label"] != "Global"
+                            else "#1a1a1a"
+                            for r in produce_typo_s
+                        }
+                        st.markdown(
+                            create_colored_table_html(typo_headers, typo_table_rows_s, row_colors=typo_row_colors_s),
+                            unsafe_allow_html=True,
+                        )
+                    st.markdown("---")
+                    st.markdown("#### Suivi signature de l'année")
+                    fig_pur_bu = plot_objectives_pur_by_month_chart(
+                        selected_year,
+                        "bu",
+                        BU_ORDER,
+                        metric_df,
+                        m_now,
+                        metric_key=metric_key,
+                        has_signature_objective=_proj_has_sig,
+                        title_prefix="Par BU",
+                        color_map=BU_COLORS,
+                    )
+                    st.plotly_chart(fig_pur_bu, use_container_width=True, key=f"obj_pur_bu_sig_{metric_key}")
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    with st.expander("Par typologie – Suivi signature", expanded=False):
+                        fig_pur_typo = plot_objectives_pur_by_month_chart(
+                            selected_year,
+                            "typologie",
+                            EXPECTED_TYPOLOGIES,
+                            metric_df,
+                            m_now,
+                            metric_key=metric_key,
+                            has_signature_objective=_proj_has_sig,
+                            title_prefix="Par Typologie",
+                            color_map=_proj_typo_colors,
+                        )
+                        st.plotly_chart(fig_pur_typo, use_container_width=True, key=f"obj_pur_typo_sig_{metric_key}")
 
 
 if __name__ == "__main__":

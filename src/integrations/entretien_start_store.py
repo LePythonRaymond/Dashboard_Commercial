@@ -9,7 +9,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 from src.integrations.notion_entretien_start import fetch_maintenance_entretien_start_2026
 
@@ -56,6 +56,28 @@ def fetch_and_write_entretien_start_2026(
     }
     store_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return value
+
+
+def read_entretien_start_2026_file_snapshot(store_path: Path) -> Optional[Tuple[float, str]]:
+    """
+    Read value and updated_at from the JSON store if the file exists.
+
+    Does not apply STALE_HOURS — for dashboard display of pipeline freshness only.
+    """
+    if not store_path.exists():
+        return None
+    try:
+        data = json.loads(store_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    value = data.get("value")
+    updated_at_str = data.get("updated_at")
+    if value is None or not updated_at_str:
+        return None
+    try:
+        return (float(value), str(updated_at_str))
+    except (TypeError, ValueError):
+        return None
 
 
 def read_entretien_start_2026_from_file(store_path: Path) -> Optional[float]:

@@ -379,7 +379,7 @@ myrium/
 - **Time Filtering**: Filter by Month/Quarter based on source sheet
 - **Date Columns**: Full visibility of proposal dates
 - **Clickable Project Lists**: KPI cards display project counts with clickable "🔎 Voir projets" buttons that open large modal dialogs showing detailed project lists with Furious CRM links
-- **Objectifs Signé (Production vs Signature)**: For the Signé view, the Objectifs tab shows two blocks: **Objectif Production** vs **Réalisé** (signed-to-produce in the period) and **Objectif Signature** vs **Signature** (ex-Pur: amount signed in the period). Objectives data: `signe` = production (Réalisé), `signature` = signature (Signé). **Maintenance Entretien – Début 2026**: value is fetched server-side from Notion (sum of "Total HT Cette année" in the data source when `NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID` and `NOTION_API_KEY` are set), else from secret `MAINTENANCE_ENTRETIEN_START_2026`; this amount is **included in Réalisé** for MAINTENANCE and Maintenance Entretien (already signed portfolio).
+- **Objectifs Signé (Production vs Signature)**: For the Signé view, the Objectifs tab shows two blocks: **Objectif Production** vs **Réalisé** (signed-to-produce in the period) and **Objectif Signature** vs **Signature** (ex-Pur: amount signed in the period). Objectives data: `signe` = production (Réalisé), `signature` = signature (Signé). **Maintenance Entretien – Début 2026**: value is fetched server-side from Notion (sum of "Total HT Cette année" in the data source when `NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID` and `NOTION_API_KEY` are set), else from secret `MAINTENANCE_ENTRETIEN_START_2026`; this amount is **included in Réalisé** for MAINTENANCE and Maintenance Entretien (already signed portfolio). **Objectifs tab end section (March 2026)**: projection charts (year total from average over ended months, Réalisé/Pur toggle), AUTRE excluded and MAINTENANCE on Pur in BU chart; third chart "Signature (Pur) par mois" with monthly objectives; typologie tables in collapsible expanders; "À produire par mois" tables with BU/Typologie row colors (see §18.10).
 - **Optimization**: Lazy loading, caching, efficient multi-sheet reading
 - **PDF Removal**: Export feature removed for performance/simplicity
 
@@ -804,6 +804,24 @@ See original documentation for details on performance, security, error handling,
 
 **Tests**: `tests/test_objectives_2026.py` updated for new production (signe) values and signature metric (BU totals, CONCEPTION typologie prorate sum); `test_2026_has_signature_metric`; `test_2026_envoye_equals_signe` replaced by 2026 signe/signature structure check.
 
+### 18.10 Objectifs tab: projection charts, Pur-by-month, typo expanders, colors (March 2026)
+
+**Enhancement**: Overhaul of the Objectifs tab (Signé/Envoyé) end section: projection charts replace the former monthly line charts; third chart and tables use consistent BU/Typologie coloring.
+
+**Projection charts (Par BU and Par Typologie)**  
+- Two charts show **projected year total** (11-month, August excluded) from cumulative so far + average over **all ended months** in the year (no month selector). Checkbox "Afficher les courbes de signature" switches projection metric: Réalisé (production) vs Pur (signature).  
+- **Par BU**: AUTRE excluded from chart and "À produire par mois" table. MAINTENANCE always uses **Pur** (numbers and signature objective) on this chart, regardless of checkbox.  
+- Helpers in `src/dashboard/app.py`: `get_remaining_months_excl_aug`, `get_months_range`, `compute_projection_and_objective` (supports `avg_months_list`, `force_pur_for_maintenance`), `plot_objectives_projection_chart` (optional `avg_months_list`, `force_pur_for_maintenance_bu`).  
+- Table under each chart: "À produire par mois (jusqu'à fin d'année, hors août)" with colored rows via `create_colored_table_html` using `BU_COLORS` (BU table) and `TYPOLOGIE_COLORS` (Typologie table), aligned with Vue Globale.
+
+**Third chart: Signature (Pur) par mois**  
+- Two charts (Par BU, Par Typologie): Pur amount per month Jan–current month only; **objectives by month** (dotted line from `objective_for_month`), not flat annual.
+
+**Typologie tables**  
+- The three typologie tables (Période, Trimestre, Année) are inside `st.expander(..., expanded=False)`; BU tables unchanged.
+
+**Tests**: `tests/test_dashboard_objectives_projection.py` (remaining months excl. Aug, months range, projection math, to_produce_per_month).
+
 ---
 
 ## 17. Conclusion
@@ -819,7 +837,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.35
-**Last Updated**: February 2026
+**Document Version**: 1.36
+**Last Updated**: March 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System
