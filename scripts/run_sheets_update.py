@@ -21,6 +21,7 @@ import json
 import logging
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -36,6 +37,7 @@ from src.integrations.google_sheets import GoogleSheetsClient
 from src.integrations.entretien_start_store import (
     fetch_and_write_entretien_start_2026,
     get_store_path,
+    read_entretien_start_2026_file_snapshot,
 )
 
 
@@ -132,11 +134,12 @@ class SheetsUpdateRunner:
 
             # Step 6: Write to Google Sheets
             logger.info("\n--- Step 6: Writing to Google Sheets ---")
+            current_year = datetime.now().year
+            sheets_client: Optional[GoogleSheetsClient] = None
             if self.dry_run:
                 self._log_step("google_sheets", "skipped", {"reason": "dry_run"})
             else:
                 sheets_client = GoogleSheetsClient()
-                current_year = datetime.now().year
 
                 # Snapshot -> stable worksheet in 'etat' spreadsheet
                 sheets_client.write_view(views.snapshot, view_type="etat", year=current_year)
@@ -167,7 +170,25 @@ class SheetsUpdateRunner:
                         store_path = get_store_path(PROJECT_ROOT)
                         value = fetch_and_write_entretien_start_2026(api_key, ds_id, store_path)
                         if value is not None:
-                            self._log_step("entretien_start_2026", "success", {"value": value, "path": str(store_path)})
+                            details = {"value": value, "path": str(store_path)}
+                            if sheets_client is not None and current_year == 2026:
+                                try:
+                                    snap = read_entretien_start_2026_file_snapshot(store_path)
+                                    updated_at = (
+                                        snap[1]
+                                        if snap
+                                        else datetime.utcnow().isoformat() + "Z"
+                                    )
+                                    sheets_client.write_entretien_start_parameter(
+                                        current_year, float(value), updated_at
+                                    )
+                                    details["parametres_sheet"] = "written"
+                                except Exception as e_sheet:
+                                    logger.warning(
+                                        "Entretien Paramètres sheet write failed: %s", e_sheet
+                                    )
+                                    details["parametres_sheet_error"] = str(e_sheet)
+                            self._log_step("entretien_start_2026", "success", details)
                         else:
                             self._log_step("entretien_start_2026", "skipped", {"reason": "Notion fetch returned None"})
                     except Exception as e:

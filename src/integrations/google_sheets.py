@@ -8,7 +8,7 @@ with OAuth 2.0 authentication.
 import gspread
 import gspread.exceptions
 import pandas as pd
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 import traceback
 import json
@@ -19,6 +19,11 @@ from gspread.utils import ValueRenderOption
 from config.settings import settings
 from src.processing.views import ViewResult, ViewsOutput
 from src.processing.cleaner import DataCleaner
+from src.integrations.entretien_parametres_sheet import (
+    ENTRETIEN_PARAMETRES_WORKSHEET,
+    ENTRETIEN_PARAM_KEY,
+    parse_entretien_parametres_rows,
+)
 
 
 class GoogleSheetsClient:
@@ -322,6 +327,50 @@ class GoogleSheetsClient:
             print(f"  Created new worksheet: {name}")
 
         return worksheet
+
+    def write_entretien_start_parameter(self, year: int, value: float, updated_at_iso: str) -> None:
+        """
+        Write Maintenance Entretien start-of-year to the état spreadsheet, worksheet Paramètres only.
+
+        Clears and overwrites that worksheet; does not touch État actuel or other tabs.
+        """
+        spreadsheet_id = settings.get_spreadsheet_id("etat", year)
+        if not spreadsheet_id:
+            spreadsheet_name = f"Etat {year}"
+            spreadsheet = self.get_or_create_spreadsheet(spreadsheet_name)
+        else:
+            spreadsheet = self.get_spreadsheet(spreadsheet_id)
+
+        worksheet = self.get_or_create_worksheet(
+            spreadsheet, ENTRETIEN_PARAMETRES_WORKSHEET, rows=100, cols=10
+        )
+        worksheet.clear()
+        body: List[List[Any]] = [
+            ["Clé", "Valeur (€)", "Mis à jour (UTC)"],
+            [ENTRETIEN_PARAM_KEY, value, updated_at_iso],
+        ]
+        worksheet.update(range_name="A1:C2", values=body, value_input_option="USER_ENTERED")
+
+    def read_entretien_start_parameter(self, year: int) -> Optional[Tuple[float, str]]:
+        """
+        Read Maintenance Entretien start from Paramètres in the état spreadsheet for ``year``.
+
+        Returns:
+            (value, updated_at_iso) or None if missing / invalid.
+        """
+        try:
+            spreadsheet_id = settings.get_spreadsheet_id("etat", year)
+            if not spreadsheet_id:
+                return None
+            spreadsheet = self.get_spreadsheet(spreadsheet_id)
+            try:
+                worksheet = spreadsheet.worksheet(ENTRETIEN_PARAMETRES_WORKSHEET)
+            except gspread.WorksheetNotFound:
+                return None
+            rows = worksheet.get("A1:C2")
+            return parse_entretien_parametres_rows(rows)
+        except Exception:
+            return None
 
     def _prepare_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """

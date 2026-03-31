@@ -10,7 +10,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from datetime import datetime
 import re
 import sys
@@ -63,9 +63,28 @@ from src.integrations.google_sheets import GoogleSheetsClient
 from src.integrations.notion_entretien_start import fetch_maintenance_entretien_start_2026
 from src.integrations.entretien_start_store import (
     get_store_path,
-    read_entretien_start_2026_file_snapshot,
     read_entretien_start_2026_from_file,
 )
+
+try:
+    from src.integrations.entretien_start_store import read_entretien_start_2026_file_snapshot
+except ImportError:
+    # Deployments may ship an older entretien_start_store without this helper.
+    def read_entretien_start_2026_file_snapshot(store_path: Path) -> Optional[Tuple[float, str]]:
+        if not store_path.exists():
+            return None
+        try:
+            data = json.loads(store_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        value = data.get("value")
+        updated_at_str = data.get("updated_at")
+        if value is None or not updated_at_str:
+            return None
+        try:
+            return (float(value), str(updated_at_str))
+        except (TypeError, ValueError):
+            return None
 from src.processing.objectives import (
     objective_for_month, objective_for_quarter, objective_for_year,
     get_quarter_for_month, quarter_start_dates, quarter_end_dates, get_all_objectives_for_dimension,
@@ -4549,12 +4568,32 @@ def _get_entretien_start_2026_from_notion(_api_key: str, _datasource_id: str):
         return None
 
 
-def _get_entretien_start_2026_value() -> Optional[float]:
-    """Return Maintenance Entretien start-of-year 2026 from file (daily pipeline), then Notion or secret."""
+class EntretienStart2026Resolution(NamedTuple):
+    value: float
+    source: str
+    updated_at: str
+
+
+def _resolve_entretien_start_2026() -> Optional[EntretienStart2026Resolution]:
+    """
+    Maintenance Entretien début 2026: Google Sheets (Paramètres, état 2026), then JSON file,
+    Notion cache, secret.
+    """
     store_path = get_store_path(MYRIUM_ROOT)
+    sheets_pair = get_sheets_client().read_entretien_start_parameter(2026)
+    if sheets_pair is not None:
+        val, iso = sheets_pair
+        return EntretienStart2026Resolution(float(val), "sheets", iso)
+
     from_file = read_entretien_start_2026_from_file(store_path)
     if from_file is not None:
-        return float(from_file)
+        snap = read_entretien_start_2026_file_snapshot(store_path)
+        return EntretienStart2026Resolution(
+            float(from_file),
+            "file",
+            snap[1] if snap else "",
+        )
+
     api_key = get_secret("NOTION_API_KEY", "")
     ds_id = (
         get_secret("NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID", "").strip()
@@ -4562,14 +4601,22 @@ def _get_entretien_start_2026_value() -> Optional[float]:
     )
     from_notion = _get_entretien_start_2026_from_notion(api_key, ds_id) if (api_key and ds_id) else None
     if from_notion is not None:
-        return float(from_notion)
+        return EntretienStart2026Resolution(float(from_notion), "notion", "")
+
     fallback = get_secret("MAINTENANCE_ENTRETIEN_START_2026", "").strip()
     if not fallback:
         return None
     try:
-        return float(fallback.replace(",", ".").replace(" ", ""))
+        v = float(fallback.replace(",", ".").replace(" ", ""))
     except ValueError:
         return None
+    return EntretienStart2026Resolution(v, "secret", "")
+
+
+def _get_entretien_start_2026_value() -> Optional[float]:
+    """Return Maintenance Entretien start-of-year 2026 (same resolution order as _resolve_entretien_start_2026)."""
+    resolved = _resolve_entretien_start_2026()
+    return resolved.value if resolved else None
 
 
 # =============================================================================
@@ -5126,20 +5173,29 @@ def main():
                 selected_period_idx = all_periods[period_options.index(selected_period_str)]
                 selected_period_label = get_accounting_period_label(selected_period_idx)
 
-                # Maintenance Entretien – début 2026: from Notion (sum "Total HT Cette année") or secret; included in Réalisé
+                # Maintenance Entretien – début 2026: Sheets Paramètres, fichier pipeline, Notion ou secret
+                _entretien_resolution: Optional[EntretienStart2026Resolution] = None
                 entretien_start_2026: Optional[float] = None
                 if is_signed and selected_year == 2026:
-                    entretien_start_2026 = _get_entretien_start_2026_value()
-                    if entretien_start_2026 is not None:
-                        st.info(f"**Maintenance Entretien – Début d'année 2026 :** {entretien_start_2026:,.0f} € *(réparti dans Réalisé : 1/11 par période, 3/11 par trimestre, total sur l'année)*")
-                    else:
-                        start_2026_val = get_secret("MAINTENANCE_ENTRETIEN_START_2026", "").strip()
-                        if start_2026_val:
-                            try:
-                                st.info(f"**Maintenance Entretien – Début d'année 2026 :** {float(start_2026_val.replace(',', '.').replace(' ', '')):,.0f} € *(réparti dans Réalisé : 1/11 par période, 3/11 par trimestre, total sur l'année)*")
-                                entretien_start_2026 = float(start_2026_val.replace(",", ".").replace(" ", ""))
-                            except ValueError:
-                                st.info(f"**Maintenance Entretien – Début d'année 2026 :** {start_2026_val}")
+                    _entretien_resolution = _resolve_entretien_start_2026()
+                    entretien_start_2026 = (
+                        _entretien_resolution.value if _entretien_resolution else None
+                    )
+                    if entretien_start_2026 is not None and _entretien_resolution is not None:
+                        _src = _entretien_resolution.source
+                        if _src == "sheets":
+                            _src_note = "source : Google Sheets (onglet Paramètres)"
+                        elif _src == "file":
+                            _src_note = "source : fichier pipeline `data/entretien_start_2026.json`"
+                        elif _src == "notion":
+                            _src_note = "source : cache Notion du dashboard (TTL 5 min)"
+                        else:
+                            _src_note = "source : secret `MAINTENANCE_ENTRETIEN_START_2026`"
+                        st.info(
+                            f"**Maintenance Entretien – Début d'année 2026 :** "
+                            f"{entretien_start_2026:,.0f} € "
+                            f"*(réparti dans Réalisé : 1/11 par période, 3/11 par trimestre, total sur l'année — {_src_note})*"
+                        )
 
                 # =============================================================
                 # SECTION 1: PÉRIODE (Production period)
@@ -5695,7 +5751,10 @@ def main():
                 avg_months_list = list(range(1, m_now)) if m_now >= 2 else []
                 start_month = avg_months_list[0] if avg_months_list else 1
 
-                _proj_entretien = entretien_start_2026 if (is_signed and selected_year == 2026) else None
+                _proj_entretien_res = (
+                    _entretien_resolution if (is_signed and selected_year == 2026) else None
+                )
+                _proj_entretien = _proj_entretien_res.value if _proj_entretien_res else None
                 _proj_has_sig = has_signature_obj or has_envoye_dual_block
                 _proj_typo_colors = {
                     **TYPOLOGIE_COLORS,
@@ -5709,19 +5768,30 @@ def main():
 
                 with tab_proj_prod:
                     st.markdown("#### Par Business Unit – Projection")
-                    if _proj_entretien is not None:
-                        _snap = read_entretien_start_2026_file_snapshot(get_store_path(MYRIUM_ROOT))
-                        if _snap is not None:
-                            _, _iso = _snap
+                    if _proj_entretien is not None and _proj_entretien_res is not None:
+                        _src_p = _proj_entretien_res.source
+                        _iso_p = _proj_entretien_res.updated_at
+                        if _src_p == "sheets" and _iso_p:
                             st.caption(
                                 f"Maintenance Entretien (début d'année) : **{_proj_entretien:,.0f} €** — "
-                                f"fichier pipeline `data/entretien_start_2026.json` mis à jour **{_iso}** "
+                                f"Google Sheets (onglet Paramètres), mis à jour **{_iso_p}** "
+                                "(écrit par le run quotidien depuis Notion)."
+                            )
+                        elif _src_p == "file" and _iso_p:
+                            st.caption(
+                                f"Maintenance Entretien (début d'année) : **{_proj_entretien:,.0f} €** — "
+                                f"fichier pipeline `data/entretien_start_2026.json` mis à jour **{_iso_p}** "
                                 "(alimenté chaque run quotidien depuis Notion)."
+                            )
+                        elif _src_p == "notion":
+                            st.caption(
+                                f"Maintenance Entretien (début d'année) : **{_proj_entretien:,.0f} €** — "
+                                "source : cache Notion du dashboard (TTL 5 min)."
                             )
                         else:
                             st.caption(
                                 f"Maintenance Entretien (début d'année) : **{_proj_entretien:,.0f} €** — "
-                                "source : cache Notion du dashboard (TTL 5 min) ou secret `MAINTENANCE_ENTRETIEN_START_2026`."
+                                "source : secret Streamlit `MAINTENANCE_ENTRETIEN_START_2026`."
                             )
                     fig_bu_p, produce_bu_p = plot_objectives_projection_chart(
                         selected_year,
