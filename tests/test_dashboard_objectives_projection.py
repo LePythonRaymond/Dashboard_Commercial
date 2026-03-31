@@ -122,7 +122,7 @@ def test_compute_projection_maintenance_entretien_debut_2026():
     expected_cumulative = entretien * (n_periods_so_far / 11.0)
     assert abs(rec["cumulative_so_far"] - expected_cumulative) < 0.01
     assert rec["average_per_month"] == 0.0
-    assert abs(rec["projected_total"] - expected_cumulative) < 0.01
+    assert abs(rec["projected_total"] - entretien) < 0.01
 
     _, remaining_count = get_remaining_months_excl_aug(m_now)
     obj = objective_for_year(year, "signe", "bu", "MAINTENANCE")

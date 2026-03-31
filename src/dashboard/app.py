@@ -2145,8 +2145,9 @@ def compute_projection_and_objective(
         # Cumulative through m_now: 1/11 per month, 0 for August
         n_periods_so_far = m_now if m_now < 8 else m_now - 1
         cumulative_so_far = entretien_start_2026 * (n_periods_so_far / 11.0)
-        average_per_month = 0.0  # no pipeline growth
-        projected_total = cumulative_so_far
+        average_per_month = 0.0  # no extra pipeline growth; chart extends fixed slices to year-end
+        # Full year = 11 slices → year-end cumul equals début d'année total
+        projected_total = float(entretien_start_2026)
     else:
         cumulative_so_far = 0.0
         sum_for_avg = 0.0
@@ -2200,6 +2201,7 @@ def plot_objectives_projection_chart(
     months = MONTH_NAMES
     fig = go.Figure()
     produce_rows = []
+    item_ys_matrix: List[List[float]] = []
 
     for item in items:
         color = color_map.get(item, "#808080")
@@ -2245,7 +2247,16 @@ def plot_objectives_projection_chart(
                 ys.append(cum)
             else:
                 proj_months = [m for m in range(m_now + 1, month_num + 1) if m != 8]
-                ys.append(cumulative_so_far + average_per_month * len(proj_months))
+                if use_entretien_only:
+                    ys.append(
+                        cumulative_so_far
+                        + (entretien_start_2026 / 11.0) * len(proj_months)
+                    )
+                else:
+                    ys.append(
+                        cumulative_so_far + average_per_month * len(proj_months)
+                    )
+        item_ys_matrix.append(ys)
         fig.add_trace(go.Scatter(
             x=months,
             y=ys,
@@ -2269,40 +2280,13 @@ def plot_objectives_projection_chart(
             "a_produire_par_mois": to_produce,
         })
 
-    # Global line (use same avg months as entities: avg_months_list or start_month..m_now)
-    global_cum = 0.0
-    global_sum_avg = 0.0
-    avg_months = avg_months_list if avg_months_list is not None else get_months_range(start_month, m_now)
-    n_avg = len(avg_months)
-    for month_num in range(1, m_now + 1):
-        val = 0.0
-        for item in items:
-            use_pur_item = _effective_use_pur_projection_item(
-                use_pur, force_pur_for_maintenance_bu, dimension, item
-            )
-            if use_pur_item:
-                brut, pond = calculate_pure_signature_for_month(df, year, month_num, dimension, item, use_pondere)
-                val += (pond if use_pondere else brut)
-            else:
-                use_ent = (
-                    year == 2026
-                    and entretien_start_2026 is not None
-                    and (
-                        (dimension == "bu" and item == "MAINTENANCE")
-                        or (dimension == "typologie" and item == "Maintenance Entretien")
-                    )
-                )
-                if use_ent:
-                    v = (entretien_start_2026 / 11.0) if month_num != 8 else 0.0
-                else:
-                    v, _ = calculate_production_month_with_carryover(df, year, month_num, dimension, item, use_pondere)
-                val += v
-        global_cum += val
-        if month_num in avg_months:
-            global_sum_avg += val
-    remaining_list, remaining_count = get_remaining_months_excl_aug(m_now)
-    global_avg = (global_sum_avg / n_avg) if n_avg > 0 else 0.0
-    global_projected = global_cum + global_avg * remaining_count
+    # Global = sum of per-BU / per-typologie series (matches chart lines, incl. entretien tail)
+    global_ys = [
+        sum(item_ys_matrix[r][c] for r in range(len(item_ys_matrix)))
+        for c in range(12)
+    ]
+    global_cum = global_ys[m_now - 1] if m_now >= 1 else 0.0
+    _, remaining_count = get_remaining_months_excl_aug(m_now)
     global_obj_metric = (
         "signature"
         if (
@@ -2315,38 +2299,6 @@ def plot_objectives_projection_chart(
     )
     global_objective = sum(objective_for_year(year, global_obj_metric, dimension, item) for item in items)
     global_to_produce = (global_objective - global_cum) / remaining_count if remaining_count > 0 else 0.0
-
-    global_ys = []
-    cum = 0.0
-    for month_num in range(1, 13):
-        if month_num <= m_now:
-            total = 0.0
-            for item in items:
-                use_pur_item = _effective_use_pur_projection_item(
-                    use_pur, force_pur_for_maintenance_bu, dimension, item
-                )
-                if use_pur_item:
-                    brut, pond = calculate_pure_signature_for_month(df, year, month_num, dimension, item, use_pondere)
-                    total += (pond if use_pondere else brut)
-                else:
-                    use_ent = (
-                        year == 2026
-                        and entretien_start_2026 is not None
-                        and (
-                            (dimension == "bu" and item == "MAINTENANCE")
-                            or (dimension == "typologie" and item == "Maintenance Entretien")
-                        )
-                    )
-                    if use_ent:
-                        total += (entretien_start_2026 / 11.0) if month_num != 8 else 0.0
-                    else:
-                        v, _ = calculate_production_month_with_carryover(df, year, month_num, dimension, item, use_pondere)
-                        total += v
-            cum += total
-            global_ys.append(cum)
-        else:
-            proj_months = [m for m in range(m_now + 1, month_num + 1) if m != 8]
-            global_ys.append(global_cum + global_avg * len(proj_months))
     fig.add_trace(go.Scatter(
         x=months,
         y=global_ys,
