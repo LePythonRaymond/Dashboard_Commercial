@@ -22,19 +22,24 @@ import json
 import logging
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from config.settings import settings, NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER, STATUS_WON
+from config.settings import get_secret, settings, NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER, STATUS_WON
 from src.api.auth import FuriousAuth, AuthenticationError
 from src.api.proposals import ProposalsClient, ProposalsAPIError
 from src.processing.cleaner import DataCleaner
 from src.processing.revenue_engine import RevenueEngine
 from src.processing.views import ViewGenerator
 from src.processing.alerts import AlertsGenerator
+from src.integrations.entretien_start_store import (
+    fetch_and_write_entretien_start_2026,
+    get_store_path,
+    read_entretien_start_2026_file_snapshot,
+)
 from src.integrations.google_sheets import GoogleSheetsClient
 from src.integrations.email_sender import EmailSender
 from src.integrations.notion_alerts_sync import NotionAlertsSync
@@ -102,6 +107,63 @@ class PipelineRunner:
         logger.info(f"Step '{step_name}': {status}")
         if details:
             logger.info(f"  Details: {details}")
+
+    def _sync_entretien_start_2026_to_store_and_sheets(
+        self, sheets_client: Optional[GoogleSheetsClient]
+    ) -> None:
+        """
+        Fetch Maintenance Entretien début 2026 from Notion → data/ JSON + onglet Paramètres (état 2026).
+
+        Runs after the main Sheets writes so Streamlit can read the value even when Signé/Envoyé hit 429.
+        """
+        logger.info("\n--- Entretien début 2026 (Notion → fichier + onglet Paramètres) ---")
+        api_key = get_secret("NOTION_API_KEY", "").strip()
+        ds_id = (
+            get_secret("NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID", "").strip()
+            or get_secret("NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATABASE_ID", "").strip()
+        )
+        if not api_key or not ds_id:
+            self._log_step(
+                "entretien_start_2026",
+                "skipped",
+                {"reason": "NOTION_API_KEY or datasource/database ID not set"},
+            )
+            return
+
+        store_path = get_store_path(PROJECT_ROOT)
+        try:
+            value = fetch_and_write_entretien_start_2026(api_key, ds_id, store_path)
+        except Exception as e:
+            logger.warning("Entretien start 2026 fetch/write failed: %s", e)
+            self._log_step("entretien_start_2026", "error", {"error": str(e)})
+            return
+
+        if value is None:
+            self._log_step(
+                "entretien_start_2026",
+                "skipped",
+                {"reason": "Notion fetch returned None"},
+            )
+            return
+
+        details: Dict[str, Any] = {"value": value, "path": str(store_path)}
+        current_year = datetime.now().year
+        if current_year == 2026:
+            try:
+                client = sheets_client or GoogleSheetsClient()
+                snap = read_entretien_start_2026_file_snapshot(store_path)
+                updated_at = (
+                    snap[1] if snap else datetime.utcnow().isoformat() + "Z"
+                )
+                client.write_entretien_start_parameter(
+                    current_year, float(value), updated_at
+                )
+                details["parametres_sheet"] = "written"
+            except Exception as e:
+                logger.warning("Entretien Paramètres sheet write failed: %s", e)
+                details["parametres_sheet_error"] = str(e)
+
+        self._log_step("entretien_start_2026", "success", details)
 
     def run(self) -> Dict[str, Any]:
         """
@@ -209,6 +271,8 @@ class PipelineRunner:
                     logger.error(f"Google Sheets error: {e}")
                     logger.error(f"Traceback: {traceback.format_exc()}")
                     self._log_step("google_sheets", "error", error_details)
+
+                self._sync_entretien_start_2026_to_store_and_sheets(sheets_client)
 
             # Step 7.5: Send Objectives Management Email (sent on every pipeline run)
             logger.info("\n--- Step 7.5: Objectives Management Email ---")
