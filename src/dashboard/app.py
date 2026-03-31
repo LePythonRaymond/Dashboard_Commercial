@@ -3145,22 +3145,28 @@ def render_single_production_view(
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # === Typologie Amounts (BU-Grouped) ===
-    st.markdown('<div class="section-header">🏷️ Montants par Typologie (groupés par BU)</div>', unsafe_allow_html=True)
-    create_bu_grouped_typologie_blocks_production(df, production_year=production_year, show_pondere=show_pondere)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # === Charts ===
-    # Vertical layout for charts
     st.markdown("#### Montant par Business Unit")
     fig_bu = plot_production_bu_bar(df, production_year, "Montant par BU")
     st.plotly_chart(fig_bu, use_container_width=True, key=f"{key_prefix}_prod_bu_bar_{production_year}", config={})
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("#### Montant par Typologie")
-    fig_type = plot_production_typologie_bar(df, production_year, "Montant par Typologie")
-    st.plotly_chart(fig_type, use_container_width=True, key=f"{key_prefix}_prod_type_bar_{production_year}", config={})
+    with st.expander("🏷️ Analyse par typologie", expanded=False):
+        st.markdown(
+            '<div class="section-header">🏷️ Montants par Typologie (groupés par BU)</div>',
+            unsafe_allow_html=True,
+        )
+        create_bu_grouped_typologie_blocks_production(
+            df, production_year=production_year, show_pondere=show_pondere
+        )
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("#### Montant par Typologie")
+        fig_type = plot_production_typologie_bar(df, production_year, "Montant par Typologie")
+        st.plotly_chart(
+            fig_type,
+            use_container_width=True,
+            key=f"{key_prefix}_prod_type_bar_{production_year}",
+            config={},
+        )
 
     # === Quarterly Breakdown ===
     st.markdown("<br>", unsafe_allow_html=True)
@@ -4917,25 +4923,6 @@ def main():
             create_bu_kpi_row(df, bu_amounts, show_pondere=show_pondere, key_prefix="vue_globale")
 
             st.markdown("<br>", unsafe_allow_html=True)
-
-            with st.expander("🏷️ Analyse par typologie", expanded=False):
-                st.markdown('<div class="section-header">🏷️ Montants par Typologie (groupés par BU)</div>', unsafe_allow_html=True)
-                create_bu_grouped_typologie_blocks(df, show_pondere=show_pondere)
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.markdown('<div class="section-header">🏷️ Analyse par Typologie</div>', unsafe_allow_html=True)
-                fig_type_donut = plot_typologie_donut(df, "Répartition par Typologie")
-                st.plotly_chart(fig_type_donut, use_container_width=True, key="vue_globale_type_donut", config={})
-                st.markdown("<br>", unsafe_allow_html=True)
-                if 'source_sheet' in df.columns:
-                    fig_type_stacked = plot_monthly_stacked_bar_typologie(
-                        df, selected_year, "Évolution mensuelle par Typologie", top_n=6
-                    )
-                    st.plotly_chart(fig_type_stacked, use_container_width=True, key="vue_globale_monthly_type", config={})
-                else:
-                    fig_type_bar = plot_typologie_bar(df, "Détail par Typologie")
-                    st.plotly_chart(fig_type_bar, use_container_width=True, key="vue_globale_type_bar", config={})
-
-            st.markdown("<br>", unsafe_allow_html=True)
             if num_months > 1:
                 st.markdown(f"**Moyenne mensuelle:** {monthly_avg:,.0f}€ (sur {num_months} mois)")
 
@@ -4958,6 +4945,24 @@ def main():
                 st.markdown("#### Total vs Pondéré par mois")
                 fig_pondere = plot_sent_pondere_bar(df, selected_year)
                 st.plotly_chart(fig_pondere, use_container_width=True, key="vue_globale_pondere", config={})
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            with st.expander("🏷️ Analyse par typologie", expanded=False):
+                st.markdown('<div class="section-header">🏷️ Montants par Typologie (groupés par BU)</div>', unsafe_allow_html=True)
+                create_bu_grouped_typologie_blocks(df, show_pondere=show_pondere)
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown('<div class="section-header">🏷️ Analyse par Typologie</div>', unsafe_allow_html=True)
+                fig_type_donut = plot_typologie_donut(df, "Répartition par Typologie")
+                st.plotly_chart(fig_type_donut, use_container_width=True, key="vue_globale_type_donut", config={})
+                st.markdown("<br>", unsafe_allow_html=True)
+                if 'source_sheet' in df.columns:
+                    fig_type_stacked = plot_monthly_stacked_bar_typologie(
+                        df, selected_year, "Évolution mensuelle par Typologie", top_n=6
+                    )
+                    st.plotly_chart(fig_type_stacked, use_container_width=True, key="vue_globale_monthly_type", config={})
+                else:
+                    fig_type_bar = plot_typologie_bar(df, "Détail par Typologie")
+                    st.plotly_chart(fig_type_bar, use_container_width=True, key="vue_globale_type_bar", config={})
 
 
     # =========================================================================
@@ -5075,6 +5080,19 @@ def main():
 
                     st.markdown("<br>", unsafe_allow_html=True)
 
+                    charts_start = time.time()
+                    debug_log("tab2:CHARTS:START", "Starting chart rendering", {"month": selected_month}, "C")
+
+                    st.markdown("#### Répartition par Business Unit")
+                    fig_month_bu_donut = plot_bu_donut(month_df, f"BU - {selected_month}")
+                    st.plotly_chart(
+                        fig_month_bu_donut,
+                        use_container_width=True,
+                        key=f"{_m_prefix}_bu_donut",
+                        config={},
+                    )
+
+                    st.markdown("<br>", unsafe_allow_html=True)
                     with st.expander("🏷️ Analyse par typologie", expanded=False):
                         st.markdown(
                             '<div class="section-header">🏷️ Montants par Typologie (groupés par BU)</div>',
@@ -5084,16 +5102,12 @@ def main():
                         st.markdown("<br>", unsafe_allow_html=True)
                         st.markdown("#### Répartition par Typologie")
                         fig_month_type_bar = plot_typologie_bar(month_df, f"Répartition par Typologie")
-                        st.plotly_chart(fig_month_type_bar, use_container_width=True, key="vue_mensuelle_type_bar", config={})
-
-                    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-
-                    charts_start = time.time()
-                    debug_log("tab2:CHARTS:START", "Starting chart rendering", {"month": selected_month}, "C")
-
-                    st.markdown("#### Répartition par Business Unit")
-                    fig_month_bu_donut = plot_bu_donut(month_df, f"BU - {selected_month}")
-                    st.plotly_chart(fig_month_bu_donut, use_container_width=True, key="vue_mensuelle_bu_donut", config={})
+                        st.plotly_chart(
+                            fig_month_type_bar,
+                            use_container_width=True,
+                            key=f"{_m_prefix}_type_bar",
+                            config={},
+                        )
 
                     debug_log("tab2:CHARTS:DONE", f"Vue Mensuelle charts completed in {time.time()-charts_start:.2f}s",
                               {"month": selected_month, "duration_s": round(time.time()-charts_start, 2)}, "C")
@@ -5176,7 +5190,7 @@ def main():
                 # Maintenance Entretien – début 2026: Sheets Paramètres, fichier pipeline, Notion ou secret
                 _entretien_resolution: Optional[EntretienStart2026Resolution] = None
                 entretien_start_2026: Optional[float] = None
-                if is_signed and selected_year == 2026:
+                if selected_year == 2026:
                     _entretien_resolution = _resolve_entretien_start_2026()
                     entretien_start_2026 = (
                         _entretien_resolution.value if _entretien_resolution else None
@@ -5752,7 +5766,7 @@ def main():
                 start_month = avg_months_list[0] if avg_months_list else 1
 
                 _proj_entretien_res = (
-                    _entretien_resolution if (is_signed and selected_year == 2026) else None
+                    _entretien_resolution if selected_year == 2026 else None
                 )
                 _proj_entretien = _proj_entretien_res.value if _proj_entretien_res else None
                 _proj_has_sig = has_signature_obj or has_envoye_dual_block

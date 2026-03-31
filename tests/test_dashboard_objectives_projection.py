@@ -81,3 +81,50 @@ def test_projection_math_cumulative_plus_average_times_remaining():
     )
     # cumulative 0, average 0 -> projected 0
     assert rec["projected_total"] == rec["cumulative_so_far"] + rec["average_per_month"] * rec["remaining_count"]
+
+
+def test_compute_projection_maintenance_entretien_debut_2026():
+    """MAINTENANCE BU in 2026 uses prorated début d'année entretien (1/11 per month, no Aug in cumulative)."""
+    import pandas as pd
+    from src.processing.objectives import OBJECTIVES, objective_for_year
+
+    year = 2026
+    if year not in OBJECTIVES or "signe" not in OBJECTIVES[year]:
+        return
+
+    df = pd.DataFrame(
+        columns=[
+            "source_sheet",
+            "cf_bu",
+            "Montant Total Q1_2026",
+            "Montant Total Q2_2026",
+            "Montant Total Q3_2026",
+            "Montant Total Q4_2026",
+            "Montant Total 2026",
+        ]
+    )
+    entretien = 110_000.0
+    m_now = 3
+    rec = compute_projection_and_objective(
+        df,
+        year,
+        start_month=1,
+        m_now=m_now,
+        dimension="bu",
+        key="MAINTENANCE",
+        use_pur=False,
+        use_pondere=False,
+        metric_key="signe",
+        has_signature_objective=True,
+        entretien_start_2026=entretien,
+    )
+    n_periods_so_far = m_now  # m_now < 8
+    expected_cumulative = entretien * (n_periods_so_far / 11.0)
+    assert abs(rec["cumulative_so_far"] - expected_cumulative) < 0.01
+    assert rec["average_per_month"] == 0.0
+    assert abs(rec["projected_total"] - expected_cumulative) < 0.01
+
+    _, remaining_count = get_remaining_months_excl_aug(m_now)
+    obj = objective_for_year(year, "signe", "bu", "MAINTENANCE")
+    expected_to_produce = (obj - expected_cumulative) / remaining_count if remaining_count > 0 else 0.0
+    assert abs(rec["to_produce_per_month"] - expected_to_produce) < 1.0
