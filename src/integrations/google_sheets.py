@@ -8,7 +8,8 @@ with OAuth 2.0 authentication.
 import gspread
 import gspread.exceptions
 import pandas as pd
-from typing import Any, Dict, List, Optional, Tuple
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 from pathlib import Path
 import traceback
 import json
@@ -24,6 +25,22 @@ from src.integrations.entretien_parametres_sheet import (
     ENTRETIEN_PARAM_KEY,
     parse_entretien_parametres_rows,
 )
+
+T = TypeVar("T")
+
+# Google Sheets "Write requests per minute per user" — pause past the rolling window, then retry.
+SHEETS_429_RETRY_SLEEP_SEC = 65.0
+SHEETS_429_MAX_ATTEMPTS = 4
+
+
+def _is_sheets_rate_limit_error(exc: BaseException) -> bool:
+    if not isinstance(exc, gspread.exceptions.APIError):
+        return False
+    resp = getattr(exc, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) == 429:
+        return True
+    msg = str(exc)
+    return "[429]" in msg or " 429" in msg or "status=429" in msg.lower()
 
 
 class GoogleSheetsClient:
@@ -264,6 +281,26 @@ class GoogleSheetsClient:
             self._spreadsheets[spreadsheet_id] = self.client.open_by_key(spreadsheet_id)
         return self._spreadsheets[spreadsheet_id]
 
+    def _with_sheets_write_retry(self, label: str, fn: Callable[[], T]) -> T:
+        """Retry a Sheets write on HTTP 429 after a full-minute-class pause (rolling per-user quota)."""
+        last: Optional[gspread.exceptions.APIError] = None
+        for attempt in range(1, SHEETS_429_MAX_ATTEMPTS + 1):
+            try:
+                return fn()
+            except gspread.exceptions.APIError as e:
+                last = e
+                if _is_sheets_rate_limit_error(e) and attempt < SHEETS_429_MAX_ATTEMPTS:
+                    print(
+                        f"  {label}: Google Sheets rate limit (429), waiting "
+                        f"{SHEETS_429_RETRY_SLEEP_SEC:.0f}s before retry "
+                        f"({attempt}/{SHEETS_429_MAX_ATTEMPTS})..."
+                    )
+                    time.sleep(SHEETS_429_RETRY_SLEEP_SEC)
+                    continue
+                raise
+        assert last is not None
+        raise last
+
     def get_or_create_spreadsheet(self, name: str, spreadsheet_id: Optional[str] = None) -> gspread.Spreadsheet:
         """
         Get existing spreadsheet by ID or create new one by name.
@@ -344,12 +381,21 @@ class GoogleSheetsClient:
         worksheet = self.get_or_create_worksheet(
             spreadsheet, ENTRETIEN_PARAMETRES_WORKSHEET, rows=100, cols=10
         )
-        worksheet.clear()
+        self._with_sheets_write_retry(
+            "Paramètres clear", lambda: worksheet.clear()
+        )
         body: List[List[Any]] = [
             ["Clé", "Valeur (€)", "Mis à jour (UTC)"],
             [ENTRETIEN_PARAM_KEY, value, updated_at_iso],
         ]
-        worksheet.update(range_name="A1:C2", values=body, value_input_option="USER_ENTERED")
+        self._with_sheets_write_retry(
+            "Paramètres write",
+            lambda: worksheet.update(
+                range_name="A1:C2",
+                values=body,
+                value_input_option="USER_ENTERED",
+            ),
+        )
 
     def read_entretien_start_parameter(self, year: int) -> Optional[Tuple[float, str]]:
         """
@@ -452,7 +498,10 @@ class GoogleSheetsClient:
         # Get cell range
         cell_range = f'A{start_row}:{gspread.utils.rowcol_to_a1(end_row, end_col).split("!")[0] if "!" in gspread.utils.rowcol_to_a1(end_row, end_col) else gspread.utils.rowcol_to_a1(end_row, end_col)}'
 
-        worksheet.update(range_name=f'A{start_row}', values=data)
+        self._with_sheets_write_retry(
+            "write_dataframe",
+            lambda: worksheet.update(range_name=f"A{start_row}", values=data),
+        )
         print(f"    Wrote {len(df)} rows to worksheet")
 
         return end_row + 1
@@ -494,7 +543,10 @@ class GoogleSheetsClient:
         ]
 
         try:
-            spreadsheet.batch_update(body={"requests": requests})
+            self._with_sheets_write_retry(
+                "reset worksheet layout",
+                lambda: spreadsheet.batch_update(body={"requests": requests}),
+            )
         except Exception as e:
             # Formatting reset is best-effort; data writing should still proceed.
             print(f"  Warning: Failed to reset worksheet formatting/merges: {e}")
@@ -579,7 +631,10 @@ class GoogleSheetsClient:
             return start_row, []
 
         # Add title row
-        worksheet.update(range_name=f'A{start_row}', values=[[title]])
+        self._with_sheets_write_retry(
+            "summary title",
+            lambda: worksheet.update(range_name=f"A{start_row}", values=[[title]]),
+        )
         current_row = start_row + 1
 
         # Convert to DataFrame
@@ -606,12 +661,23 @@ class GoogleSheetsClient:
         new_headers, new_data_rows, separator_indices = self._insert_year_separators(headers, data_rows)
 
         # Write header with separators
-        worksheet.update(range_name=f'A{current_row}', values=[new_headers])
+        self._with_sheets_write_retry(
+            "summary header",
+            lambda r=current_row, h=new_headers: worksheet.update(
+                range_name=f"A{r}", values=[h]
+            ),
+        )
         current_row += 1
 
         # Write data rows with separators
         for row_values in new_data_rows:
-            worksheet.update(range_name=f'A{current_row}', values=[row_values])
+            row_num = current_row
+            self._with_sheets_write_retry(
+                f"summary row {row_num}",
+                lambda rv=row_values, r=row_num: worksheet.update(
+                    range_name=f"A{r}", values=[rv]
+                ),
+            )
             current_row += 1
 
         return current_row + 1, separator_indices  # Add blank row after summary
@@ -655,7 +721,9 @@ class GoogleSheetsClient:
 
             # Clear existing content
             print(f"  Clearing existing content...")
-            worksheet.clear()
+            self._with_sheets_write_retry(
+                "clear worksheet", lambda: worksheet.clear()
+            )
             # Also clear formatting/merges from previous runs (critical for variable row counts)
             self._reset_worksheet_layout_and_formatting(spreadsheet, worksheet)
 
@@ -1407,7 +1475,10 @@ class GoogleSheetsClient:
         # Send batch update using spreadsheet's batch_update for API formatting requests
         if requests:
             try:
-                spreadsheet.batch_update(body={'requests': requests})
+                self._with_sheets_write_retry(
+                    "format_view batch",
+                    lambda: spreadsheet.batch_update(body={"requests": requests}),
+                )
                 print(f"    ✓ Applied {len(requests)} formatting rules")
             except Exception as e:
                 print(f"    ✗ Error formatting: {e}")

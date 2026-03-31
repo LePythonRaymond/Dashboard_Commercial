@@ -164,7 +164,16 @@ class SheetsUpdateRunner:
                     or get_secret("NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATABASE_ID", "").strip()
                 )
                 if not api_key or not ds_id:
-                    self._log_step("entretien_start_2026", "skipped", {"reason": "NOTION_API_KEY or datasource/database ID not set"})
+                    if not api_key and not ds_id:
+                        _skip = "NOTION_API_KEY and datasource/database ID both missing"
+                    elif not api_key:
+                        _skip = "NOTION_API_KEY not set (or not loaded from .env / environment)"
+                    else:
+                        _skip = (
+                            "Set NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID "
+                            "or NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATABASE_ID"
+                        )
+                    self._log_step("entretien_start_2026", "skipped", {"reason": _skip})
                 else:
                     try:
                         store_path = get_store_path(PROJECT_ROOT)
