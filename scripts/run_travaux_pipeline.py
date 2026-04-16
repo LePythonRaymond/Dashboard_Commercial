@@ -78,7 +78,13 @@ def run_travaux_pipeline(*, dry_run: bool = False, test_mode: bool = False) -> b
         try:
             addons_client = ProposalAddonsClient(auth=auth)
             df_addons = addons_client.fetch_all()
-            valid_ids = set(df_raw['id'].astype(str)) if 'id' in df_raw.columns else None
+            current_year = datetime.now().year
+            valid_ids = None
+            if 'id' in df_raw.columns and 'date' in df_raw.columns:
+                dates = pd.to_datetime(df_raw['date'], errors='coerce')
+                mask_year = dates.dt.year == current_year
+                valid_ids = set(df_raw.loc[mask_year, 'id'].astype(str))
+                logger.info(f"  Scoping addons to {len(valid_ids)} proposals dated in {current_year}")
             addon_totals = aggregate_addons_by_proposal(df_addons, valid_proposal_ids=valid_ids)
             if not addon_totals.empty:
                 df_raw['amount'] = pd.to_numeric(df_raw['amount'], errors='coerce').fillna(0)
