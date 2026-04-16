@@ -5367,17 +5367,29 @@ def main():
                 st.markdown("---")
                 st.markdown("### 📊 Trimestre de Production")
 
-                # Determine current quarter from selected period
-                period_months = get_months_for_accounting_period(selected_period_idx)
-                if period_months:
-                    current_quarter = get_quarter_for_month(period_months[0])
-                else:
-                    current_quarter = "Q1"  # Default
+                quarter_options = ["Q1", "Q2", "Q3", "Q4"]
+                quarter_labels = {
+                    "Q1": "Q1 — Janvier à Mars",
+                    "Q2": "Q2 — Avril à Juin",
+                    "Q3": "Q3 — Juillet à Septembre",
+                    "Q4": "Q4 — Octobre à Décembre",
+                }
+                default_quarter = get_quarter_for_month(datetime.now().month)
+                default_quarter_idx = quarter_options.index(default_quarter)
+
+                selected_quarter_str = st.selectbox(
+                    "Sélectionner un trimestre",
+                    quarter_options,
+                    index=default_quarter_idx,
+                    format_func=lambda q: quarter_labels[q],
+                    key=f"quarter_select_{metric_key}",
+                )
+                current_quarter = selected_quarter_str
 
                 quarter_start = quarter_start_dates(selected_year)[current_quarter]
                 quarter_end = quarter_end_dates(selected_year)[current_quarter]
 
-                st.markdown(f"**Trimestre actuel:** {current_quarter} | **Début:** {quarter_start.strftime('%d/%m/%Y')} | **Fin:** {quarter_end.strftime('%d/%m/%Y')}")
+                st.markdown(f"**Trimestre sélectionné :** {current_quarter} | **Début :** {quarter_start.strftime('%d/%m/%Y')} | **Fin :** {quarter_end.strftime('%d/%m/%Y')}")
 
                 # BU Table (Quarter) - using production-year columns
                 st.markdown("#### Par Business Unit (Trimestre de production)")

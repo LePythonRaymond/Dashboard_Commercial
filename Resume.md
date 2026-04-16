@@ -135,7 +135,7 @@ The original system was built in **n8n** (workflow automation tool) with Python 
 5. **View Generation**: Filter and aggregate into 3 main views
 
 **Pipeline-Specific Outputs**:
-- **Daily Pipeline**: Writes to "État actuel" (stable snapshot) and monthly sheets. Syncs Notion databases (alerts, TRAVAUX, MAINTENANCE won). MAINTENANCE won: all proposals won in the current year with BU MAINTENANCE; POST if ID Devis not in Notion, PATCH if already present; no archiving (all years/months kept for grouping in Notion).
+- **Daily Pipeline**: Writes to "État actuel" (stable snapshot) and monthly sheets. Syncs Notion databases (alerts, TRAVAUX, MAINTENANCE won). MAINTENANCE won: all proposals won in the current year with BU MAINTENANCE; POST if ID Devis not in Notion, PATCH if already present; no archiving (all years/months kept for grouping in Notion). **Maintenance Entretien début 2026**: same état spreadsheet gets a **Paramètres** worksheet (Notion → JSON + Sheets); see `run_sheets_update.py` Step 7 and `run_pipeline.py` after Step 7 (§18.11).
 - **Bi-Monthly Pipeline**: Sends emails only (objectives + alerts). No external writes to avoid overwriting daily data.
 - **Weekly Pipeline**: Dedicated TRAVAUX projection email + Notion sync.
 
@@ -379,7 +379,7 @@ myrium/
 - **Time Filtering**: Filter by Month/Quarter based on source sheet
 - **Date Columns**: Full visibility of proposal dates
 - **Clickable Project Lists**: KPI cards display project counts with clickable "🔎 Voir projets" buttons that open large modal dialogs showing detailed project lists with Furious CRM links
-- **Objectifs Signé (Production vs Signature)**: For the Signé view, the Objectifs tab shows two blocks: **Objectif Production** vs **Réalisé** (signed-to-produce in the period) and **Objectif Signature** vs **Signature** (ex-Pur: amount signed in the period). Objectives data: `signe` = production (Réalisé), `signature` = signature (Signé). **Maintenance Entretien – Début 2026**: value is fetched server-side from Notion (sum of "Total HT Cette année" in the data source when `NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID` and `NOTION_API_KEY` are set), else from secret `MAINTENANCE_ENTRETIEN_START_2026`; this amount is **included in Réalisé** for MAINTENANCE and Maintenance Entretien (already signed portfolio). **Objectifs tab end section (March 2026)**: projection charts (year total from average over ended months, Réalisé/Pur toggle), AUTRE excluded and MAINTENANCE on Pur in BU chart; third chart "Signature (Pur) par mois" with monthly objectives; typologie tables in collapsible expanders; "À produire par mois" tables with BU/Typologie row colors (see §18.10).
+- **Objectifs Signé (Production vs Signature)**: For the Signé view, the Objectifs tab shows two blocks: **Objectif Production** vs **Réalisé** (signed-to-produce in the period) and **Objectif Signature** vs **Signature** (ex-Pur: amount signed in the period). Objectives data: `signe` = production (Réalisé), `signature` = signature (Signé). **Maintenance Entretien – Début 2026**: resolution order and Sheets persistence in **§18.11** (dashboard also applies it for **Envoyé 2026**). **Objectifs tab end section**: projection + Pur-by-month + expanders + colors (§18.10, §18.11).
 - **Optimization**: Lazy loading, caching, efficient multi-sheet reading
 - **PDF Removal**: Export feature removed for performance/simplicity
 
@@ -403,7 +403,8 @@ NOTION_TRAVAUX_PROJECTION_DATABASE_ID=...
 NOTION_TRAVAUX_RECENT_PROJECTS_DATABASE_ID=...
 NOTION_MAINTENANCE_WON_DATABASE_ID=...
 MAINTENANCE_ENTRETIEN_START_2026=...   # Optional fallback: value for "Maintenance Entretien – Début 2026" (e.g. 1084000)
-NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID=...  # Optional: Notion data source ID to sum "Total HT Cette année" (e.g. 285d9278-02d7-808a-9395-000b04dfc654); overrides secret when set with NOTION_API_KEY
+NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID=...  # Optional: data source ID (preferred)
+NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATABASE_ID=...   # Optional: legacy database ID if no datasource
 ```
 
 ### 8.2 Business Constants
@@ -797,10 +798,10 @@ See original documentation for details on performance, security, error handling,
 
 **Dashboard** (`src/dashboard/app.py`), Signé view only when year has `signature` (e.g. 2026):
 - Tables (Par BU, Par Typologie; Période, Trimestre, Année) show one wide table: **Objectif Production | Réalisé | Reste | % | Objectif Signature | Signature | Reste Sig | % Sig**. Column "Pur" renamed to "Signature". Styling applied to both Reste and Reste Sig, % and % Sig.
-- **Maintenance Entretien – Début 2026**: Value is fetched server-side from Notion when `NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID` and `NOTION_API_KEY` are set (sum of "Total HT Cette année" over all pages, cached 5 min), else from secret `MAINTENANCE_ENTRETIEN_START_2026`. The value is shown in an info box and **included in Réalisé** for MAINTENANCE and Maintenance Entretien in all Objectifs tables (Période, Trimestre, Année). See `src/integrations/notion_entretien_start.py`.
+- **Maintenance Entretien – Début 2026**: See **§18.11** for resolution order (Sheets → file → Notion → secret), daily jobs, and **Réalisé** semantics. For BU **MAINTENANCE** and typologie **Maintenance Entretien** in 2026, **Objectif Production / Réalisé** uses **only** the prorated début d’année (no pipeline production mixed in). Core Notion sum: `src/integrations/notion_entretien_start.py`; persistence: `src/integrations/entretien_start_store.py`, `GoogleSheetsClient.read_entretien_start_parameter` / `write_entretien_start_parameter` (see §18.11).
 - **Line charts**: "Objectif Signature" series added when `show_signature_objective`; legend "Pur" → "Signature" when in Signé two-block mode.
 
-**Config**: Streamlit secrets / env can set `MAINTENANCE_ENTRETIEN_START_2026` for the special box.
+**Config**: `MAINTENANCE_ENTRETIEN_START_2026`, `NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID` or `NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATABASE_ID`, `NOTION_API_KEY`; Streamlit / VPS `.env` must match for dashboard vs jobs.
 
 **Tests**: `tests/test_objectives_2026.py` updated for new production (signe) values and signature metric (BU totals, CONCEPTION typologie prorate sum); `test_2026_has_signature_metric`; `test_2026_envoye_equals_signe` replaced by 2026 signe/signature structure check.
 
@@ -809,10 +810,10 @@ See original documentation for details on performance, security, error handling,
 **Enhancement**: Overhaul of the Objectifs tab (Signé/Envoyé) end section: projection charts replace the former monthly line charts; third chart and tables use consistent BU/Typologie coloring.
 
 **Projection charts (Par BU and Par Typologie)**  
-- Two charts show **projected year total** (11-month, August excluded) from cumulative so far + average over **all ended months** in the year (no month selector). Checkbox "Afficher les courbes de signature" switches projection metric: Réalisé (production) vs Pur (signature).  
-- **Par BU**: AUTRE excluded from chart and "À produire par mois" table. MAINTENANCE always uses **Pur** (numbers and signature objective) on this chart, regardless of checkbox.  
-- Helpers in `src/dashboard/app.py`: `get_remaining_months_excl_aug`, `get_months_range`, `compute_projection_and_objective` (supports `avg_months_list`, `force_pur_for_maintenance`), `plot_objectives_projection_chart` (optional `avg_months_list`, `force_pur_for_maintenance_bu`).  
-- Table under each chart: "À produire par mois (jusqu'à fin d'année, hors août)" with colored rows via `create_colored_table_html` using `BU_COLORS` (BU table) and `TYPOLOGIE_COLORS` (Typologie table), aligned with Vue Globale.
+- Tabs **Réalisé (production)** vs **Signature (Pur)**. **Réalisé**: for **MAINTENANCE** / **Maintenance Entretien** in **2026** when début d’année is resolved, monthly slice **1/11** (August 0); chart **extends through December** so cumulative matches full début d’année; **Global** = sum of per-series Y. **Signature (Pur)**: Pur-based projection for all BUs including MAINTENANCE (entretien production schedule does not apply there).  
+- **Par BU**: AUTRE excluded from chart and table.  
+- Helpers: `get_remaining_months_excl_aug`, `get_months_range`, `compute_projection_and_objective`, `plot_objectives_projection_chart` in `src/dashboard/app.py`.  
+- Tables: "À produire par mois" with `create_colored_table_html` / `BU_COLORS` / `TYPOLOGIE_COLORS`.
 
 **Third chart: Signature (Pur) par mois**  
 - Two charts (Par BU, Par Typologie): Pur amount per month Jan–current month only; **objectives by month** (dotted line from `objective_for_month`), not flat annual.
@@ -820,7 +821,45 @@ See original documentation for details on performance, security, error handling,
 **Typologie tables**  
 - The three typologie tables (Période, Trimestre, Année) are inside `st.expander(..., expanded=False)`; BU tables unchanged.
 
-**Tests**: `tests/test_dashboard_objectives_projection.py` (remaining months excl. Aug, months range, projection math, to_produce_per_month).
+**Tests**: `tests/test_dashboard_objectives_projection.py` (remaining months excl. Aug, months range, projection math, to_produce_per_month, MAINTENANCE entretien 2026).
+
+### 18.11 Maintenance Entretien via Sheets Paramètres, Sheets 429 retry, dashboard layout & projection fix (March 2026)
+
+**Problem**: Streamlit / GitHub has no shared disk with the VPS job that wrote `data/entretien_start_2026.json`, so the dashboard could not rely on that file alone. Google Sheets **write requests per minute** often returned **429** when running full `write_all_views` twice in a row (many per-row `worksheet.update` calls).
+
+**Sheets — Paramètres (état file, same ID as État actuel)**  
+- `src/integrations/google_sheets.py`: `write_entretien_start_parameter` / `read_entretien_start_parameter` on worksheet **Paramètres** only (clear + fixed A1:C2 layout); read requires configured état spreadsheet ID (no create-on-read).  
+- Parser + constants: `src/integrations/entretien_parametres_sheet.py` (`parse_entretien_parametres_rows`, tests without importing gspread-heavy path).  
+- `src/integrations/__init__.py`: **lazy** `GoogleSheetsClient` via `__getattr__` so light imports do not load gspread.
+
+**Pipelines**  
+- `scripts/run_sheets_update.py`: after Notion fetch success for 2026, writes Paramètres (reuses same `GoogleSheetsClient` as Step 6 when not dry-run). Clearer skip logs when API key vs datasource/database ID is missing.  
+- `scripts/run_pipeline.py`: after Step 7 Sheets (even if `write_all_views` errors on Signé), **Entretien début 2026** block runs Notion → JSON → Paramètres for `current_year == 2026` (same env vars as daily job).
+
+**429 mitigation**  
+- `google_sheets.py`: `_with_sheets_write_retry` (~65s sleep, up to 4 attempts) on `worksheet.clear` / `worksheet.update` / `batch_update` paths used by views and Paramètres.
+
+**Dashboard** (`src/dashboard/app.py`)  
+- **Vue Globale / Vue Mensuelle — Toute année**: **Analyse par typologie** expander moved **below** BU charts; mensuelle Plotly keys prefixed by month (`_m_prefix`).  
+- **`render_single_production_view`**: BU bar first, typologie blocks + typo bar inside expander.  
+- **Objectifs 2026**: `_resolve_entretien_start_2026` for **`selected_year == 2026`** (Signé **and** Envoyé), not Signé-only; projection captions distinguish Sheets / file / Notion / secret.  
+- **Projection chart bugfix**: for entretien-only MAINTENANCE (Réalisé), months **after** `m_now` now add **1/11 per month** (excl. August) so **December cumulative = début d’année**; **Global** = sum of per-item series. `compute_projection_and_objective`: `projected_total` for that case = full entretien amount.
+
+**Env (VPS / cron)**  
+- `NOTION_API_KEY` plus **`NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID`** *or* **`NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATABASE_ID`**; pipeline must load `.env` from repo root (generic skip message previously masked “ID missing” when key was set).
+
+**Tests**  
+- `tests/test_google_sheets_entretien_parametres.py` (parser).  
+- `tests/test_dashboard_objectives_projection.py`: `test_compute_projection_maintenance_entretien_debut_2026` (requires dashboard deps e.g. plotly for collection if importing `app`).  
+- `tests/test_entretien_start_store.py` (JSON path under `data/`, staleness window, mocked Notion write).
+
+**Next steps (ops)**  
+- Deploy updated `google_sheets.py` / `run_pipeline.py` on VPS so 429 retry + Paramètres run apply; ensure Notion datasource/database env is set for entretien step. Long-term: batch fewer, larger `values.update` calls to reduce write volume (optional).  
+- After deploy: spot-check Signé **Objectifs 2026** — MAINTENANCE and Maintenance Entretien **Réalisé** match prorated début d’année only (no pipeline double-count); confirm `run_sheets_update.py` (or full pipeline) ran so Paramètres / JSON are fresh for Cloud dashboards without VPS disk.
+
+### 18.12 Objectifs Maintenance — Réalisé table rule & JSON store tests (April 2026)
+
+**Plan closure**: Table logic in `src/dashboard/app.py` skips `calculate_production_period_with_carryover` / `calculate_production_amount_with_carryover` for BU **MAINTENANCE** and typologie **Maintenance Entretien** when 2026 début d’année is resolved; **Réalisé** = prorated slice only (`realized_prev` = 0). Same rule feeds projection (`entretien_start_2026` on `compute_projection_and_objective` / `plot_objectives_projection_chart`) and optional `plot_objectives_line_chart` via `_entretien_start_monthly_series`. **Notion source** unchanged: sum of property **Total HT Cette année** in `notion_entretien_start.py`. **Resolution order** and Sheets **Paramètres**: §18.11; **file store API**: `entretien_start_store.py` (`get_store_path`, `fetch_and_write_entretien_start_2026`, `read_entretien_start_2026_from_file`).
 
 ---
 
@@ -837,7 +876,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.36
-**Last Updated**: March 2026
+**Document Version**: 1.38
+**Last Updated**: April 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System
