@@ -379,7 +379,7 @@ myrium/
 - **Time Filtering**: Filter by Month/Quarter based on source sheet
 - **Date Columns**: Full visibility of proposal dates
 - **Clickable Project Lists**: KPI cards display project counts with clickable "🔎 Voir projets" buttons that open large modal dialogs showing detailed project lists with Furious CRM links
-- **Objectifs Signé (Production vs Signature)**: For the Signé view, the Objectifs tab shows two blocks: **Objectif Production** vs **Réalisé** (signed-to-produce in the period) and **Objectif Signature** vs **Signature** (ex-Pur: amount signed in the period). Objectives data: `signe` = production (Réalisé), `signature` = signature (Signé). **Maintenance Entretien – Début 2026**: resolution order and Sheets persistence in **§18.11** (dashboard also applies it for **Envoyé 2026**). **Objectifs tab end section**: projection + Pur-by-month + expanders + colors (§18.10, §18.11).
+- **Objectifs Signé (Production vs Signature)**: For the Signé view, the Objectifs tab shows two blocks: **Objectif Production** vs **Réalisé** (signed-to-produce in the period; **exception** in 2026: BU MAINTENANCE and typologie Maintenance Entretien use **only** prorated début d’année — §18.12) and **Objectif Signature** vs **Signature** (ex-Pur). Objectives data: `signe` = production (Réalisé), `signature` = signature (Signé). **Début 2026** resolution (Sheets Paramètres, JSON, Notion, secret): **§18.11**; same resolver drives **Envoyé 2026** when applicable. **Objectifs tab end section**: projection + Pur-by-month + expanders + colors (§18.10–18.12).
 - **Optimization**: Lazy loading, caching, efficient multi-sheet reading
 - **PDF Removal**: Export feature removed for performance/simplicity
 

@@ -365,7 +365,6 @@ class PipelineRunner:
                     if sheets_client is None:
                         sheets_client = GoogleSheetsClient()
 
-                    import pandas as pd
                     df_envoye = pd.DataFrame()
                     df_signe = pd.DataFrame()
 
