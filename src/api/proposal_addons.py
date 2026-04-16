@@ -120,19 +120,36 @@ class ProposalAddonsClient:
         return df
 
 
-def aggregate_addons_by_proposal(df_addons: pd.DataFrame) -> pd.Series:
+def aggregate_addons_by_proposal(
+    df_addons: pd.DataFrame,
+    valid_proposal_ids: set | None = None,
+) -> pd.Series:
     """
     Group addons by parent proposal ID and sum their amounts.
 
     Args:
         df_addons: DataFrame from ProposalAddonsClient.fetch_all()
+        valid_proposal_ids: If provided, only include addons whose parent proposal ID
+            is in this set. This prevents old/unrelated addons from being counted.
 
     Returns:
         Series mapping proposal_id (str) -> total addon amount
     """
     if df_addons.empty or 'id' not in df_addons.columns:
         return pd.Series(dtype=float)
-    grouped = df_addons.groupby(df_addons['id'].astype(str))['amount'].sum()
+
+    df = df_addons.copy()
+    df['id'] = df['id'].astype(str)
+
+    # Only keep addons that belong to proposals we actually fetched
+    if valid_proposal_ids:
+        before = len(df)
+        df = df[df['id'].isin(valid_proposal_ids)]
+        skipped = before - len(df)
+        if skipped:
+            print(f"  Filtered out {skipped} addon(s) not matching any fetched proposal")
+
+    grouped = df.groupby('id')['amount'].sum()
     return grouped
 
 
