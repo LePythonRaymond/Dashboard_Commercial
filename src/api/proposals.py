@@ -158,10 +158,14 @@ class ProposalsClient:
             print(f"  Retrieved {len(proposals)} proposals (total: {len(all_proposals)})")
 
             # Check if we got fewer than the limit (last page)
+            if len(proposals) < self.page_limit:
+                print(f"  Got {len(proposals)} < {self.page_limit} (last page). Done.")
+                break
+
             meta = response.get("meta", {})
             total_elements = meta.get("totalElementsWithFilters", meta.get("totalElements", 0))
 
-            if len(all_proposals) >= total_elements:
+            if total_elements and len(all_proposals) >= total_elements:
                 print(f"  Reached total of {total_elements} proposals. Done.")
                 break
 

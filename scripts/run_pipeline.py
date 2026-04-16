@@ -20,6 +20,7 @@ TRAVAUX projection runs weekly in scripts/run_travaux_pipeline.py.
 import sys
 import json
 import logging
+import pandas as pd
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -31,6 +32,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from config.settings import get_secret, settings, NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER, STATUS_WON
 from src.api.auth import FuriousAuth, AuthenticationError
 from src.api.proposals import ProposalsClient, ProposalsAPIError
+from src.api.proposal_addons import ProposalAddonsClient, aggregate_addons_by_proposal
 from src.processing.cleaner import DataCleaner
 from src.processing.revenue_engine import RevenueEngine
 from src.processing.views import ViewGenerator
@@ -63,8 +65,6 @@ class PipelineRunner:
     Orchestrates the complete Myrium data pipeline.
     """
 
-    LIVE_SNAPSHOT_SHEET_NAME = "État actuel"
-
     def __init__(
         self,
         *,
@@ -82,14 +82,13 @@ class PipelineRunner:
             write_google_sheets: If True, write views to Google Sheets
             send_emails: If True, send objectives + alerts emails
             sync_notion: If True, sync alerts to Notion
-            live_snapshot: If True, write snapshot to stable sheet name "État actuel"
+            live_snapshot: Deprecated, ignored. Kept for CLI backward compatibility.
         """
         self.dry_run = dry_run
         # Fine-grained toggles (dry_run overrides these)
         self.write_google_sheets = write_google_sheets and (not dry_run)
         self.send_emails = send_emails and (not dry_run)
         self.sync_notion = sync_notion and (not dry_run)
-        self.live_snapshot = live_snapshot
         self.start_time = datetime.now()
         self.results: Dict[str, Any] = {
             "started_at": self.start_time.isoformat(),
@@ -181,7 +180,7 @@ class PipelineRunner:
         logger.info("MYRIUM PIPELINE STARTED")
         logger.info(f"Dry run: {self.dry_run}")
         logger.info(
-            f"Options: sheets={self.write_google_sheets} | emails={self.send_emails} | notion={self.sync_notion} | live_snapshot={self.live_snapshot}"
+            f"Options: sheets={self.write_google_sheets} | emails={self.send_emails} | notion={self.sync_notion}"
         )
         logger.info("="*60)
 
@@ -202,6 +201,34 @@ class PipelineRunner:
                 logger.warning("No proposals fetched!")
                 self._log_step("fetch_proposals", "warning", {"message": "No proposals returned"})
 
+            # Step 2b: Fetch Proposal Addons (Avenants) and merge into proposal amounts
+            logger.info("\n--- Step 2b: Fetching Proposal Addons (Avenants) ---")
+            try:
+                addons_client = ProposalAddonsClient(auth=auth)
+                df_addons = addons_client.fetch_all()
+                addon_totals = aggregate_addons_by_proposal(df_addons)
+                if not addon_totals.empty and not df_raw.empty:
+                    df_raw['amount'] = pd.to_numeric(df_raw['amount'], errors='coerce').fillna(0)
+                    addon_map = addon_totals.to_dict()
+                    df_raw['addon_amount'] = df_raw['id'].astype(str).map(addon_map).fillna(0)
+                    df_raw['amount'] = df_raw['amount'] + df_raw['addon_amount']
+                    proposals_with_addons = int((df_raw['addon_amount'] > 0).sum())
+                    total_addon_value = float(df_raw['addon_amount'].sum())
+                    self._log_step("fetch_addons", "success", {
+                        "addons_fetched": len(df_addons),
+                        "proposals_with_addons": proposals_with_addons,
+                        "total_addon_value": total_addon_value,
+                    })
+                else:
+                    if not df_raw.empty:
+                        df_raw['addon_amount'] = 0
+                    self._log_step("fetch_addons", "success", {"addons_fetched": 0})
+            except Exception as e:
+                logger.warning(f"Addon fetch failed (non-fatal, continuing without addons): {e}")
+                if not df_raw.empty:
+                    df_raw['addon_amount'] = 0
+                self._log_step("fetch_addons", "warning", {"error": str(e)})
+
             # Step 3: Clean Data
             logger.info("\n--- Step 3: Cleaning Data ---")
             cleaner = DataCleaner()
@@ -219,19 +246,51 @@ class PipelineRunner:
 
             # Step 5: Generate Views
             logger.info("\n--- Step 5: Generating Views ---")
+            current_year = datetime.now().year
+            current_month = datetime.now().month
             view_generator = ViewGenerator()
-            views = view_generator.generate(df_processed)
 
-            # Optional: stable snapshot for daily refresh (avoid creating dated sheets every day)
-            if self.live_snapshot:
-                views.snapshot.name = self.LIVE_SNAPSHOT_SHEET_NAME
-                views.sheet_names["snapshot"] = self.LIVE_SNAPSHOT_SHEET_NAME
+            # Collect IDs already in previous months' Signé sheets (for dedup)
+            already_captured_ids: set = set()
+            if self.write_google_sheets:
+                try:
+                    dedup_client = GoogleSheetsClient()
+                    existing_sheets = dedup_client.list_worksheets(view_type='signe', year=current_year)
+                    current_month_name = view_generator.name_won
+                    prev_month = current_month - 1 if current_month > 1 else 12
+                    prev_year = current_year if current_month > 1 else current_year - 1
+                    from config.settings import MONTH_MAP
+                    prev_month_name = f"Signé {MONTH_MAP.get(prev_month, 'Unknown')} {prev_year}"
+                    for sheet_name in existing_sheets:
+                        if sheet_name in (current_month_name, prev_month_name):
+                            continue  # skip months we're about to rewrite
+                        df_existing = dedup_client.read_worksheet(sheet_name, 'signe', current_year)
+                        if not df_existing.empty and 'id' in df_existing.columns:
+                            already_captured_ids.update(df_existing['id'].astype(str).tolist())
+                    if already_captured_ids:
+                        logger.info(f"  Collected {len(already_captured_ids)} IDs from previous Signé sheets for dedup")
+                except Exception as e:
+                    logger.warning(f"  Could not read existing Signé sheets for dedup: {e}")
+
+            views = view_generator.generate(df_processed, already_captured_ids=already_captured_ids)
+
+            # Generate previous month Signé (rolling 2-month freshness window)
+            prev_month = current_month - 1 if current_month > 1 else 12
+            prev_year = current_year if current_month > 1 else current_year - 1
+            # For previous month dedup: exclude current month's won IDs + already_captured
+            prev_month_dedup = already_captured_ids | {
+                str(row.get('id', '')) for _, row in views.won_month.data.iterrows()
+            } if not views.won_month.data.empty else already_captured_ids
+            prev_month_won = view_generator.generate_won_for_month(
+                df_processed, prev_year, prev_month, already_captured_ids=prev_month_dedup
+            )
 
             self._log_step("generate_views", "success", {
-                "snapshot_count": len(views.snapshot.data),
                 "sent_month_count": len(views.sent_month.data),
                 "won_month_count": len(views.won_month.data),
-                "sheet_names": views.sheet_names
+                "prev_month_won_count": len(prev_month_won.data),
+                "sheet_names": views.sheet_names,
+                "dedup_ids_count": len(already_captured_ids),
             })
 
             # Step 6: Generate Alerts
@@ -264,7 +323,7 @@ class PipelineRunner:
             else:
                 try:
                     sheets_client = GoogleSheetsClient()
-                    sheet_counts = sheets_client.write_all_views(views)
+                    sheet_counts = sheets_client.write_all_views(views, prev_month_won=prev_month_won)
                     self._log_step("google_sheets", "success", sheet_counts)
                 except Exception as e:
                     import traceback

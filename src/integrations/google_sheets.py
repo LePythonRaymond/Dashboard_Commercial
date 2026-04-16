@@ -270,6 +270,7 @@ class GoogleSheetsClient:
     def get_spreadsheet(self, spreadsheet_id: str) -> gspread.Spreadsheet:
         """
         Get or open a spreadsheet by ID (with caching).
+        Retries on transient errors (503, 429) with exponential backoff.
 
         Args:
             spreadsheet_id: Google Sheets spreadsheet ID
@@ -278,7 +279,23 @@ class GoogleSheetsClient:
             gspread Spreadsheet object
         """
         if spreadsheet_id not in self._spreadsheets:
-            self._spreadsheets[spreadsheet_id] = self.client.open_by_key(spreadsheet_id)
+            last_error = None
+            for attempt in range(1, 4):
+                try:
+                    self._spreadsheets[spreadsheet_id] = self.client.open_by_key(spreadsheet_id)
+                    break
+                except gspread.exceptions.APIError as e:
+                    last_error = e
+                    status = getattr(e, 'response', None)
+                    status_code = status.status_code if status else 0
+                    if status_code in (429, 500, 502, 503) and attempt < 3:
+                        wait = 2 ** attempt
+                        print(f"  Sheets API error {status_code} opening spreadsheet, retrying in {wait}s ({attempt}/3)...")
+                        time.sleep(wait)
+                    else:
+                        raise
+            else:
+                raise last_error
         return self._spreadsheets[spreadsheet_id]
 
     def _with_sheets_write_retry(self, label: str, fn: Callable[[], T]) -> T:
@@ -805,12 +822,13 @@ class GoogleSheetsClient:
             print(f"  Traceback: {traceback.format_exc()}")
             raise Exception(error_msg) from e
 
-    def write_all_views(self, views: ViewsOutput) -> Dict[str, int]:
+    def write_all_views(self, views: ViewsOutput, prev_month_won: 'ViewResult' = None) -> Dict[str, int]:
         """
         Write all views to the appropriate spreadsheets (by type and year).
 
         Args:
             views: ViewsOutput containing all views
+            prev_month_won: Optional ViewResult for previous month's Signé (rolling 2-month freshness)
 
         Returns:
             Dictionary of sheet names to row counts
@@ -818,20 +836,23 @@ class GoogleSheetsClient:
         from datetime import datetime
 
         current_year = datetime.now().year
+        current_month = datetime.now().month
 
         print(f"\n{'='*50}")
         print("Writing views to Google Sheets")
         print(f"Current year: {current_year}")
         print(f"{'='*50}")
 
-        # Write snapshot (État au) - uses current year
-        self.write_view(views.snapshot, 'etat', current_year)
-
         # Write sent month (Envoyé) - uses current year
         self.write_view(views.sent_month, 'envoye', current_year)
 
         # Write won month (Signé) - uses current year
         self.write_view(views.won_month, 'signe', current_year)
+
+        # Write previous month Signé (rolling 2-month freshness window)
+        if prev_month_won is not None and not prev_month_won.data.empty:
+            prev_year = current_year if current_month > 1 else current_year - 1
+            self.write_view(prev_month_won, 'signe', prev_year)
 
         print(f"\n{'='*50}")
         print("All views written successfully!")

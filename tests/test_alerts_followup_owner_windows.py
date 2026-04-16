@@ -143,20 +143,20 @@ def test_conception_uses_date_field_with_owner_override():
 
 
 def test_backward_window_still_applies():
-    """Test that backward window check (1st January, current year) still applies regardless of owner override."""
+    """Test that backward window check (1st January, previous year) still applies regardless of owner override."""
     reference_date = datetime(2026, 1, 15)
     generator = AlertsGenerator(
         reference_date=reference_date,
         followup_days_forward_by_owner={'vincent.delavarende': 365}
     )
 
-    # Backward window = 1st of current year
-    window_start = reference_date.replace(month=1, day=1)
+    # Backward window = 1st of previous year (2025-01-01)
+    window_start = reference_date.replace(year=reference_date.year - 1, month=1, day=1)
 
     # Test case: date before backward window start (should fail regardless of forward window)
     row = pd.Series({
         'final_bu': 'TRAVAUX',
-        'date': window_start - timedelta(days=10),  # Before 1st Jan (not in current year)
+        'date': window_start - timedelta(days=10),  # Before 1st Jan 2025
         'projet_start': pd.Timestamp(2026, 8, 1),  # Within 365-day forward window
         'statut_clean': 'en cours',
         'alert_owner': 'vincent.delavarende'

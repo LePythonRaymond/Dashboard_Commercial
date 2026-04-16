@@ -103,33 +103,61 @@ class ViewGenerator:
         )
         return df[mask].copy()
 
-    def _filter_won_month(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _filter_won_month(
+        self,
+        df: pd.DataFrame,
+        already_captured_ids: set = None,
+        target_month: int = None,
+        target_year: int = None,
+    ) -> pd.DataFrame:
         """
-        Filter for Won Month view: Status WON and (signature_date OR date is current month).
+        Filter for Won Month view: Status WON and (signature_date OR date OR last_updated_at
+        is in the target month).
 
-        This handles cases where signature_date might be missing in CRM.
+        The last_updated_at check catches proposals that became WON after their date month ended.
+        already_captured_ids deduplicates against proposals already in other months' Signé sheets.
 
         Args:
             df: Processed DataFrame
+            already_captured_ids: Set of proposal IDs already captured in other Signé sheets
+            target_month: Month to filter for (defaults to current_month)
+            target_year: Year to filter for (defaults to current_year)
 
         Returns:
             Filtered DataFrame
         """
+        month = target_month or self.current_month
+        year = target_year or self.current_year
+        already_captured_ids = already_captured_ids or set()
+
         mask_status = df['statut_clean'].isin(STATUS_WON)
 
-        # Date condition: signature_date is current month OR proposal date is current month
+        # Date condition: signature_date is target month OR proposal date is target month
         mask_signature = (
-            (df['date_effective_won'].dt.month == self.current_month) &
-            (df['date_effective_won'].dt.year == self.current_year)
+            (df['date_effective_won'].dt.month == month) &
+            (df['date_effective_won'].dt.year == year)
         )
         mask_date = (
-            (df['date'].dt.month == self.current_month) &
-            (df['date'].dt.year == self.current_year)
+            (df['date'].dt.month == month) &
+            (df['date'].dt.year == year)
         )
 
-        mask_time = mask_signature | mask_date
+        # Catch proposals whose status changed to WON recently (last_updated_at in target month)
+        mask_updated = pd.Series(False, index=df.index)
+        if 'last_updated_at' in df.columns:
+            mask_updated = (
+                (df['last_updated_at'].dt.month == month) &
+                (df['last_updated_at'].dt.year == year)
+            )
 
-        return df[mask_status & mask_time].copy()
+        mask_time = mask_signature | mask_date | mask_updated
+        df_won = df[mask_status & mask_time].copy()
+
+        # Dedup: exclude proposals already captured in other months' Signé sheets
+        if already_captured_ids and 'id' in df_won.columns:
+            df_won = df_won[~df_won['id'].astype(str).isin(already_captured_ids)]
+
+        return df_won
 
     def _calculate_ts_total(self, df: pd.DataFrame) -> float:
         """
@@ -264,12 +292,46 @@ class ViewGenerator:
             ts_total=0.0  # Deprecated: TS now merged into typology summary, set to 0 for backward compatibility
         )
 
-    def generate(self, df: pd.DataFrame) -> ViewsOutput:
+    def generate_won_for_month(
+        self,
+        df: pd.DataFrame,
+        year: int,
+        month: int,
+        already_captured_ids: set = None,
+    ) -> ViewResult:
+        """
+        Generate a Signé view for a specific month (not necessarily current).
+
+        Args:
+            df: Fully processed DataFrame
+            year: Target year
+            month: Target month (1-12)
+            already_captured_ids: IDs already in other months' Signé sheets
+
+        Returns:
+            ViewResult for the target month's Signé
+        """
+        month_str = MONTH_MAP.get(month, "Unknown")
+        name = f"Signé {month_str} {year}"
+        df_won = self._filter_won_month(
+            df,
+            already_captured_ids=already_captured_ids,
+            target_month=month,
+            target_year=year,
+        )
+        return self._create_view_result(name, df_won, use_weighted=False)
+
+    def generate(
+        self,
+        df: pd.DataFrame,
+        already_captured_ids: set = None,
+    ) -> ViewsOutput:
         """
         Generate all three views from processed DataFrame.
 
         Args:
             df: Fully processed DataFrame (cleaned + revenue engine applied)
+            already_captured_ids: Set of proposal IDs already in other Signé sheets (for dedup)
 
         Returns:
             ViewsOutput containing all views with summaries
@@ -277,7 +339,7 @@ class ViewGenerator:
         # Generate filtered DataFrames
         df_snapshot = self._filter_snapshot(df)
         df_sent = self._filter_sent_month(df)
-        df_won = self._filter_won_month(df)
+        df_won = self._filter_won_month(df, already_captured_ids=already_captured_ids)
 
         # Create view results (Won uses non-weighted since deals are closed)
         snapshot = self._create_view_result(self.name_snapshot, df_snapshot, use_weighted=True)
@@ -329,7 +391,13 @@ class ViewGenerator:
             (df['date'].dt.month == self.current_month) &
             (df['date'].dt.year == self.current_year)
         )
-        mask_won = mask_status & (mask_signature | mask_date)
+        mask_updated = pd.Series(False, index=df.index)
+        if 'last_updated_at' in df.columns:
+            mask_updated = (
+                (df['last_updated_at'].dt.month == self.current_month) &
+                (df['last_updated_at'].dt.year == self.current_year)
+            )
+        mask_won = mask_status & (mask_signature | mask_date | mask_updated)
 
         return mask_snapshot | mask_sent | mask_won
 

@@ -77,8 +77,8 @@ class AlertsGenerator:
         """
         self.today = reference_date or datetime.now()
 
-        # Calculate date windows: backward = current year, forward = today + N days
-        self.window_start = self.today.replace(month=1, day=1)  # 1st of current year
+        # Calculate date windows: backward = previous year, forward = today + N days
+        self.window_start = self.today.replace(year=self.today.year - 1, month=1, day=1)  # 1st of previous year
         self.default_window_end = self.today + timedelta(days=followup_days_forward)
 
         # Store owner-specific forward windows if provided
@@ -271,6 +271,16 @@ class AlertsGenerator:
         # Apply time window filter
         mask_followup = df_waiting.apply(self._needs_followup, axis=1)
         df_followup = df_waiting[mask_followup].copy()
+
+        # Diagnostic: log dropped proposals and reasons
+        df_dropped = df_waiting[~mask_followup]
+        if not df_dropped.empty:
+            dropped_count = len(df_dropped)
+            backward_dropped = df_dropped[
+                df_dropped['date'].apply(lambda d: pd.isna(d) or d < pd.Timestamp(self.window_start))
+            ]
+            print(f"  Follow-up: {dropped_count} WAITING proposal(s) excluded from window "
+                  f"({len(backward_dropped)} by backward cutoff < {self.window_start.strftime('%Y-%m-%d')})")
 
         if df_followup.empty:
             return {}
