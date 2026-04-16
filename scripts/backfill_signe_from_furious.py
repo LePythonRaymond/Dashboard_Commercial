@@ -146,6 +146,32 @@ def run_backfill(
             sheets_client.write_view(won_view, view_type='signe', year=year)
             logger.info(f"    ✓ Written to Google Sheets")
 
+    # Orphan sweep: find WON proposals dated in target year but not in any Signé sheet
+    df_orphans = view_gen.find_orphan_won_proposals(df_processed, year, all_captured_ids)
+    if not df_orphans.empty:
+        current_month_num = target_months[-1]
+        current_month_name = MONTH_MAP.get(current_month_num, "Unknown")
+        orphan_sheet = f"Signé {current_month_name} {year}"
+        orphan_view = view_gen._create_view_result(orphan_sheet, df_orphans, use_weighted=False)
+
+        logger.info(f"\n  Orphan sweep: {len(df_orphans)} WON proposal(s) dated {year} not in any Signé sheet")
+        for _, row in df_orphans.iterrows():
+            logger.info(f"    ORPHAN: D{row.get('id', '?')} | {str(row.get('title', ''))[:50]} | {row.get('amount', 0):,.0f}€")
+            all_captured_ids.add(str(row.get('id', '')))
+
+        if not dry_run:
+            # Re-read the current month sheet we already wrote and append orphans
+            existing = sheets_client.read_worksheet(orphan_sheet, 'signe', year)
+            if not existing.empty:
+                combined = pd.concat([existing, df_orphans], ignore_index=True)
+            else:
+                combined = df_orphans
+            combined_view = view_gen._create_view_result(orphan_sheet, combined, use_weighted=False)
+            sheets_client.write_view(combined_view, view_type='signe', year=year)
+            logger.info(f"    ✓ Orphans appended to {orphan_sheet}")
+    else:
+        logger.info(f"\n  Orphan sweep: no orphaned WON proposals found for {year}")
+
     logger.info(f"\n  Total unique proposals across all months: {len(all_captured_ids)}")
 
     # Step 5: Optionally run Notion syncs

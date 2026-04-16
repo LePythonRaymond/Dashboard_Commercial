@@ -276,10 +276,28 @@ class PipelineRunner:
                 df_processed, prev_year, prev_month, already_captured_ids=prev_month_dedup
             )
 
+            # Orphan sweep: find WON proposals dated this year but not in any Signé sheet
+            all_captured_now = set(already_captured_ids)
+            if not views.won_month.data.empty and 'id' in views.won_month.data.columns:
+                all_captured_now.update(views.won_month.data['id'].astype(str))
+            if not prev_month_won.data.empty and 'id' in prev_month_won.data.columns:
+                all_captured_now.update(prev_month_won.data['id'].astype(str))
+
+            df_orphans = view_generator.find_orphan_won_proposals(df_processed, current_year, all_captured_now)
+            orphan_count = len(df_orphans)
+            if orphan_count > 0:
+                logger.info(f"  Orphan sweep: {orphan_count} WON proposal(s) not in any Signé sheet — adding to current month")
+                for _, row in df_orphans.iterrows():
+                    logger.info(f"    ORPHAN: D{row.get('id', '?')} | {str(row.get('title', ''))[:50]} | {row.get('amount', 0):,.0f}€")
+                # Append orphans to current month's won view
+                combined = pd.concat([views.won_month.data, df_orphans], ignore_index=True)
+                views.won_month = view_generator._create_view_result(views.won_month.name, combined, use_weighted=False)
+
             self._log_step("generate_views", "success", {
                 "sent_month_count": len(views.sent_month.data),
                 "won_month_count": len(views.won_month.data),
                 "prev_month_won_count": len(prev_month_won.data),
+                "orphan_count": orphan_count,
                 "sheet_names": views.sheet_names,
                 "dedup_ids_count": len(already_captured_ids),
             })

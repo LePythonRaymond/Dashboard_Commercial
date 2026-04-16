@@ -111,10 +111,8 @@ class ViewGenerator:
         target_year: int = None,
     ) -> pd.DataFrame:
         """
-        Filter for Won Month view: Status WON and (signature_date OR date OR last_updated_at
-        is in the target month).
+        Filter for Won Month view: Status WON and (signature_date OR date is in the target month).
 
-        The last_updated_at check catches proposals that became WON after their date month ended.
         already_captured_ids deduplicates against proposals already in other months' Signé sheets.
 
         Args:
@@ -142,15 +140,7 @@ class ViewGenerator:
             (df['date'].dt.year == year)
         )
 
-        # Catch proposals whose status changed to WON recently (last_updated_at in target month)
-        mask_updated = pd.Series(False, index=df.index)
-        if 'last_updated_at' in df.columns:
-            mask_updated = (
-                (df['last_updated_at'].dt.month == month) &
-                (df['last_updated_at'].dt.year == year)
-            )
-
-        mask_time = mask_signature | mask_date | mask_updated
+        mask_time = mask_signature | mask_date
         df_won = df[mask_status & mask_time].copy()
 
         # Dedup: exclude proposals already captured in other months' Signé sheets
@@ -158,6 +148,42 @@ class ViewGenerator:
             df_won = df_won[~df_won['id'].astype(str).isin(already_captured_ids)]
 
         return df_won
+
+    def find_orphan_won_proposals(
+        self,
+        df: pd.DataFrame,
+        year: int,
+        already_captured_ids: set,
+    ) -> pd.DataFrame:
+        """
+        Find WON proposals dated in `year` that weren't captured by any month's Signé view.
+
+        These are proposals that became WON after their date/signature_date month's pipeline
+        ran — they fell through the cracks. They get added to the current month's Signé sheet.
+
+        Args:
+            df: Processed DataFrame
+            year: Target year
+            already_captured_ids: All proposal IDs already in Signé sheets for this year
+
+        Returns:
+            DataFrame of orphan won proposals
+        """
+        mask_status = df['statut_clean'].isin(STATUS_WON)
+
+        # Proposal must be dated in the target year (by date or signature_date)
+        mask_date_year = df['date'].dt.year == year
+        mask_sig_year = df['date_effective_won'].dt.year == year
+        mask_year = mask_date_year | mask_sig_year
+
+        df_won_year = df[mask_status & mask_year].copy()
+
+        if df_won_year.empty or not already_captured_ids:
+            return df_won_year if already_captured_ids is None else pd.DataFrame(columns=df.columns)
+
+        # Find orphans: WON in this year but not in any Signé sheet
+        mask_orphan = ~df_won_year['id'].astype(str).isin(already_captured_ids)
+        return df_won_year[mask_orphan].copy()
 
     def _calculate_ts_total(self, df: pd.DataFrame) -> float:
         """
@@ -391,13 +417,7 @@ class ViewGenerator:
             (df['date'].dt.month == self.current_month) &
             (df['date'].dt.year == self.current_year)
         )
-        mask_updated = pd.Series(False, index=df.index)
-        if 'last_updated_at' in df.columns:
-            mask_updated = (
-                (df['last_updated_at'].dt.month == self.current_month) &
-                (df['last_updated_at'].dt.year == self.current_year)
-            )
-        mask_won = mask_status & (mask_signature | mask_date | mask_updated)
+        mask_won = mask_status & (mask_signature | mask_date)
 
         return mask_snapshot | mask_sent | mask_won
 
