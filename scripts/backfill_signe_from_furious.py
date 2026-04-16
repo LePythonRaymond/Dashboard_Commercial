@@ -37,7 +37,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from config.settings import settings, MONTH_MAP, STATUS_WON, NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER
 from src.api.auth import FuriousAuth
 from src.api.proposals import ProposalsClient
-from src.api.proposal_addons import ProposalAddonsClient, aggregate_addons_by_proposal
+from src.api.proposal_addons import ProposalAddonsClient, merge_addons_into_proposals
 from src.processing.cleaner import DataCleaner
 from src.processing.revenue_engine import RevenueEngine
 from src.processing.views import ViewGenerator
@@ -92,24 +92,9 @@ def run_backfill(
     try:
         addons_client = ProposalAddonsClient(auth=auth)
         df_addons = addons_client.fetch_all()
-        valid_ids = None
-        if 'id' in df_raw.columns and 'date' in df_raw.columns:
-            dates = pd.to_datetime(df_raw['date'], errors='coerce')
-            mask_year = dates.dt.year == year
-            valid_ids = set(df_raw.loc[mask_year, 'id'].astype(str))
-            logger.info(f"  Scoping addons to {len(valid_ids)} proposals dated in {year}")
-        addon_totals = aggregate_addons_by_proposal(df_addons, valid_proposal_ids=valid_ids)
-        if not addon_totals.empty:
-            df_raw['amount'] = pd.to_numeric(df_raw['amount'], errors='coerce').fillna(0)
-            addon_map = addon_totals.to_dict()
-            df_raw['addon_amount'] = df_raw['id'].astype(str).map(addon_map).fillna(0)
-            df_raw['amount'] = df_raw['amount'] + df_raw['addon_amount']
-            count = int((df_raw['addon_amount'] > 0).sum())
-            total = float(df_raw['addon_amount'].sum())
-            logger.info(f"  {len(df_addons)} addon(s) merged into {count} proposal(s) (+{total:,.0f}€)")
-        else:
-            df_raw['addon_amount'] = 0
-            logger.info("  No validated addons found")
+        df_raw, addon_log = merge_addons_into_proposals(df_raw, df_addons, target_year=year)
+        for line in addon_log:
+            logger.info(line)
     except Exception as e:
         logger.warning(f"  Addon fetch failed (continuing without): {e}")
         df_raw['addon_amount'] = 0

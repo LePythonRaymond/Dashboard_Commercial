@@ -32,7 +32,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from config.settings import get_secret, settings, NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER, STATUS_WON
 from src.api.auth import FuriousAuth, AuthenticationError
 from src.api.proposals import ProposalsClient, ProposalsAPIError
-from src.api.proposal_addons import ProposalAddonsClient, aggregate_addons_by_proposal
+from src.api.proposal_addons import ProposalAddonsClient, merge_addons_into_proposals
 from src.processing.cleaner import DataCleaner
 from src.processing.revenue_engine import RevenueEngine
 from src.processing.views import ViewGenerator
@@ -202,35 +202,18 @@ class PipelineRunner:
                 self._log_step("fetch_proposals", "warning", {"message": "No proposals returned"})
 
             # Step 2b: Fetch Proposal Addons (Avenants) and merge into proposal amounts
-            # Only apply addons to proposals dated in the current year (ignore old years)
             logger.info("\n--- Step 2b: Fetching Proposal Addons (Avenants) ---")
             try:
                 addons_client = ProposalAddonsClient(auth=auth)
                 df_addons = addons_client.fetch_all()
                 current_year = datetime.now().year
-                valid_ids = None
-                if 'id' in df_raw.columns and 'date' in df_raw.columns:
-                    dates = pd.to_datetime(df_raw['date'], errors='coerce')
-                    mask_year = dates.dt.year == current_year
-                    valid_ids = set(df_raw.loc[mask_year, 'id'].astype(str))
-                    logger.info(f"  Scoping addons to {len(valid_ids)} proposals dated in {current_year}")
-                addon_totals = aggregate_addons_by_proposal(df_addons, valid_proposal_ids=valid_ids)
-                if not addon_totals.empty and not df_raw.empty:
-                    df_raw['amount'] = pd.to_numeric(df_raw['amount'], errors='coerce').fillna(0)
-                    addon_map = addon_totals.to_dict()
-                    df_raw['addon_amount'] = df_raw['id'].astype(str).map(addon_map).fillna(0)
-                    df_raw['amount'] = df_raw['amount'] + df_raw['addon_amount']
-                    proposals_with_addons = int((df_raw['addon_amount'] > 0).sum())
-                    total_addon_value = float(df_raw['addon_amount'].sum())
-                    self._log_step("fetch_addons", "success", {
-                        "addons_fetched": len(df_addons),
-                        "proposals_with_addons": proposals_with_addons,
-                        "total_addon_value": total_addon_value,
-                    })
-                else:
-                    if not df_raw.empty:
-                        df_raw['addon_amount'] = 0
-                    self._log_step("fetch_addons", "success", {"addons_fetched": 0})
+                df_raw, addon_log = merge_addons_into_proposals(df_raw, df_addons, target_year=current_year)
+                for line in addon_log:
+                    logger.info(line)
+                self._log_step("fetch_addons", "success", {
+                    "addons_fetched": len(df_addons),
+                    "merge_details": len(addon_log),
+                })
             except Exception as e:
                 logger.warning(f"Addon fetch failed (non-fatal, continuing without addons): {e}")
                 if not df_raw.empty:

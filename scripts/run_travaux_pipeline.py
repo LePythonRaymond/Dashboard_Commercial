@@ -25,7 +25,7 @@ import pandas as pd
 
 from src.api.auth import FuriousAuth, AuthenticationError
 from src.api.proposals import ProposalsClient, ProposalsAPIError
-from src.api.proposal_addons import ProposalAddonsClient, aggregate_addons_by_proposal
+from src.api.proposal_addons import ProposalAddonsClient, merge_addons_into_proposals
 from src.api.projects import ProjectsClient, ProjectsAPIError
 from src.processing.cleaner import DataCleaner
 from src.processing.revenue_engine import RevenueEngine
@@ -79,26 +79,13 @@ def run_travaux_pipeline(*, dry_run: bool = False, test_mode: bool = False) -> b
             addons_client = ProposalAddonsClient(auth=auth)
             df_addons = addons_client.fetch_all()
             current_year = datetime.now().year
-            valid_ids = None
-            if 'id' in df_raw.columns and 'date' in df_raw.columns:
-                dates = pd.to_datetime(df_raw['date'], errors='coerce')
-                mask_year = dates.dt.year == current_year
-                valid_ids = set(df_raw.loc[mask_year, 'id'].astype(str))
-                logger.info(f"  Scoping addons to {len(valid_ids)} proposals dated in {current_year}")
-            addon_totals = aggregate_addons_by_proposal(df_addons, valid_proposal_ids=valid_ids)
-            if not addon_totals.empty:
-                df_raw['amount'] = pd.to_numeric(df_raw['amount'], errors='coerce').fillna(0)
-                addon_map = addon_totals.to_dict()
-                df_raw['addon_amount'] = df_raw['id'].astype(str).map(addon_map).fillna(0)
-                df_raw['amount'] = df_raw['amount'] + df_raw['addon_amount']
-                proposals_with_addons = int((df_raw['addon_amount'] > 0).sum())
-                logger.info(f"  {len(df_addons)} addon(s) merged into {proposals_with_addons} proposal(s)")
-            else:
-                df_raw['addon_amount'] = 0
-                logger.info("  No validated addons found")
+            df_raw, addon_log = merge_addons_into_proposals(df_raw, df_addons, target_year=current_year)
+            for line in addon_log:
+                logger.info(line)
         except Exception as e:
             logger.warning(f"Addon fetch failed (non-fatal): {e}")
-            df_raw['addon_amount'] = 0
+            if 'addon_amount' not in df_raw.columns:
+                df_raw['addon_amount'] = 0
 
         logger.info("\n--- Step 3: Cleaning Data ---")
         cleaner = DataCleaner()

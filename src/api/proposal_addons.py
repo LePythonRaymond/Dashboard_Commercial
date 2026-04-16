@@ -1,26 +1,41 @@
 """
 Furious API Proposal Addons (Avenants) Client
 
-Fetches all proposal addons from the Furious CRM with pagination support.
+Fetches proposal addons from the Furious CRM with pagination support.
 Each addon is linked to a parent proposal via the `id` field (proposal ID).
+
+Merge strategy:
+- Addon on a current-year proposal → amount added to parent proposal's amount
+- Addon dated current year on an older proposal → injected as a standalone row
+  (the parent was already counted in a previous year; the addon is new revenue)
 """
 
 import requests
 import pandas as pd
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any, List, Optional, Tuple
+from datetime import datetime
 
 from config.settings import settings
 from .auth import FuriousAuth, AuthenticationError
 
 
-# Fields to fetch from the ProposalAddon API
+# Fields to fetch — rich enough to create standalone rows for cross-year addons
 ADDON_FIELDS = [
     "id_system",
-    "id",          # parent proposal ID
+    "id",               # parent proposal ID
     "amount",
     "status",
     "title",
     "date",
+    "probability",
+    "signature_date",
+    "discount",
+    "project_id",
+    "created_at",
+    "updated_at",
+    "cf_typologie_de_devis",
+    "cf_typologie_myrium",
+    "cf_bu",
 ]
 
 
@@ -39,7 +54,6 @@ class ProposalAddonsClient:
 
     def _build_query(self, offset: int = 0) -> str:
         fields_str = ",".join(self.fields)
-        # Only fetch validated addons: status 1 (billing) or 2 (validated)
         query = f"""{{
   ProposalAddon(
     limit: {self.page_limit},
@@ -72,7 +86,7 @@ class ProposalAddonsClient:
         Fetch all validated proposal addons with automatic pagination.
 
         Returns:
-            DataFrame with columns: id_system, id (proposal_id), amount, status, title, date
+            DataFrame with addon fields
         """
         all_addons: List[Dict] = []
         offset = 0
@@ -114,43 +128,145 @@ class ProposalAddonsClient:
             return pd.DataFrame()
 
         df = pd.DataFrame(all_addons)
-        # Ensure amount is numeric
         if 'amount' in df.columns:
             df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
         return df
 
 
-def aggregate_addons_by_proposal(
+def merge_addons_into_proposals(
+    df_raw: pd.DataFrame,
     df_addons: pd.DataFrame,
-    valid_proposal_ids: set | None = None,
-) -> pd.Series:
+    target_year: int,
+) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Group addons by parent proposal ID and sum their amounts.
+    Merge addons into the proposals DataFrame using two strategies:
+
+    1. **Same-year**: addon's parent proposal is dated in target_year
+       → add addon amount to the parent proposal's `amount` field.
+    2. **Cross-year**: addon is dated in target_year but parent is from an older year
+       → inject the addon as a standalone row (new revenue for this year).
 
     Args:
-        df_addons: DataFrame from ProposalAddonsClient.fetch_all()
-        valid_proposal_ids: If provided, only include addons whose parent proposal ID
-            is in this set. This prevents old/unrelated addons from being counted.
+        df_raw: Raw proposals DataFrame (must have 'id' and 'date' columns)
+        df_addons: Addons DataFrame from ProposalAddonsClient.fetch_all()
+        target_year: The pipeline's target year (e.g. 2026)
 
     Returns:
-        Series mapping proposal_id (str) -> total addon amount
+        Tuple of (updated df_raw, list of log messages describing what was merged)
     """
-    if df_addons.empty or 'id' not in df_addons.columns:
-        return pd.Series(dtype=float)
+    log_lines: List[str] = []
 
-    df = df_addons.copy()
-    df['id'] = df['id'].astype(str)
+    if df_addons.empty or df_raw.empty:
+        return df_raw, log_lines
 
-    # Only keep addons that belong to proposals we actually fetched
-    if valid_proposal_ids:
-        before = len(df)
-        df = df[df['id'].isin(valid_proposal_ids)]
-        skipped = before - len(df)
-        if skipped:
-            print(f"  Filtered out {skipped} addon(s) not matching any fetched proposal")
+    df_raw = df_raw.copy()
+    df_raw['amount'] = pd.to_numeric(df_raw['amount'], errors='coerce').fillna(0)
 
-    grouped = df.groupby('id')['amount'].sum()
-    return grouped
+    # Parse proposal dates to determine which year each proposal belongs to
+    proposal_dates = pd.to_datetime(df_raw['date'], errors='coerce')
+    proposal_year = proposal_dates.dt.year
+    current_year_ids = set(df_raw.loc[proposal_year == target_year, 'id'].astype(str))
+    all_proposal_ids = set(df_raw['id'].astype(str))
+
+    # Parse addon dates
+    addon_dates = pd.to_datetime(df_addons['date'], errors='coerce')
+    addon_year = addon_dates.dt.year
+
+    # --- Same-year addons: parent proposal is in target_year → merge into amount ---
+    mask_same_year = df_addons['id'].astype(str).isin(current_year_ids)
+    df_same = df_addons[mask_same_year]
+
+    merged_count = 0
+    if not df_same.empty:
+        same_year_totals = df_same.groupby(df_same['id'].astype(str))['amount'].sum()
+        addon_map = same_year_totals.to_dict()
+        df_raw['addon_amount'] = df_raw['id'].astype(str).map(addon_map).fillna(0)
+        df_raw['amount'] = df_raw['amount'] + df_raw['addon_amount']
+        merged_count = int((df_raw['addon_amount'] > 0).sum())
+        merged_total = float(df_raw['addon_amount'].sum())
+
+        for proposal_id, addon_total in same_year_totals.items():
+            titles = df_same.loc[df_same['id'].astype(str) == proposal_id, 'title'].tolist()
+            parent_title = df_raw.loc[df_raw['id'].astype(str) == proposal_id, 'title'].values
+            parent_name = parent_title[0] if len(parent_title) > 0 else '?'
+            for t in titles:
+                log_lines.append(f"    MERGED: \"{t}\" (+{addon_total:,.0f}€) → D{proposal_id} ({parent_name})")
+    else:
+        df_raw['addon_amount'] = 0
+        merged_total = 0
+
+    # --- Cross-year addons: addon dated target_year, parent is older → standalone rows ---
+    mask_cross = (
+        (addon_year == target_year)
+        & ~df_addons['id'].astype(str).isin(current_year_ids)
+    )
+    df_cross = df_addons[mask_cross]
+
+    injected_rows = []
+    if not df_cross.empty:
+        # Look up parent proposal data for inherited fields
+        parent_lookup = df_raw.set_index(df_raw['id'].astype(str))
+
+        for _, addon in df_cross.iterrows():
+            parent_id = str(addon['id'])
+            parent = parent_lookup.loc[parent_id] if parent_id in parent_lookup.index else None
+
+            # Build a proposal-like row from the addon
+            row = {
+                'id': f"{parent_id}_AV{addon.get('id_system', '')}",
+                'date': addon.get('date'),
+                'title': f"[Avenant] {addon.get('title', '')}",
+                'amount': float(addon.get('amount', 0)),
+                'discount': addon.get('discount', 0),
+                'vat': parent['vat'] if parent is not None and 'vat' in parent.index else 20.0,
+                'currency': parent['currency'] if parent is not None and 'currency' in parent.index else 'EUR',
+                'assigned_to': parent['assigned_to'] if parent is not None and 'assigned_to' in parent.index else '',
+                'client_id': parent['client_id'] if parent is not None and 'client_id' in parent.index else '',
+                'opportunity_id': parent.get('opportunity_id', '') if parent is not None else '',
+                'statut': parent['statut'] if parent is not None and 'statut' in parent.index else 'Gagnés en cours',
+                'pipe': parent.get('pipe', '') if parent is not None else '',
+                'pipe_name': parent.get('pipe_name', '') if parent is not None else '',
+                'created_at': addon.get('created_at', addon.get('date')),
+                'last_updated_at': addon.get('updated_at'),
+                'legal_entity': parent.get('legal_entity', '') if parent is not None else '',
+                'company_name': parent['company_name'] if parent is not None and 'company_name' in parent.index else '',
+                'id_furious': parent.get('id_furious', '') if parent is not None else '',
+                'total_sold_days': 0,
+                'total_cost': 0,
+                'probability': addon.get('probability', parent['probability'] if parent is not None and 'probability' in parent.index else 100),
+                'entity': parent.get('entity', '') if parent is not None else '',
+                'projet_start': addon.get('date'),  # addon date as project start
+                'projet_stop': addon.get('date'),    # single-day for standalone
+                'sign_url': '',
+                'cf_typologie_de_devis': addon.get('cf_typologie_de_devis') or (parent.get('cf_typologie_de_devis', '') if parent is not None else ''),
+                'cf_typologie_myrium': addon.get('cf_typologie_myrium') or (parent.get('cf_typologie_myrium', '') if parent is not None else ''),
+                'cf_bu': addon.get('cf_bu') or (parent.get('cf_bu', '') if parent is not None else ''),
+                'signature_date': addon.get('signature_date') or addon.get('date'),
+                'addon_amount': 0,  # not an addon merge, it IS the addon
+            }
+            injected_rows.append(row)
+            log_lines.append(
+                f"    INJECTED: \"{addon.get('title', '')}\" ({float(addon.get('amount', 0)):,.0f}€) "
+                f"as standalone (parent D{parent_id} is from older year)"
+            )
+
+    if injected_rows:
+        df_injected = pd.DataFrame(injected_rows)
+        # Align columns — add any missing columns as NaN
+        for col in df_raw.columns:
+            if col not in df_injected.columns:
+                df_injected[col] = None
+        df_raw = pd.concat([df_raw, df_injected[df_raw.columns]], ignore_index=True)
+
+    # Summary log
+    injected_total = sum(r['amount'] for r in injected_rows)
+    print(f"  Addons summary for {target_year}:")
+    print(f"    Same-year merged: {merged_count} proposal(s), +{merged_total:,.0f}€")
+    print(f"    Cross-year injected: {len(injected_rows)} standalone row(s), +{injected_total:,.0f}€")
+    print(f"    Skipped (addon not dated {target_year} and parent not in {target_year}): "
+          f"{len(df_addons) - len(df_same) - len(df_cross)}")
+
+    return df_raw, log_lines
 
 
 class ProposalAddonsAPIError(Exception):
