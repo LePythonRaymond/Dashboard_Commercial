@@ -3288,9 +3288,12 @@ def render_monthly_mean_caption(total: float, divisor: int) -> None:
     if total is None:
         return
     try:
-        mean_value = float(total) / float(divisor)
+        total_value = float(total)
     except (TypeError, ValueError):
         return
+    if total_value == 0:
+        return
+    mean_value = total_value / float(divisor)
     st.markdown(
         f"<div style='text-align:center;font-size:0.78rem;color:#6c757d;"
         f"margin:-6px 0 8px 0;line-height:1.2'>"
