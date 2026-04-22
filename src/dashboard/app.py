@@ -11,7 +11,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
-from datetime import datetime
+from datetime import date, datetime
 import re
 import sys
 import io
@@ -868,18 +868,40 @@ def extract_month_from_sheet(sheet_name: str) -> Tuple[Optional[str], Optional[i
     return None, None
 
 
-def compute_elapsed_accounting_periods(df: pd.DataFrame) -> int:
-    """Number of distinct accounting periods present in df['source_sheet'] (July+August merged).
+def compute_elapsed_accounting_periods(
+    df: pd.DataFrame,
+    year: Optional[int] = None,
+    today: Optional[date] = None,
+) -> int:
+    """Number of FINISHED accounting periods present in df['source_sheet'] (July+August merged).
 
-    Returns 0 when the column is missing or no month can be parsed.
+    A month only counts once it is fully elapsed. For the current calendar year,
+    the current (in-progress) month is excluded. Past years count every month
+    with data; future years always return 0.
+
+    Args:
+        df: Dataframe containing a 'source_sheet' column.
+        year: Optional calendar year being viewed. When equal to today's year,
+            the current month is filtered out. When in the future, the result is 0.
+            When omitted, no completion filtering is applied (legacy behavior).
+        today: Optional reference date (defaults to ``date.today()``).
+
+    Returns:
+        Count of distinct finished accounting periods (0 when none).
     """
     if df is None or df.empty or 'source_sheet' not in df.columns:
+        return 0
+    ref = today or date.today()
+    if year is not None and year > ref.year:
         return 0
     month_numbers: List[int] = []
     for sheet in df['source_sheet'].unique():
         _, month_num = extract_month_from_sheet(str(sheet))
-        if month_num:
-            month_numbers.append(month_num)
+        if not month_num:
+            continue
+        if year is not None and year == ref.year and month_num >= ref.month:
+            continue
+        month_numbers.append(month_num)
     if not month_numbers:
         return 0
     return count_unique_accounting_periods(month_numbers)
@@ -2958,7 +2980,8 @@ def create_production_bu_kpi_row(
     bu_amounts: Dict[str, Dict[str, float]],
     show_pondere: bool = False,
     key_prefix: str = "",
-    monthly_divisor: Optional[int] = None
+    monthly_divisor: Optional[int] = None,
+    total_amount: Optional[float] = None,
 ) -> None:
     """
     Create a row of BU-colored KPI cards for production year amounts with popovers.
@@ -2969,7 +2992,10 @@ def create_production_bu_kpi_row(
         bu_amounts: Dictionary from get_production_bu_amounts()
         show_pondere: Whether to show Total / Pondéré format
         key_prefix: Unique prefix for widget keys
-        monthly_divisor: If > 1, shows a discreet 'X €/mois' caption under each card.
+        monthly_divisor: If > 0, renders a bold 'Moyenne mensuelle' summary line
+            beneath the row (total + per-BU breakdown).
+        total_amount: Optional total to use in the summary line instead of
+            the sum of BU totals.
     """
     cols = st.columns(len(BU_ORDER))
     total_col = f'Montant Total {production_year}'
@@ -2989,9 +3015,6 @@ def create_production_bu_kpi_row(
             label = f"{bu} ({count} projets)"
             create_kpi_card(label, value, "💼", bu)
 
-            if monthly_divisor and monthly_divisor > 1:
-                render_monthly_mean_caption(total, monthly_divisor)
-
             # Add popover with project list
             if not df.empty and 'cf_bu' in df.columns and total_col in df.columns:
                 bu_projects = df[(df['cf_bu'] == bu) & (df[total_col] > 0)].copy()
@@ -3002,6 +3025,13 @@ def create_production_bu_kpi_row(
                         show_pondere=show_pondere,
                         header_text=f"Projets · Production {production_year} · BU={bu}"
                     )
+
+    if monthly_divisor and monthly_divisor > 0:
+        items = [
+            (bu, float(bu_amounts.get(bu, {}).get('total', 0) or 0), BU_COLORS.get(bu))
+            for bu in BU_ORDER
+        ]
+        render_monthly_mean_summary_line(items, monthly_divisor, total=total_amount)
 
 
 def create_production_typologie_kpi_row(type_amounts: Dict[str, Dict[str, float]], show_pondere: bool = False, max_items: int = 5) -> None:
@@ -3122,6 +3152,7 @@ def render_single_production_view(
         show_pondere=show_pondere,
         key_prefix=key_prefix,
         monthly_divisor=12,
+        total_amount=totals['total'],
     )
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -3278,27 +3309,44 @@ def create_kpi_card(label: str, value: str, icon: str = "📊", bu_class: str = 
     """, unsafe_allow_html=True)
 
 
-def render_monthly_mean_caption(total: float, divisor: int) -> None:
-    """Render a discreet 'monthly mean' caption under a KPI card.
+def render_monthly_mean_summary_line(
+    items: List[Tuple[str, float, Optional[str]]],
+    divisor: int,
+    total: Optional[float] = None,
+    label: str = "Moyenne mensuelle",
+) -> None:
+    """Render a single bold line summarising monthly means.
 
-    Shows nothing if the divisor is not a positive integer or the total is zero.
+    Format: '**Moyenne mensuelle :** <total>€ · <name1> <v1>€ · … (sur N mois)'.
+
+    Args:
+        items: list of ``(name, total_value, color_hex)``. Items with a zero total
+            are skipped from the breakdown so the line stays readable.
+        divisor: positive number of months; the line is hidden when ≤ 0.
+        total: optional pre-computed total (defaults to the sum of ``items`` values).
+        label: leading bold label.
     """
     if not divisor or divisor <= 0:
         return
-    if total is None:
+    sum_total = float(total) if total is not None else sum(v for _, v, _ in items)
+    if sum_total == 0:
         return
-    try:
-        total_value = float(total)
-    except (TypeError, ValueError):
-        return
-    if total_value == 0:
-        return
-    mean_value = total_value / float(divisor)
+    parts: List[str] = [
+        f"<strong>{label} :</strong> {sum_total / divisor:,.0f}€"
+    ]
+    for name, value, color in items:
+        if not value:
+            continue
+        style = f"color:{color};" if color else ""
+        parts.append(
+            f"<strong style='{style}'>{name}</strong> {value / divisor:,.0f}€"
+        )
+    suffix = "mois" if divisor > 1 else "mois"
     st.markdown(
-        f"<div style='text-align:center;font-size:0.78rem;color:#6c757d;"
-        f"margin:-6px 0 8px 0;line-height:1.2'>"
-        f"📅 {mean_value:,.0f}€ / mois"
-        f"</div>",
+        "<div style='font-size:0.95rem;margin:0.25rem 0 0.75rem 0'>"
+        + " &middot; ".join(parts)
+        + f" <span style='color:#6c757d'>(sur {divisor} {suffix})</span>"
+        + "</div>",
         unsafe_allow_html=True,
     )
 
@@ -3467,12 +3515,15 @@ def create_bu_kpi_row(
     show_pondere: bool = False,
     show_count: bool = True,
     key_prefix: str = "",
-    monthly_divisor: Optional[int] = None
+    monthly_divisor: Optional[int] = None,
+    total_amount: Optional[float] = None,
 ) -> None:
     """Create a row of BU-colored KPI cards with project counts and popovers.
 
-    If monthly_divisor is a positive integer > 1, a discreet monthly-mean caption
-    is displayed below each card (total / divisor).
+    When ``monthly_divisor`` is > 0, a single bold summary line is rendered
+    below the row: ``Moyenne mensuelle : <total>€ · <BU> <val>€ · … (sur N mois)``.
+    ``total_amount`` overrides the total used in the summary (defaults to the
+    sum of BU totals, which is appropriate for Vue Globale).
     """
     cols = st.columns(len(BU_ORDER))
 
@@ -3492,9 +3543,6 @@ def create_bu_kpi_row(
 
             create_kpi_card(label, value, "💼", bu)
 
-            if monthly_divisor and monthly_divisor > 1:
-                render_monthly_mean_caption(total, monthly_divisor)
-
             # Add popover with project list
             if not df.empty and 'cf_bu' in df.columns:
                 bu_projects = df[df['cf_bu'] == bu].copy()
@@ -3506,6 +3554,13 @@ def create_bu_kpi_row(
                         show_pondere=show_pondere,
                         header_text=f"Projets · BU={bu}"
                     )
+
+    if monthly_divisor and monthly_divisor > 0:
+        items = [
+            (bu, float(bu_amounts.get(bu, {}).get('total', 0) or 0), BU_COLORS.get(bu))
+            for bu in BU_ORDER
+        ]
+        render_monthly_mean_summary_line(items, monthly_divisor, total=total_amount)
 
 
 def create_typologie_kpi_row(type_amounts: Dict[str, Dict[str, float]], show_pondere: bool = False, max_items: int = 5) -> None:
@@ -3546,27 +3601,20 @@ def create_bu_grouped_typologie_blocks(
     Create BU-grouped typologie KPI blocks showing dependency.
 
     For each BU, displays a header and all mapped typologies as KPI cards,
-    even if they have 0€ / 0 projets.
-
-    Args:
-        df: DataFrame with cf_bu and cf_typologie_de_devis columns
-        show_pondere: Whether to show weighted amounts
-        monthly_divisor: If > 1, a small 'X €/mois' caption is added under each card.
+    even if they have 0€ / 0 projets. When ``monthly_divisor`` is > 0, a bold
+    summary line is appended to each BU block with the per-typologie monthly means.
     """
     if df.empty:
         st.info("Aucune donnée disponible")
         return
 
     for bu in BU_ORDER:
-        # Get typologies for this BU
         typologies = BU_TO_TYPOLOGIES.get(bu, [])
         if not typologies:
             continue
 
-        # Get typologie amounts for this BU
         type_amounts = get_typologie_amounts_for_bu(df, bu, include_weighted=show_pondere)
 
-        # BU header - simple colored title text (matching screenshot style)
         bu_color = BU_COLORS.get(bu, '#808080')
         st.markdown(
             f'<div style="font-weight: 700; color: {bu_color}; font-size: 1.1rem; margin: 1rem 0 0.5rem 0; text-transform: uppercase;">'
@@ -3574,7 +3622,6 @@ def create_bu_grouped_typologie_blocks(
             unsafe_allow_html=True
         )
 
-        # Create KPI cards for all typologies in this BU
         num_typologies = len(typologies)
         cols = st.columns(num_typologies)
 
@@ -3591,13 +3638,8 @@ def create_bu_grouped_typologie_blocks(
                     value = f"{total:,.0f}€"
 
                 label = f"{typ} ({int(count)} projets)"
-                # Use BU-themed cards (matches screenshot style and avoids CSS mismatch issues)
                 create_kpi_card(label, value, "🏷️", bu.lower())
 
-                if monthly_divisor and monthly_divisor > 1:
-                    render_monthly_mean_caption(total, monthly_divisor)
-
-                # Add popover with project list
                 typ_projects = filter_projects_for_typologie_bu(df, bu, typ)
                 if not typ_projects.empty:
                     render_projects_popover(
@@ -3606,6 +3648,17 @@ def create_bu_grouped_typologie_blocks(
                         show_pondere=show_pondere,
                         header_text=f"Projets · BU={bu} · Typologie={typ}"
                     )
+
+        if monthly_divisor and monthly_divisor > 0:
+            items = [
+                (typ, float(type_amounts.get(typ, {}).get('total', 0.0) or 0.0), bu_color)
+                for typ in typologies
+            ]
+            render_monthly_mean_summary_line(
+                items,
+                monthly_divisor,
+                label=f"Moyenne mensuelle · {bu}",
+            )
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -3691,11 +3744,8 @@ def create_bu_grouped_typologie_blocks_production(
     """
     Render BU-grouped typologie KPI blocks using production-year columns.
 
-    Args:
-        df: DataFrame with production year columns.
-        production_year: Target production year.
-        show_pondere: Whether to include weighted amounts alongside totals.
-        monthly_divisor: If > 1, a discreet 'X €/mois' caption is rendered under each card.
+    When ``monthly_divisor`` is > 0, a bold 'Moyenne mensuelle' summary line is
+    appended to each BU block with the per-typologie monthly means.
     """
     if df.empty:
         st.info("Aucune donnée disponible")
@@ -3713,7 +3763,6 @@ def create_bu_grouped_typologie_blocks_production(
             include_pondere=show_pondere
         )
 
-        # BU header - simple colored title text (matching screenshot style)
         bu_color = BU_COLORS.get(bu, '#808080')
         st.markdown(
             f'<div style="font-weight: 700; color: {bu_color}; font-size: 1.1rem; margin: 1rem 0 0.5rem 0; text-transform: uppercase;">'
@@ -3737,10 +3786,6 @@ def create_bu_grouped_typologie_blocks_production(
                 label = f"{typ} ({int(count)} projets)"
                 create_kpi_card(label, value, "🏷️", bu.lower())
 
-                if monthly_divisor and monthly_divisor > 1:
-                    render_monthly_mean_caption(total, monthly_divisor)
-
-                # Add popover with project list
                 typ_projects = filter_projects_for_typologie_bu_production(df, production_year, bu, typ)
                 if not typ_projects.empty:
                     render_projects_popover(
@@ -3749,6 +3794,17 @@ def create_bu_grouped_typologie_blocks_production(
                         show_pondere=show_pondere,
                         header_text=f"Projets · Production {production_year} · BU={bu} · Typologie={typ}"
                     )
+
+        if monthly_divisor and monthly_divisor > 0:
+            items = [
+                (typ, float(type_amounts.get(typ, {}).get('total', 0.0) or 0.0), bu_color)
+                for typ in typologies
+            ]
+            render_monthly_mean_summary_line(
+                items,
+                monthly_divisor,
+                label=f"Moyenne mensuelle · {bu}",
+            )
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -4836,21 +4892,13 @@ def main():
     total_count = len(df)
     bu_amounts = get_bu_amounts(df, include_weighted=show_pondere)
 
-    # Monthly stats (using 11-period accounting: July+August count as one period)
-    if 'source_sheet' in df.columns:
-        # Extract month numbers from source_sheet names
-        month_numbers = []
-        for sheet in df['source_sheet'].unique():
-            _, month_num = extract_month_from_sheet(sheet)
-            if month_num:
-                month_numbers.append(month_num)
-        # Count unique accounting periods (July+August = one period)
-        num_periods = count_unique_accounting_periods(month_numbers) if month_numbers else 1
-        monthly_avg = total_amount / num_periods if num_periods > 0 else 0
-        num_months = num_periods  # Use for display (shows accounting periods)
+    # Monthly stats (using 11-period accounting: July+August count as one period;
+    # current in-progress month excluded so we only average over fully elapsed periods).
+    num_months = compute_elapsed_accounting_periods(df, year=selected_year)
+    if num_months > 0:
+        monthly_avg = total_amount / num_months
     else:
-        num_months = 1
-        monthly_avg = total_amount
+        monthly_avg = 0.0
 
     # Navigation with persistence (fixes tab reset bug)
     # Use both session_state and query_params for stability
@@ -4962,11 +5010,10 @@ def main():
                 show_pondere=show_pondere,
                 key_prefix="vue_globale",
                 monthly_divisor=num_months,
+                total_amount=total_amount,
             )
 
             st.markdown("<br>", unsafe_allow_html=True)
-            if num_months > 1:
-                st.markdown(f"**Moyenne mensuelle:** {monthly_avg:,.0f}€ (sur {num_months} mois)")
 
             st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
@@ -5505,7 +5552,6 @@ def main():
                     objective = objective_for_quarter(selected_year, metric_key, "bu", bu, current_quarter)
                     reste = objective - realized_total
                     percent = (realized_total / objective * 100) if objective > 0 else 0.0
-                    moy_mois = realized_total / quarter_divisor
 
                     # Pure signature for this quarter
                     pure_brut, pure_pondere = calculate_pure_signature_for_quarter(
@@ -5515,6 +5561,8 @@ def main():
                         pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
                     else:
                         pure_display = f"{pure_brut:,.0f}€"
+
+                    moy_mois = pure_brut / quarter_divisor
 
                     if has_signature_obj:
                         objective_sig = objective_for_quarter(selected_year, "signature", "bu", bu, current_quarter)
@@ -5556,7 +5604,7 @@ def main():
                             "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
                             "Reste Pond": f"{reste_pond:,.0f}€",
                             "% Pond": f"{percent_pond:.1f}%",
-                            "Moy./mois": f"{(pure_brut / quarter_divisor):,.0f}€",
+                            "Moy./mois": f"{moy_mois:,.0f}€",
                         })
                     else:
                         bu_quarter_data.append({
@@ -5587,7 +5635,6 @@ def main():
                         objective = objective_for_quarter(selected_year, metric_key, "typologie", typo, current_quarter)
                         reste = objective - realized_total
                         percent = (realized_total / objective * 100) if objective > 0 else 0.0
-                        moy_mois = realized_total / quarter_divisor
 
                         # Pure signature for this quarter
                         pure_brut, pure_pondere = calculate_pure_signature_for_quarter(
@@ -5597,6 +5644,8 @@ def main():
                             pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
                         else:
                             pure_display = f"{pure_brut:,.0f}€"
+
+                        moy_mois = pure_brut / quarter_divisor
 
                         if has_signature_obj:
                             objective_sig = objective_for_quarter(selected_year, "signature", "typologie", typo, current_quarter)
@@ -5638,7 +5687,7 @@ def main():
                                 "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
                                 "Reste Pond": f"{reste_pond:,.0f}€",
                                 "% Pond": f"{percent_pond:.1f}%",
-                                "Moy./mois": f"{(pure_brut / quarter_divisor):,.0f}€",
+                                "Moy./mois": f"{moy_mois:,.0f}€",
                             })
                         else:
                             typo_quarter_data.append({
@@ -5680,7 +5729,6 @@ def main():
                     objective = objective_for_year(selected_year, metric_key, "bu", bu)
                     reste = objective - realized_total
                     percent = (realized_total / objective * 100) if objective > 0 else 0.0
-                    moy_mois = realized_total / year_divisor
 
                     # Pure signature for this year
                     pure_brut, pure_pondere = calculate_pure_signature_for_year(
@@ -5690,6 +5738,8 @@ def main():
                         pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
                     else:
                         pure_display = f"{pure_brut:,.0f}€"
+
+                    moy_mois = pure_brut / year_divisor
 
                     if has_signature_obj:
                         objective_sig = objective_for_year(selected_year, "signature", "bu", bu)
@@ -5730,7 +5780,7 @@ def main():
                             "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
                             "Reste Pond": f"{reste_pond:,.0f}€",
                             "% Pond": f"{percent_pond:.1f}%",
-                            "Moy./mois": f"{(pure_brut / year_divisor):,.0f}€",
+                            "Moy./mois": f"{moy_mois:,.0f}€",
                         })
                     else:
                         bu_year_data.append({
@@ -5761,7 +5811,6 @@ def main():
                         objective = objective_for_year(selected_year, metric_key, "typologie", typo)
                         reste = objective - realized_total
                         percent = (realized_total / objective * 100) if objective > 0 else 0.0
-                        moy_mois = realized_total / year_divisor
 
                         # Pure signature for this year
                         pure_brut, pure_pondere = calculate_pure_signature_for_year(
@@ -5771,6 +5820,8 @@ def main():
                             pure_display = f"{pure_brut:,.0f}€ / {pure_pondere:,.0f}€"
                         else:
                             pure_display = f"{pure_brut:,.0f}€"
+
+                        moy_mois = pure_brut / year_divisor
 
                         if has_signature_obj:
                             objective_sig = objective_for_year(selected_year, "signature", "typologie", typo)
@@ -5811,7 +5862,7 @@ def main():
                                 "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
                                 "Reste Pond": f"{reste_pond:,.0f}€",
                                 "% Pond": f"{percent_pond:.1f}%",
-                                "Moy./mois": f"{(pure_brut / year_divisor):,.0f}€",
+                                "Moy./mois": f"{moy_mois:,.0f}€",
                             })
                         else:
                             typo_year_data.append({
