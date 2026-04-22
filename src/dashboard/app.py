@@ -868,6 +868,23 @@ def extract_month_from_sheet(sheet_name: str) -> Tuple[Optional[str], Optional[i
     return None, None
 
 
+def compute_elapsed_accounting_periods(df: pd.DataFrame) -> int:
+    """Number of distinct accounting periods present in df['source_sheet'] (July+August merged).
+
+    Returns 0 when the column is missing or no month can be parsed.
+    """
+    if df is None or df.empty or 'source_sheet' not in df.columns:
+        return 0
+    month_numbers: List[int] = []
+    for sheet in df['source_sheet'].unique():
+        _, month_num = extract_month_from_sheet(str(sheet))
+        if month_num:
+            month_numbers.append(month_num)
+    if not month_numbers:
+        return 0
+    return count_unique_accounting_periods(month_numbers)
+
+
 def get_monthly_data(df: pd.DataFrame, include_weighted: bool = False) -> pd.DataFrame:
     """Aggregate data by month and BU."""
     if df.empty or 'source_sheet' not in df.columns:
@@ -2940,7 +2957,8 @@ def create_production_bu_kpi_row(
     production_year: int,
     bu_amounts: Dict[str, Dict[str, float]],
     show_pondere: bool = False,
-    key_prefix: str = ""
+    key_prefix: str = "",
+    monthly_divisor: Optional[int] = None
 ) -> None:
     """
     Create a row of BU-colored KPI cards for production year amounts with popovers.
@@ -2951,6 +2969,7 @@ def create_production_bu_kpi_row(
         bu_amounts: Dictionary from get_production_bu_amounts()
         show_pondere: Whether to show Total / Pondéré format
         key_prefix: Unique prefix for widget keys
+        monthly_divisor: If > 1, shows a discreet 'X €/mois' caption under each card.
     """
     cols = st.columns(len(BU_ORDER))
     total_col = f'Montant Total {production_year}'
@@ -2969,6 +2988,9 @@ def create_production_bu_kpi_row(
 
             label = f"{bu} ({count} projets)"
             create_kpi_card(label, value, "💼", bu)
+
+            if monthly_divisor and monthly_divisor > 1:
+                render_monthly_mean_caption(total, monthly_divisor)
 
             # Add popover with project list
             if not df.empty and 'cf_bu' in df.columns and total_col in df.columns:
@@ -3093,7 +3115,14 @@ def render_single_production_view(
     # === BU Amounts ===
     st.markdown('<div class="section-header">💼 Montants par Business Unit</div>', unsafe_allow_html=True)
     bu_amounts = get_production_bu_amounts(df, production_year, include_pondere=show_pondere)
-    create_production_bu_kpi_row(df, production_year, bu_amounts, show_pondere=show_pondere, key_prefix=key_prefix)
+    create_production_bu_kpi_row(
+        df,
+        production_year,
+        bu_amounts,
+        show_pondere=show_pondere,
+        key_prefix=key_prefix,
+        monthly_divisor=12,
+    )
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -3108,7 +3137,7 @@ def render_single_production_view(
             unsafe_allow_html=True,
         )
         create_bu_grouped_typologie_blocks_production(
-            df, production_year=production_year, show_pondere=show_pondere
+            df, production_year=production_year, show_pondere=show_pondere, monthly_divisor=12
         )
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("#### Montant par Typologie")
@@ -3247,6 +3276,28 @@ def create_kpi_card(label: str, value: str, icon: str = "📊", bu_class: str = 
         <div class="metric-label">{label}</div>
     </div>
     """, unsafe_allow_html=True)
+
+
+def render_monthly_mean_caption(total: float, divisor: int) -> None:
+    """Render a discreet 'monthly mean' caption under a KPI card.
+
+    Shows nothing if the divisor is not a positive integer or the total is zero.
+    """
+    if not divisor or divisor <= 0:
+        return
+    if total is None:
+        return
+    try:
+        mean_value = float(total) / float(divisor)
+    except (TypeError, ValueError):
+        return
+    st.markdown(
+        f"<div style='text-align:center;font-size:0.78rem;color:#6c757d;"
+        f"margin:-6px 0 8px 0;line-height:1.2'>"
+        f"📅 {mean_value:,.0f}€ / mois"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def build_furious_url(proposal_id: str) -> str:
@@ -3412,9 +3463,14 @@ def create_bu_kpi_row(
     bu_amounts: Dict[str, Dict[str, float]],
     show_pondere: bool = False,
     show_count: bool = True,
-    key_prefix: str = ""
+    key_prefix: str = "",
+    monthly_divisor: Optional[int] = None
 ) -> None:
-    """Create a row of BU-colored KPI cards with project counts and popovers."""
+    """Create a row of BU-colored KPI cards with project counts and popovers.
+
+    If monthly_divisor is a positive integer > 1, a discreet monthly-mean caption
+    is displayed below each card (total / divisor).
+    """
     cols = st.columns(len(BU_ORDER))
 
     for i, bu in enumerate(BU_ORDER):
@@ -3432,6 +3488,9 @@ def create_bu_kpi_row(
                 label = f"{bu} ({count} projets)"
 
             create_kpi_card(label, value, "💼", bu)
+
+            if monthly_divisor and monthly_divisor > 1:
+                render_monthly_mean_caption(total, monthly_divisor)
 
             # Add popover with project list
             if not df.empty and 'cf_bu' in df.columns:
@@ -3477,7 +3536,8 @@ def create_typologie_kpi_row(type_amounts: Dict[str, Dict[str, float]], show_pon
 
 def create_bu_grouped_typologie_blocks(
     df: pd.DataFrame,
-    show_pondere: bool = False
+    show_pondere: bool = False,
+    monthly_divisor: Optional[int] = None
 ) -> None:
     """
     Create BU-grouped typologie KPI blocks showing dependency.
@@ -3488,6 +3548,7 @@ def create_bu_grouped_typologie_blocks(
     Args:
         df: DataFrame with cf_bu and cf_typologie_de_devis columns
         show_pondere: Whether to show weighted amounts
+        monthly_divisor: If > 1, a small 'X €/mois' caption is added under each card.
     """
     if df.empty:
         st.info("Aucune donnée disponible")
@@ -3529,6 +3590,9 @@ def create_bu_grouped_typologie_blocks(
                 label = f"{typ} ({int(count)} projets)"
                 # Use BU-themed cards (matches screenshot style and avoids CSS mismatch issues)
                 create_kpi_card(label, value, "🏷️", bu.lower())
+
+                if monthly_divisor and monthly_divisor > 1:
+                    render_monthly_mean_caption(total, monthly_divisor)
 
                 # Add popover with project list
                 typ_projects = filter_projects_for_typologie_bu(df, bu, typ)
@@ -3618,10 +3682,17 @@ def get_production_typologie_amounts_for_bu(
 def create_bu_grouped_typologie_blocks_production(
     df: pd.DataFrame,
     production_year: int,
-    show_pondere: bool = False
+    show_pondere: bool = False,
+    monthly_divisor: Optional[int] = None
 ) -> None:
     """
     Render BU-grouped typologie KPI blocks using production-year columns.
+
+    Args:
+        df: DataFrame with production year columns.
+        production_year: Target production year.
+        show_pondere: Whether to include weighted amounts alongside totals.
+        monthly_divisor: If > 1, a discreet 'X €/mois' caption is rendered under each card.
     """
     if df.empty:
         st.info("Aucune donnée disponible")
@@ -3662,6 +3733,9 @@ def create_bu_grouped_typologie_blocks_production(
 
                 label = f"{typ} ({int(count)} projets)"
                 create_kpi_card(label, value, "🏷️", bu.lower())
+
+                if monthly_divisor and monthly_divisor > 1:
+                    render_monthly_mean_caption(total, monthly_divisor)
 
                 # Add popover with project list
                 typ_projects = filter_projects_for_typologie_bu_production(df, production_year, bu, typ)
@@ -4439,6 +4513,8 @@ def _col_cell_style(col: str, is_first_sig: bool, row_idx: int) -> str:
         base += "font-weight:600;"
     if col in ("Objectif Production", "Objectif Signature", "Objectif", "Objectif Envoi"):
         base += "color:#555;font-size:0.9em;"
+    if col == "Moy./mois":
+        base += "color:#495057;font-size:0.88em;font-style:italic;border-left:2px solid #adb5bd;"
     if is_first_sig:
         base += "border-left:3px solid #222;"
     return base
@@ -4446,7 +4522,10 @@ def _col_cell_style(col: str, is_first_sig: bool, row_idx: int) -> str:
 
 def _col_head_style(col: str, is_first_sig: bool, has_two_blocks: bool) -> str:
     """Return inline CSS for a <th>."""
-    if col in _SIG_COLS and has_two_blocks:
+    if col == "Moy./mois":
+        bg = "#6c757d"
+        fg = "#ffffff"
+    elif col in _SIG_COLS and has_two_blocks:
         bg = "#1a1a2e"
         fg = "#ffffff"
     else:
@@ -4455,6 +4534,8 @@ def _col_head_style(col: str, is_first_sig: bool, has_two_blocks: bool) -> str:
     base = f"padding:9px 10px;text-align:left;font-weight:700;font-size:0.88em;letter-spacing:0.04em;color:{fg};background:{bg};"
     if is_first_sig:
         base += "border-left:3px solid #222;"
+    if col == "Moy./mois":
+        base += "border-left:2px solid #adb5bd;"
     return base
 
 
@@ -4872,7 +4953,13 @@ def main():
             st.markdown("<br>", unsafe_allow_html=True)
 
             st.markdown('<div class="section-header">💼 Montants par Business Unit</div>', unsafe_allow_html=True)
-            create_bu_kpi_row(df, bu_amounts, show_pondere=show_pondere, key_prefix="vue_globale")
+            create_bu_kpi_row(
+                df,
+                bu_amounts,
+                show_pondere=show_pondere,
+                key_prefix="vue_globale",
+                monthly_divisor=num_months,
+            )
 
             st.markdown("<br>", unsafe_allow_html=True)
             if num_months > 1:
@@ -4901,7 +4988,7 @@ def main():
             st.markdown("<br>", unsafe_allow_html=True)
             with st.expander("🏷️ Analyse par typologie", expanded=False):
                 st.markdown('<div class="section-header">🏷️ Montants par Typologie (groupés par BU)</div>', unsafe_allow_html=True)
-                create_bu_grouped_typologie_blocks(df, show_pondere=show_pondere)
+                create_bu_grouped_typologie_blocks(df, show_pondere=show_pondere, monthly_divisor=num_months)
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.markdown('<div class="section-header">🏷️ Analyse par Typologie</div>', unsafe_allow_html=True)
                 fig_type_donut = plot_typologie_donut(df, "Répartition par Typologie")
@@ -5399,6 +5486,10 @@ def main():
                     if use_pondere
                     else f"Montant Total {current_quarter}_{selected_year}"
                 )
+                _quarter_months_map = {"Q1": [1, 2, 3], "Q2": [4, 5, 6], "Q3": [7, 8, 9], "Q4": [10, 11, 12]}
+                quarter_divisor = max(
+                    count_unique_accounting_periods(_quarter_months_map[current_quarter]), 1
+                )
                 for bu in BU_ORDER:
                     # For MAINTENANCE use only start-of-year (3/11 per quarter)
                     if bu == "MAINTENANCE" and entretien_start_2026 is not None:
@@ -5411,6 +5502,7 @@ def main():
                     objective = objective_for_quarter(selected_year, metric_key, "bu", bu, current_quarter)
                     reste = objective - realized_total
                     percent = (realized_total / objective * 100) if objective > 0 else 0.0
+                    moy_mois = realized_total / quarter_divisor
 
                     # Pure signature for this quarter
                     pure_brut, pure_pondere = calculate_pure_signature_for_quarter(
@@ -5434,10 +5526,11 @@ def main():
                             "Objectif Signature": f"{objective_sig:,.0f}€",
                             "Signature": pure_display,
                             "Reste Sig": f"{reste_sig:,.0f}€",
-                            "% Sig": f"{percent_sig:.1f}%"
+                            "% Sig": f"{percent_sig:.1f}%",
+                            "Moy./mois": f"{moy_mois:,.0f}€",
                         })
                     elif has_envoye_dual_block:
-                        quarter_months_list = {"Q1": [1,2,3], "Q2": [4,5,6], "Q3": [7,8,9], "Q4": [10,11,12]}[current_quarter]
+                        quarter_months_list = _quarter_months_map[current_quarter]
                         avg_prob = calculate_avg_probability_for_sent(
                             metric_df, selected_year, quarter_months_list, "bu", bu
                         )
@@ -5459,7 +5552,8 @@ def main():
                             "Objectif Signature": f"{objective_sig:,.0f}€",
                             "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
                             "Reste Pond": f"{reste_pond:,.0f}€",
-                            "% Pond": f"{percent_pond:.1f}%"
+                            "% Pond": f"{percent_pond:.1f}%",
+                            "Moy./mois": f"{(pure_brut / quarter_divisor):,.0f}€",
                         })
                     else:
                         bu_quarter_data.append({
@@ -5468,7 +5562,8 @@ def main():
                             "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
                             "Pur": pure_display,
                             "Reste": f"{reste:,.0f}€",
-                            "%": f"{percent:.1f}%"
+                            "%": f"{percent:.1f}%",
+                            "Moy./mois": f"{moy_mois:,.0f}€",
                         })
 
                 st.markdown(render_objectives_table_html(pd.DataFrame(bu_quarter_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
@@ -5489,6 +5584,7 @@ def main():
                         objective = objective_for_quarter(selected_year, metric_key, "typologie", typo, current_quarter)
                         reste = objective - realized_total
                         percent = (realized_total / objective * 100) if objective > 0 else 0.0
+                        moy_mois = realized_total / quarter_divisor
 
                         # Pure signature for this quarter
                         pure_brut, pure_pondere = calculate_pure_signature_for_quarter(
@@ -5512,10 +5608,11 @@ def main():
                                 "Objectif Signature": f"{objective_sig:,.0f}€",
                                 "Signature": pure_display,
                                 "Reste Sig": f"{reste_sig:,.0f}€",
-                                "% Sig": f"{percent_sig:.1f}%"
+                                "% Sig": f"{percent_sig:.1f}%",
+                                "Moy./mois": f"{moy_mois:,.0f}€",
                             })
                         elif has_envoye_dual_block:
-                            quarter_months_list = {"Q1": [1,2,3], "Q2": [4,5,6], "Q3": [7,8,9], "Q4": [10,11,12]}[current_quarter]
+                            quarter_months_list = _quarter_months_map[current_quarter]
                             avg_prob = calculate_avg_probability_for_sent(
                                 metric_df, selected_year, quarter_months_list, "typologie", typo
                             )
@@ -5537,7 +5634,8 @@ def main():
                                 "Objectif Signature": f"{objective_sig:,.0f}€",
                                 "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
                                 "Reste Pond": f"{reste_pond:,.0f}€",
-                                "% Pond": f"{percent_pond:.1f}%"
+                                "% Pond": f"{percent_pond:.1f}%",
+                                "Moy./mois": f"{(pure_brut / quarter_divisor):,.0f}€",
                             })
                         else:
                             typo_quarter_data.append({
@@ -5546,7 +5644,8 @@ def main():
                                 "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
                                 "Pur": pure_display,
                                 "Reste": f"{reste:,.0f}€",
-                                "%": f"{percent:.1f}%"
+                                "%": f"{percent:.1f}%",
+                                "Moy./mois": f"{moy_mois:,.0f}€",
                             })
 
                     st.markdown(render_objectives_table_html(pd.DataFrame(typo_quarter_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
@@ -5565,6 +5664,7 @@ def main():
                     if use_pondere
                     else f"Montant Total {selected_year}"
                 )
+                year_divisor = 11  # 11-period accounting year (July+August merged, as per objectives)
                 for bu in BU_ORDER:
                     # For MAINTENANCE use only start-of-year (full year total)
                     if bu == "MAINTENANCE" and entretien_start_2026 is not None:
@@ -5577,6 +5677,7 @@ def main():
                     objective = objective_for_year(selected_year, metric_key, "bu", bu)
                     reste = objective - realized_total
                     percent = (realized_total / objective * 100) if objective > 0 else 0.0
+                    moy_mois = realized_total / year_divisor
 
                     # Pure signature for this year
                     pure_brut, pure_pondere = calculate_pure_signature_for_year(
@@ -5600,7 +5701,8 @@ def main():
                             "Objectif Signature": f"{objective_sig:,.0f}€",
                             "Signature": pure_display,
                             "Reste Sig": f"{reste_sig:,.0f}€",
-                            "% Sig": f"{percent_sig:.1f}%"
+                            "% Sig": f"{percent_sig:.1f}%",
+                            "Moy./mois": f"{moy_mois:,.0f}€",
                         })
                     elif has_envoye_dual_block:
                         avg_prob = calculate_avg_probability_for_sent(
@@ -5624,7 +5726,8 @@ def main():
                             "Objectif Signature": f"{objective_sig:,.0f}€",
                             "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
                             "Reste Pond": f"{reste_pond:,.0f}€",
-                            "% Pond": f"{percent_pond:.1f}%"
+                            "% Pond": f"{percent_pond:.1f}%",
+                            "Moy./mois": f"{(pure_brut / year_divisor):,.0f}€",
                         })
                     else:
                         bu_year_data.append({
@@ -5633,7 +5736,8 @@ def main():
                             "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
                             "Pur": pure_display,
                             "Reste": f"{reste:,.0f}€",
-                            "%": f"{percent:.1f}%"
+                            "%": f"{percent:.1f}%",
+                            "Moy./mois": f"{moy_mois:,.0f}€",
                         })
 
                 st.markdown(render_objectives_table_html(pd.DataFrame(bu_year_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
@@ -5654,6 +5758,7 @@ def main():
                         objective = objective_for_year(selected_year, metric_key, "typologie", typo)
                         reste = objective - realized_total
                         percent = (realized_total / objective * 100) if objective > 0 else 0.0
+                        moy_mois = realized_total / year_divisor
 
                         # Pure signature for this year
                         pure_brut, pure_pondere = calculate_pure_signature_for_year(
@@ -5677,7 +5782,8 @@ def main():
                                 "Objectif Signature": f"{objective_sig:,.0f}€",
                                 "Signature": pure_display,
                                 "Reste Sig": f"{reste_sig:,.0f}€",
-                                "% Sig": f"{percent_sig:.1f}%"
+                                "% Sig": f"{percent_sig:.1f}%",
+                                "Moy./mois": f"{moy_mois:,.0f}€",
                             })
                         elif has_envoye_dual_block:
                             avg_prob = calculate_avg_probability_for_sent(
@@ -5701,7 +5807,8 @@ def main():
                                 "Objectif Signature": f"{objective_sig:,.0f}€",
                                 "Envoyé Pondéré": f"{pure_pondere:,.0f}€",
                                 "Reste Pond": f"{reste_pond:,.0f}€",
-                                "% Pond": f"{percent_pond:.1f}%"
+                                "% Pond": f"{percent_pond:.1f}%",
+                                "Moy./mois": f"{(pure_brut / year_divisor):,.0f}€",
                             })
                         else:
                             typo_year_data.append({
@@ -5710,7 +5817,8 @@ def main():
                                 "Réalisé": _format_realized_with_carryover(realized_total, realized_prev),
                                 "Pur": pure_display,
                                 "Reste": f"{reste:,.0f}€",
-                                "%": f"{percent:.1f}%"
+                                "%": f"{percent:.1f}%",
+                                "Moy./mois": f"{moy_mois:,.0f}€",
                             })
 
                     st.markdown(render_objectives_table_html(pd.DataFrame(typo_year_data), signed_two_blocks=(has_signature_obj or has_envoye_dual_block)), unsafe_allow_html=True)
