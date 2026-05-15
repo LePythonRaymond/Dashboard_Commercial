@@ -10,6 +10,9 @@ google-auth>=2.22.0
 google-auth-oauthlib>=1.0.0
 gspread>=5.10.0
 
+# Excel export (Budget xlsx generator)
+openpyxl>=3.1.0
+
 # Dashboard
 streamlit>=1.28.0
 plotly>=5.17.0
