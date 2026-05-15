@@ -93,7 +93,39 @@ from src.processing.objectives import (
     count_unique_accounting_periods, ACCOUNTING_PERIODS,
     OBJECTIVES,
 )
-from src.processing.typologie_allocation import allocate_typologie_for_row
+from src.processing.typologie_allocation import (
+    allocate_typologie_for_row,
+    CANONICAL_TYPOLOGIES,
+)
+from src.processing.revenue_engine import RevenueEngine
+from src.processing.manual_and_overrides import (
+    apply_input_overrides,
+    apply_quarter_overrides,
+    get_manual_projects_store,
+    get_overrides_store,
+    inject_manual_projects,
+)
+from src.processing.manual_projects_store import (
+    DEFAULT_STATUT as MANUAL_DEFAULT_STATUT,
+    ManualProject,
+)
+from src.processing.overrides_store import ProjectOverride
+
+from src.dashboard.components.create_manual_project_dialog import (
+    PREFILL_KEY as MANUAL_PREFILL_KEY,
+    show_create_manual_project_dialog,
+    trigger_create_manual_dialog,
+)
+from src.dashboard.components.edit_project_dialog import (
+    show_edit_project_dialog,
+    trigger_edit_project_dialog,
+)
+from src.dashboard.components.pending_links_panel import (
+    render_pending_links_sidebar,
+)
+
+# Project root used to locate data/ JSON stores.
+DASHBOARD_PROJECT_ROOT = MYRIUM_ROOT
 
 # =============================================================================
 # CONSTANTS
@@ -332,9 +364,77 @@ def get_sheets_client() -> GoogleSheetsClient:
     return GoogleSheetsClient()
 
 
+def _stores_mtime_signature() -> float:
+    """
+    Combined mtime of overrides.json + manual_projects.json.
+
+    Used as a cache key so any user edit invalidates cached worksheet reads.
+    """
+    overrides_path = DASHBOARD_PROJECT_ROOT / "data" / "overrides.json"
+    manuals_path = DASHBOARD_PROJECT_ROOT / "data" / "manual_projects.json"
+    total = 0.0
+    for p in (overrides_path, manuals_path):
+        try:
+            total += p.stat().st_mtime
+        except (FileNotFoundError, OSError):
+            continue
+    return total
+
+
+def _apply_user_layer(
+    df: pd.DataFrame,
+    *,
+    inject_manuals: bool,
+    year_for_engine: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    Re-apply the same overrides + manuals merge layer that the pipeline uses,
+    on top of a DataFrame freshly read from Google Sheets.
+
+    Lets the dashboard reflect user edits immediately, even before the next
+    daily pipeline run rewrites Sheets.
+
+    ``inject_manuals=False`` is used for the snapshot view ("État au …" /
+    "État actuel") to avoid double-counting, since manuals already get
+    written to those sheets by the pipeline.
+    """
+    if df is None or df.empty:
+        return df
+
+    overrides_store = get_overrides_store(DASHBOARD_PROJECT_ROOT)
+    manuals_store = get_manual_projects_store(DASHBOARD_PROJECT_ROOT)
+
+    if "id" not in df.columns:
+        return df
+
+    if inject_manuals and manuals_store.count() > 0:
+        years = [year_for_engine] if year_for_engine else None
+        engine = RevenueEngine(years_to_track=years) if years else RevenueEngine()
+        # Drop any manual rows already coming from sheets (avoid duplication if
+        # pipeline already wrote them) before re-injecting from the store.
+        manual_ids = {p.manual_id for p in manuals_store.all()}
+        if manual_ids:
+            mask_keep = ~df["id"].astype(str).isin(manual_ids)
+            df = df[mask_keep].copy()
+        df = inject_manual_projects(df, manuals_store, engine)
+
+    df = apply_quarter_overrides(df, overrides_store)
+    return df
+
+
 @st.cache_data(ttl=300)  # Cache for 5 minutes
-def load_worksheet_data(sheet_name: str, view_type: Optional[str] = None, year: Optional[int] = None) -> pd.DataFrame:
-    """Load data from a specific worksheet with caching."""
+def load_worksheet_data(
+    sheet_name: str,
+    view_type: Optional[str] = None,
+    year: Optional[int] = None,
+    stores_signature: float = 0.0,
+) -> pd.DataFrame:
+    """Load data from a specific worksheet with caching.
+
+    ``stores_signature`` is the combined mtime of overrides.json +
+    manual_projects.json so any user edit invalidates the cached value.
+    """
+    del stores_signature  # used only as a cache key
     # #region agent log - Track worksheet loading (inside cache = cache miss)
     ws_start = time.time()
     debug_log("load_worksheet_data:CACHE_MISS", f"Loading sheet: {sheet_name}",
@@ -342,6 +442,8 @@ def load_worksheet_data(sheet_name: str, view_type: Optional[str] = None, year: 
     # #endregion
     client = get_sheets_client()
     result = client.read_worksheet(sheet_name, view_type=view_type, year=year)
+    inject_manuals = view_type != "etat"
+    result = _apply_user_layer(result, inject_manuals=inject_manuals, year_for_engine=year)
     # #region agent log
     debug_log("load_worksheet_data:DONE", f"Loaded {len(result)} rows in {time.time()-ws_start:.2f}s",
               {"sheet": sheet_name, "rows": len(result), "duration_s": round(time.time()-ws_start, 2)}, "A")
@@ -409,7 +511,12 @@ def load_year_data(year: int, sheet_type: str = "Signé") -> pd.DataFrame:
     dfs = []
     for sheet in sheets:
         try:
-            df = load_worksheet_data(sheet, view_type=view_type, year=year)
+            df = load_worksheet_data(
+                sheet,
+                view_type=view_type,
+                year=year,
+                stores_signature=_stores_mtime_signature(),
+            )
             if not df.empty:
                 # Ensure column names are unique (handle duplicates)
                 if df.columns.duplicated().any():
@@ -3023,7 +3130,8 @@ def create_production_bu_kpi_row(
                         "🔎 Voir projets",
                         bu_projects,
                         show_pondere=show_pondere,
-                        header_text=f"Projets · Production {production_year} · BU={bu}"
+                        header_text=f"Projets · Production {production_year} · BU={bu}",
+                        bu_prefill=bu,
                     )
 
     if monthly_divisor and monthly_divisor > 0:
@@ -3366,13 +3474,35 @@ def build_furious_url(proposal_id: str) -> str:
     return f"https://merciraymond.furious-squad.com/compta.php?view=5&cherche={proposal_id}"
 
 
-def prepare_projects_table(df: pd.DataFrame, *, show_pondere: bool = False) -> pd.DataFrame:
+def _detect_years_from_columns(columns) -> List[int]:
+    """Find every year ``Y`` such that ``Montant Total Y`` exists in ``columns``."""
+    years: set = set()
+    for col in columns:
+        for prefix in ("Montant Total ", "Montant Pondéré "):
+            if col.startswith(prefix):
+                tail = col[len(prefix):]
+                if tail.isdigit():
+                    years.add(int(tail))
+                elif tail.startswith("Q"):
+                    parts = tail.split("_")
+                    if len(parts) == 2 and parts[1].isdigit():
+                        years.add(int(parts[1]))
+    return sorted(years)
+
+
+def prepare_projects_table(
+    df: pd.DataFrame,
+    *,
+    show_pondere: bool = False,
+    breakdown_year: Optional[int] = None,
+) -> pd.DataFrame:
     """
     Prepare a minimal projects table for display in popover.
 
     Args:
         df: DataFrame with project data
         show_pondere: Whether to include weighted amount column
+        breakdown_year: When set, append the year totals + 4 quarterly cells for that year.
 
     Returns:
         DataFrame with minimal columns formatted for display
@@ -3380,21 +3510,27 @@ def prepare_projects_table(df: pd.DataFrame, *, show_pondere: bool = False) -> p
     if df.empty:
         return pd.DataFrame()
 
-    # Select minimal columns
     display_cols = ['title', 'company_name', 'amount']
     if show_pondere and 'amount_pondere' in df.columns:
         display_cols.append('amount_pondere')
     display_cols.extend(['probability', 'date', 'projet_start', 'projet_stop', 'cf_bu', 'cf_typologie_de_devis'])
+
+    breakdown_cols: List[str] = []
+    if breakdown_year:
+        candidates = (
+            [f"Montant Total {breakdown_year}"]
+            + [f"Montant Total Q{q}_{breakdown_year}" for q in range(1, 5)]
+        )
+        breakdown_cols = [c for c in candidates if c in df.columns]
+        display_cols.extend(breakdown_cols)
+
     if 'id' in df.columns:
         display_cols.append('id')
 
-    # Filter to only existing columns
     display_cols = [c for c in display_cols if c in df.columns]
 
-    # Create a copy for formatting
     result_df = df[display_cols].copy()
 
-    # Format date columns to DD/MM/YYYY
     date_cols = ['date', 'projet_start', 'projet_stop']
     for col in date_cols:
         if col in result_df.columns:
@@ -3403,7 +3539,6 @@ def prepare_projects_table(df: pd.DataFrame, *, show_pondere: bool = False) -> p
                 lambda x: x.strftime('%d/%m/%Y') if pd.notna(x) else ''
             )
 
-    # Format amount columns
     if 'amount' in result_df.columns:
         result_df['amount'] = result_df['amount'].apply(lambda x: f"{float(x):,.0f}€" if pd.notna(x) else '')
     if 'amount_pondere' in result_df.columns:
@@ -3411,16 +3546,16 @@ def prepare_projects_table(df: pd.DataFrame, *, show_pondere: bool = False) -> p
             lambda x: f"{float(x):,.0f}€" if pd.notna(x) else ''
         )
 
-    # Format probability
+    for col in breakdown_cols:
+        result_df[col] = pd.to_numeric(result_df[col], errors='coerce').fillna(0.0)
+
     if 'probability' in result_df.columns:
         result_df['probability'] = result_df['probability'].apply(
             lambda x: f"{float(x):.0f}%" if pd.notna(x) else ''
         )
 
-    # Create furious_url column if id exists
     if 'id' in result_df.columns:
         result_df['furious_url'] = result_df['id'].apply(build_furious_url)
-        # Reorder to put furious_url after id
         cols = result_df.columns.tolist()
         if 'id' in cols and 'furious_url' in cols:
             id_idx = cols.index('id')
@@ -3442,14 +3577,52 @@ def _show_projects_dialog() -> None:
     projects_df = data.get("df", pd.DataFrame())
     show_pondere = bool(data.get("show_pondere", False))
     header_text = data.get("header_text")
+    bu_prefill = data.get("bu_prefill")
+    typologie_prefill = data.get("typologie_prefill")
 
     if projects_df is None or projects_df.empty:
         st.info("Aucun projet disponible")
         return
 
-    prepared_df = prepare_projects_table(projects_df, show_pondere=show_pondere)
+    if header_text:
+        st.markdown(f"**{header_text}**")
+    st.markdown(f"**{len(projects_df)} projet(s)**")
 
-    # Build column config for dataframe
+    new_col, year_col = st.columns([1, 2])
+    with new_col:
+        if st.button(
+            "+ Ajouter projet manuel",
+            type="secondary",
+            use_container_width=True,
+            key=f"projects_dialog_new_{abs(hash(header_text or 'projects')) % 10**8}",
+        ):
+            trigger_create_manual_dialog(
+                cf_bu=bu_prefill,
+                cf_typologie_de_devis=typologie_prefill,
+            )
+            return
+
+    available_years = _detect_years_from_columns(projects_df.columns)
+    breakdown_year: Optional[int] = None
+    if available_years:
+        with year_col:
+            default_year = datetime.now().year
+            year_index = (
+                available_years.index(default_year)
+                if default_year in available_years
+                else len(available_years) - 1
+            )
+            breakdown_year = st.selectbox(
+                "Détail année",
+                available_years,
+                index=year_index,
+                key=f"projects_dialog_year_{abs(hash(header_text or 'projects')) % 10**8}",
+            )
+
+    prepared_df = prepare_projects_table(
+        projects_df, show_pondere=show_pondere, breakdown_year=breakdown_year
+    )
+
     column_config = {}
     if 'furious_url' in prepared_df.columns:
         column_config['furious_url'] = st.column_config.LinkColumn(
@@ -3467,15 +3640,83 @@ def _show_projects_dialog() -> None:
         column_config['company_name'] = st.column_config.TextColumn("Client", width="medium")
     if 'probability' in prepared_df.columns:
         column_config['probability'] = st.column_config.TextColumn("Probabilité", width="small")
+    if breakdown_year:
+        for col_name in (
+            f"Montant Total {breakdown_year}",
+            *[f"Montant Total Q{q}_{breakdown_year}" for q in range(1, 5)],
+        ):
+            if col_name in prepared_df.columns:
+                short_label = (
+                    f"Total {breakdown_year}"
+                    if col_name == f"Montant Total {breakdown_year}"
+                    else col_name.replace(f"Montant Total ", "").replace(f"_{breakdown_year}", f" {breakdown_year}")
+                )
+                column_config[col_name] = st.column_config.NumberColumn(
+                    short_label, format="%.0f €"
+                )
 
-    if header_text:
-        st.markdown(f"**{header_text}**")
-    st.markdown(f"**{len(projects_df)} projet(s)**")
     st.dataframe(
         prepared_df,
         use_container_width=True,
         hide_index=True,
-        column_config=column_config if column_config else None
+        column_config=column_config if column_config else None,
+    )
+
+    st.markdown("---")
+    st.caption("Modifier ou surcharger les valeurs d'un projet :")
+    edit_col, id_col = st.columns([1, 2])
+    with id_col:
+        target_id = st.text_input(
+            "ID du projet à modifier",
+            placeholder="ex. 12345 ou MAN-2026-0001",
+            key=f"projects_dialog_edit_id_{abs(hash(header_text or 'projects')) % 10**8}",
+        )
+    with edit_col:
+        if st.button(
+            "Modifier",
+            type="primary",
+            use_container_width=True,
+            disabled=not target_id.strip(),
+            key=f"projects_dialog_edit_btn_{abs(hash(header_text or 'projects')) % 10**8}",
+        ):
+            _open_edit_dialog_for_id(projects_df, target_id.strip(), available_years)
+
+
+def _open_edit_dialog_for_id(
+    projects_df: pd.DataFrame, project_id: str, available_years: List[int]
+) -> None:
+    """Look up ``project_id`` in ``projects_df`` and open the edit dialog."""
+    if 'id' not in projects_df.columns:
+        st.warning("Ce tableau ne contient pas de colonne `id`, modification impossible.")
+        return
+    matches = projects_df[projects_df['id'].astype(str) == str(project_id)]
+    if matches.empty:
+        st.warning(f"Aucun projet avec l'ID `{project_id}` dans cette sélection.")
+        return
+    row = matches.iloc[0]
+    quarter_snapshot: dict = {}
+    for year in available_years:
+        for col in [f"Montant Total {year}"] + [f"Montant Total Q{q}_{year}" for q in range(1, 5)]:
+            if col in row.index:
+                try:
+                    quarter_snapshot[col] = float(row[col] or 0)
+                except (TypeError, ValueError):
+                    quarter_snapshot[col] = 0.0
+    is_manual = str(project_id).startswith("MAN-")
+    trigger_edit_project_dialog(
+        project_id=str(project_id),
+        title=str(row.get("title", "")),
+        company_name=str(row.get("company_name", "")),
+        cf_bu=str(row.get("cf_bu", "")),
+        cf_typologie_de_devis=str(row.get("cf_typologie_de_devis", "")),
+        amount=float(row.get("amount") or 0),
+        probability=float(row.get("probability") or 0),
+        date_envoi=str(row.get("date") or "") or None,
+        projet_start=str(row.get("projet_start") or "") or None,
+        projet_stop=str(row.get("projet_stop") or "") or None,
+        available_years=available_years,
+        quarter_snapshot=quarter_snapshot,
+        is_manual=is_manual,
     )
 
 
@@ -3484,14 +3725,19 @@ def render_projects_popover(
     projects_df: pd.DataFrame,
     *,
     show_pondere: bool = False,
-    header_text: Optional[str] = None
+    header_text: Optional[str] = None,
+    bu_prefill: Optional[str] = None,
+    typologie_prefill: Optional[str] = None,
 ) -> None:
     """
     Render a small trigger button that opens a large dialog (st.dialog) with the projects table.
 
     We use a dialog because Streamlit popovers don't reliably support sizing.
+
+    ``bu_prefill`` / ``typologie_prefill`` are forwarded to the « + Ajouter projet manuel »
+    button so the create dialog opens with the right defaults when launched
+    from a typology-specific KPI card.
     """
-    # Stable-enough unique button key per KPI context
     base = (header_text or "projects").strip()
     safe = re.sub(r"[^a-zA-Z0-9_]+", "_", base)[:80] or "projects"
     btn_key = f"voir_projets_{safe}"
@@ -3505,6 +3751,8 @@ def render_projects_popover(
             "df": projects_df.copy(),
             "show_pondere": show_pondere,
             "header_text": header_text,
+            "bu_prefill": bu_prefill,
+            "typologie_prefill": typologie_prefill,
         }
         _show_projects_dialog()
 
@@ -3552,7 +3800,8 @@ def create_bu_kpi_row(
                         "🔎 Voir projets",
                         bu_projects,
                         show_pondere=show_pondere,
-                        header_text=f"Projets · BU={bu}"
+                        header_text=f"Projets · BU={bu}",
+                        bu_prefill=bu,
                     )
 
     if monthly_divisor and monthly_divisor > 0:
@@ -3646,7 +3895,9 @@ def create_bu_grouped_typologie_blocks(
                         "🔎 Voir projets",
                         typ_projects,
                         show_pondere=show_pondere,
-                        header_text=f"Projets · BU={bu} · Typologie={typ}"
+                        header_text=f"Projets · BU={bu} · Typologie={typ}",
+                        bu_prefill=bu,
+                        typologie_prefill=typ,
                     )
 
         if monthly_divisor and monthly_divisor > 0:
@@ -3792,7 +4043,9 @@ def create_bu_grouped_typologie_blocks_production(
                         "🔎 Voir projets",
                         typ_projects,
                         show_pondere=show_pondere,
-                        header_text=f"Projets · Production {production_year} · BU={bu} · Typologie={typ}"
+                        header_text=f"Projets · Production {production_year} · BU={bu} · Typologie={typ}",
+                        bu_prefill=bu,
+                        typologie_prefill=typ,
                     )
 
         if monthly_divisor and monthly_divisor > 0:
@@ -4789,6 +5042,34 @@ def get_available_months_from_sheets(df: pd.DataFrame) -> List[Tuple[int, int]]:
     return sorted(months_years, key=lambda x: (x[1], x[0]))
 
 
+def _check_password() -> bool:
+    """
+    Tiny password gate for self-hosted deployments.
+
+    Reads ``DASHBOARD_PASSWORD`` from env / Streamlit secrets. If unset, the
+    gate is disabled (useful for local dev). Otherwise, the user must enter
+    the password once per browser session before seeing the dashboard.
+    """
+    expected = get_secret("DASHBOARD_PASSWORD", "")
+    if not expected:
+        return True
+    if st.session_state.get("dashboard_authenticated"):
+        return True
+
+    st.markdown('<h1 class="main-header">🌿 Dashboard Commercial</h1>', unsafe_allow_html=True)
+    st.markdown("*Accès réservé*")
+    pwd = st.text_input(
+        "Mot de passe", type="password", key="dashboard_password_input"
+    )
+    if st.button("Se connecter", type="primary"):
+        if pwd == expected:
+            st.session_state["dashboard_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Mot de passe incorrect")
+    return False
+
+
 def main():
     """Main dashboard application."""
     # #region agent log - Track script reruns
@@ -4797,15 +5078,30 @@ def main():
     debug_log("app.py:main:START", f"Script rerun #{run_id}", {"run_id": run_id}, "A")
     # #endregion
 
+    if not _check_password():
+        return
 
     # Header
     st.markdown('<h1 class="main-header">🌿 Dashboard Commercial</h1>', unsafe_allow_html=True)
     st.markdown("*Commercial tracking & forecasting for Merci Raymond*")
     st.markdown("---")
 
+    # Wire override / manual stores so dialogs can reach them via session_state.
+    overrides_store = get_overrides_store(DASHBOARD_PROJECT_ROOT)
+    manual_projects_store = get_manual_projects_store(DASHBOARD_PROJECT_ROOT)
+    st.session_state["overrides_store_factory"] = lambda: get_overrides_store(DASHBOARD_PROJECT_ROOT)
+    st.session_state["manual_projects_store_factory"] = lambda: get_manual_projects_store(DASHBOARD_PROJECT_ROOT)
+
     # Sidebar
     with st.sidebar:
         st.markdown('<h2 style="color: #1a472a; font-weight: 700; margin-bottom: 1rem;">🌿 Merci Raymond</h2>', unsafe_allow_html=True)
+
+    render_pending_links_sidebar(
+        manual_store=manual_projects_store,
+        overrides_store=overrides_store,
+    )
+
+    with st.sidebar:
         st.markdown("### Filtres")
 
         # Year selection

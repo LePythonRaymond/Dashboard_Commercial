@@ -489,6 +489,47 @@ class RevenueEngine:
 
         return result
 
+    def process_single_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Run the revenue engine on a single project payload (e.g. a manually-added
+        project that doesn't exist in Furious yet).
+
+        Accepts a plain dict with the same fields the engine reads from a
+        DataFrame row (``amount``, ``probability``, ``date``, ``projet_start``,
+        ``projet_stop``, ``final_bu``, ...). Missing pandas-typed fields are
+        coerced (dates parsed, probability_factor derived from probability).
+
+        Returns a dict containing the financial columns plus the dates_*
+        diagnostic fields produced by ``calculate_revenue``.
+        """
+        normalized = dict(row)
+
+        for date_col in ('date', 'projet_start', 'projet_stop'):
+            value = normalized.get(date_col)
+            if value is None or value == '' or (isinstance(value, float) and pd.isna(value)):
+                normalized[date_col] = pd.NaT
+            elif not isinstance(value, pd.Timestamp):
+                normalized[date_col] = pd.to_datetime(value, errors='coerce')
+
+        try:
+            normalized['amount'] = float(normalized.get('amount') or 0)
+        except (TypeError, ValueError):
+            normalized['amount'] = 0.0
+
+        if 'probability_factor' not in normalized:
+            try:
+                prob = float(normalized.get('probability') or 0)
+            except (TypeError, ValueError):
+                prob = 0.0
+            if prob == 0:
+                prob = 50.0
+            normalized['probability_factor'] = prob / 100.0
+
+        if 'final_bu' not in normalized or not normalized.get('final_bu'):
+            normalized['final_bu'] = (normalized.get('cf_bu') or 'AUTRE')
+
+        return self.calculate_revenue(pd.Series(normalized))
+
     def process(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Apply revenue calculations to entire DataFrame.

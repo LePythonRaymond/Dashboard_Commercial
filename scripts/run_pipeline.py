@@ -46,6 +46,13 @@ from src.integrations.google_sheets import GoogleSheetsClient
 from src.integrations.email_sender import EmailSender
 from src.integrations.notion_alerts_sync import NotionAlertsSync
 from src.integrations.notion_maintenance_won_sync import NotionMaintenanceWonSync
+from src.processing.manual_and_overrides import (
+    apply_input_overrides,
+    apply_quarter_overrides,
+    get_manual_projects_store,
+    get_overrides_store,
+    inject_manual_projects,
+)
 
 
 # Configure logging
@@ -226,13 +233,29 @@ class PipelineRunner:
             df_cleaned = cleaner.clean(df_raw)
             self._log_step("clean_data", "success", {"rows": len(df_cleaned)})
 
+            # Step 3.5: Apply user input overrides (before engine)
+            overrides_store = get_overrides_store(PROJECT_ROOT)
+            manual_projects_store = get_manual_projects_store(PROJECT_ROOT)
+            df_cleaned = apply_input_overrides(df_cleaned, overrides_store)
+
             # Step 4: Apply Revenue Engine
             logger.info("\n--- Step 4: Applying Revenue Engine ---")
             revenue_engine = RevenueEngine()
             df_processed = revenue_engine.process(df_cleaned)
             financial_cols = revenue_engine.get_financial_columns()
+
+            # Step 4.5: Inject manual projects + apply per-quarter overrides
+            df_processed = inject_manual_projects(
+                df_processed, manual_projects_store, revenue_engine
+            )
+            df_processed = apply_quarter_overrides(
+                df_processed, overrides_store, revenue_engine.years_to_track
+            )
+
             self._log_step("revenue_engine", "success", {
-                "financial_columns_added": len(financial_cols)
+                "financial_columns_added": len(financial_cols),
+                "manual_projects_injected": manual_projects_store.count(),
+                "overrides_applied": len(overrides_store.all()),
             })
 
             # Step 5: Generate Views

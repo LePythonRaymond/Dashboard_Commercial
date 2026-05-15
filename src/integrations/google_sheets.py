@@ -989,8 +989,9 @@ class GoogleSheetsClient:
                 else:
                     empty_row_count = 0
 
-                # Only add rows where id looks like a valid proposal id (numeric)
-                if id_value.isdigit():
+                # Only add rows where id looks like a valid proposal id
+                # (numeric Furious id, or "MAN-YYYY-NNNN" manual-project id).
+                if id_value.isdigit() or id_value.startswith("MAN-"):
                     data_rows.append(row)
 
             if not data_rows:

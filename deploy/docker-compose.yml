@@ -1,0 +1,64 @@
+# Side-car compose file: builds + runs the Streamlit dashboard and registers it
+# with the existing Traefik reverse proxy (defined in /root/docker-compose.yml).
+#
+# Deploy:
+#   cd /root/Customs/Dashboard_Commercial/deploy
+#   docker compose up -d --build
+#
+# Logs:
+#   docker compose logs -f
+#
+# Stop:
+#   docker compose down
+
+services:
+  dashboard:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: myrium-dashboard:latest
+    container_name: myrium-dashboard
+    restart: unless-stopped
+
+    # Read all secrets (Furious creds, Notion API key, Google Sheets IDs,
+    # DASHBOARD_PASSWORD, ...) from the SAME .env file the cron pipeline reads.
+    # One file, two consumers — no drift.
+    env_file:
+      - ../.env
+
+    # Bind-mount the host's data/ folder so the dashboard sees the same JSON
+    # files the cron pipeline writes (overrides + manual projects).
+    # Bind-mount credentials so the dashboard can read the Google OAuth token
+    # (and refresh it when it expires).
+    volumes:
+      - ../data:/app/data
+      - ../config/credentials:/app/config/credentials
+
+    # Join Traefik's network. The Docker network is created by the parent
+    # compose file at /root/docker-compose.yml under the name `merci_net`,
+    # but Compose prefixes it with the project folder name → "root_merci_net".
+    networks:
+      - merci_net
+
+    # Routing rules consumed by Traefik. Mirrors the pattern n8n uses.
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=root_merci_net
+      - traefik.http.routers.dashboard.rule=Host(`dashboard-commercial.srv1082911.hstgr.cloud`)
+      - traefik.http.routers.dashboard.tls=true
+      - traefik.http.routers.dashboard.entrypoints=web,websecure
+      - traefik.http.routers.dashboard.tls.certresolver=mytlschallenge
+      - traefik.http.services.dashboard.loadbalancer.server.port=8501
+      - traefik.http.middlewares.dashboard-headers.headers.SSLRedirect=true
+      - traefik.http.middlewares.dashboard-headers.headers.STSSeconds=315360000
+      - traefik.http.middlewares.dashboard-headers.headers.STSIncludeSubdomains=true
+      - traefik.http.middlewares.dashboard-headers.headers.STSPreload=true
+      - traefik.http.middlewares.dashboard-headers.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.dashboard-headers.headers.browserXSSFilter=true
+      - traefik.http.middlewares.dashboard-headers.headers.forceSTSHeader=true
+      - traefik.http.routers.dashboard.middlewares=dashboard-headers@docker
+
+networks:
+  merci_net:
+    external: true
+    name: root_merci_net
