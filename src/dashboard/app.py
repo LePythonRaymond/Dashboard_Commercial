@@ -61,6 +61,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from config.settings import settings, MONTH_MAP, get_secret, MYRIUM_ROOT
 from src.integrations.google_sheets import GoogleSheetsClient
 from src.integrations.notion_entretien_start import fetch_maintenance_entretien_start_2026
+from src.integrations.notion_maintenance_portefeuille import (
+    fetch_maintenance_portefeuille_running,
+)
+from src.integrations.budget_export import build_budget_workbook
 from src.integrations.entretien_start_store import (
     get_store_path,
     read_entretien_start_2026_from_file,
@@ -5042,6 +5046,75 @@ def get_available_months_from_sheets(df: pd.DataFrame) -> List[Tuple[int, int]]:
     return sorted(months_years, key=lambda x: (x[1], x[0]))
 
 
+# =============================================================================
+# BUDGET EXPORT WRAPPER
+# =============================================================================
+
+def _build_budget_xlsx_for_year(year: int) -> bytes:
+    """
+    Build the Budget {year} xlsx for download.
+
+    Loads WON (Signé sheets) and WAITING (Envoyé sheets) for the year and
+    unions them on `id_devis` so each proposal contributes once.
+    Resolves portefeuille values for the Maintenance section.
+    """
+    df_signe = load_year_data(year, "Signé")
+    df_envoye = load_year_data(year, "Envoyé")
+
+    frames = [d for d in (df_signe, df_envoye) if d is not None and not d.empty]
+    if frames:
+        all_columns = sorted({c for d in frames for c in d.columns})
+        aligned = []
+        for d in frames:
+            for col in all_columns:
+                if col not in d.columns:
+                    d[col] = None
+            aligned.append(d[all_columns])
+        df_combined = pd.concat(aligned, ignore_index=True)
+        if 'id_devis' in df_combined.columns:
+            df_combined = df_combined.drop_duplicates(subset=['id_devis'], keep='first')
+        elif 'id' in df_combined.columns:
+            df_combined = df_combined.drop_duplicates(subset=['id'], keep='first')
+    else:
+        df_combined = pd.DataFrame()
+
+    df_combined = parse_numeric_columns(df_combined)
+
+    portefeuille_debut: Optional[float] = None
+    if year == 2026:
+        portefeuille_debut = _get_entretien_start_2026_value()
+
+    api_key = get_secret("NOTION_API_KEY", "")
+    ds_id = (
+        get_secret("NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID", "").strip()
+        or get_secret("NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATABASE_ID", "").strip()
+    )
+
+    portefeuille_running: Optional[float] = None
+    if api_key and ds_id:
+        try:
+            portefeuille_running = fetch_maintenance_portefeuille_running(api_key, ds_id)
+        except Exception:
+            portefeuille_running = None
+
+    if portefeuille_running is None and portefeuille_debut is not None:
+        # Fallback: début + new contracts of the year (matches the manual
+        # `=996697.45 + 47011.71` pattern visible in Budget 2026.xlsx).
+        from src.integrations.budget_export import _compute_maintenance_entries
+        entries = _compute_maintenance_entries(df_combined, year)
+        portefeuille_running = float(portefeuille_debut) + sum(
+            float(e.get("montant_ht") or 0.0) for e in entries
+        )
+
+    return build_budget_workbook(
+        year=year,
+        df_processed=df_combined,
+        portefeuille_debut_annee=portefeuille_debut,
+        portefeuille_running=portefeuille_running,
+        today=date.today(),
+    )
+
+
 def _check_password() -> bool:
     """
     Tiny password gate for self-hosted deployments.
@@ -5115,6 +5188,29 @@ def main():
         # #region agent log - Track sidebar selections
         debug_log("sidebar:YEAR_SELECTED", f"Year: {selected_year}", {"year": selected_year}, "D")
         # #endregion
+
+        # Generate budget xlsx (build then download — keeps build cost off rerun)
+        budget_bytes_key = f"_budget_xlsx_bytes_{selected_year}"
+        if st.button(
+            f"📊 Générer budget {selected_year}",
+            use_container_width=True,
+            key=f"_generate_budget_btn_{selected_year}",
+        ):
+            with st.spinner(f"Génération du budget {selected_year}..."):
+                try:
+                    st.session_state[budget_bytes_key] = _build_budget_xlsx_for_year(int(selected_year))
+                except Exception as e:
+                    st.session_state[budget_bytes_key] = None
+                    st.error(f"Erreur lors de la génération du budget : {e}")
+        if st.session_state.get(budget_bytes_key):
+            st.download_button(
+                label=f"⬇️ Télécharger budget {selected_year}.xlsx",
+                data=st.session_state[budget_bytes_key],
+                file_name=f"Budget_{selected_year}_{date.today().strftime('%Y-%m-%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key=f"_download_budget_btn_{selected_year}",
+            )
 
         # View type
         view_type = st.radio(
