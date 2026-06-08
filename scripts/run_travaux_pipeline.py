@@ -50,7 +50,7 @@ def _setup_logging() -> logging.Logger:
     return logging.getLogger(__name__)
 
 
-def run_travaux_pipeline(*, dry_run: bool = False, test_mode: bool = False) -> bool:
+def run_travaux_pipeline(*, dry_run: bool = False, test_mode: bool = False, skip_emails: bool = False) -> bool:
     logger = logging.getLogger(__name__)
 
     logger.info("=" * 60)
@@ -111,9 +111,12 @@ def run_travaux_pipeline(*, dry_run: bool = False, test_mode: bool = False) -> b
 
         logger.info(f"Found {len(proposals)} proposal(s) for TRAVAUX projection.")
 
-        email_sender = EmailSender(test_mode=test_mode)
-        email_sent = email_sender.send_travaux_projection_email(proposals)
-        logger.info(f"TRAVAUX projection email sent: {email_sent}")
+        if skip_emails:
+            logger.info("Skipping TRAVAUX projection email (--skip-emails); Notion sync still runs.")
+        else:
+            email_sender = EmailSender(test_mode=test_mode)
+            email_sent = email_sender.send_travaux_projection_email(proposals)
+            logger.info(f"TRAVAUX projection email sent: {email_sent}")
 
         notion_travaux_sync = NotionTravauxSync()
         sync_stats = notion_travaux_sync.sync_proposals(proposals)
@@ -189,9 +192,14 @@ def main():
         action="store_true",
         help="Test mode: redirect emails to taddeo.carpinelli@merciraymond.fr",
     )
+    parser.add_argument(
+        "--skip-emails",
+        action="store_true",
+        help="Sync Notion (projection + recent projects) but do NOT send the projection email",
+    )
     args = parser.parse_args()
 
-    ok = run_travaux_pipeline(dry_run=args.dry_run, test_mode=args.test)
+    ok = run_travaux_pipeline(dry_run=args.dry_run, test_mode=args.test, skip_emails=args.skip_emails)
     sys.exit(0 if ok else 1)
 
 
