@@ -235,7 +235,7 @@ NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER: Dict[str, int] = {
 }
 
 # TRAVAUX Projection Configuration
-TRAVAUX_PROJECTION_PROBABILITY_THRESHOLD = 25  # Minimum probability for projection
+TRAVAUX_PROJECTION_PROBABILITY_THRESHOLD = 10  # Min probability for Pipe Travaux projection (lowered 25->10 on 2026-06-08 to include 10% "Brief" devis; window kept at 365d)
 TRAVAUX_PROJECTION_START_WINDOW = 365  # Days for project start date filter (rolling 365 days)
 
 # Excluded Owners (proposals from these owners will be filtered out)
