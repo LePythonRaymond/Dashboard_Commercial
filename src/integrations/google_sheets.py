@@ -699,6 +699,29 @@ class GoogleSheetsClient:
 
         return current_row + 1, separator_indices  # Add blank row after summary
 
+    def _clear_existing_view(self, view_name: str, view_type: str, year: int) -> None:
+        """
+        Clear a worksheet's content + formatting if it already exists; no-op otherwise.
+
+        Used by the live Envoyé writer to wipe a month that previously had pending
+        devis (created_at-based) but now has none, so the dashboard stops unioning
+        stale rows. Never creates a worksheet or spreadsheet.
+        """
+        try:
+            spreadsheet_id = settings.get_spreadsheet_id(view_type, year)
+            if not spreadsheet_id:
+                return
+            spreadsheet = self.get_spreadsheet(spreadsheet_id)
+            try:
+                worksheet = spreadsheet.worksheet(view_name)
+            except gspread.exceptions.WorksheetNotFound:
+                return
+            self._with_sheets_write_retry("clear stale worksheet", lambda: worksheet.clear())
+            self._reset_worksheet_layout_and_formatting(spreadsheet, worksheet)
+            print(f"  Cleared stale Envoyé sheet (no pending devis this month): {view_name}")
+        except Exception as e:
+            print(f"  (skip clearing {view_name}: {e})")
+
     def write_view(
         self,
         view: ViewResult,
@@ -843,8 +866,26 @@ class GoogleSheetsClient:
         print(f"Current year: {current_year}")
         print(f"{'='*50}")
 
-        # Write sent month (Envoyé) - uses current year
-        self.write_view(views.sent_month, 'envoye', current_year)
+        # Write Envoyé as a live, date-keyed open-pipe snapshot.
+        # views.sent_live_views is a list of (year, ViewResult) covering the whole
+        # current year (every month, so stale created_at-based sheets get cleared)
+        # plus any future year that has pending devis. We only touch years that have a
+        # configured spreadsheet so we never create an orphan spreadsheet by name.
+        sent_live_views = getattr(views, 'sent_live_views', None)
+        if sent_live_views:
+            for yr, vr in sent_live_views:
+                if yr != current_year and not settings.get_spreadsheet_id('envoye', yr):
+                    print(f"  Skipping Envoyé {yr}: no SPREADSHEET_ENVOYE_{yr} configured")
+                    continue
+                if vr.data is not None and not vr.data.empty:
+                    self.write_view(vr, 'envoye', yr)
+                else:
+                    # Clear any pre-existing (now-stale) sheet for this month so it
+                    # stops showing old created_at-based data in the dashboard.
+                    self._clear_existing_view(vr.name, 'envoye', yr)
+        else:
+            # Backward-compat fallback: legacy single created_at-month view.
+            self.write_view(views.sent_month, 'envoye', current_year)
 
         # Write won month (Signé) - uses current year
         self.write_view(views.won_month, 'signe', current_year)

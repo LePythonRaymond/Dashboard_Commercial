@@ -34,6 +34,10 @@ class ViewsOutput:
     won_month: ViewResult
     sheet_names: Dict[str, str]
     counts: Dict[str, int]
+    # Live "Envoyé" monthly views, keyed on the devis *date* (not created_at).
+    # List of (year, ViewResult) where each ViewResult.name == "Envoyé {Mois} {year}".
+    # Replaces the single created_at-month sent_month view when writing to Sheets.
+    sent_live_views: List[Tuple[int, ViewResult]] = field(default_factory=list)
 
 
 class ViewGenerator:
@@ -102,6 +106,49 @@ class ViewGenerator:
             (df['statut_clean'].isin(STATUS_WAITING))
         )
         return df[mask].copy()
+
+    def _filter_sent_live_month(self, df: pd.DataFrame, year: int, month: int) -> pd.DataFrame:
+        """
+        Live "Envoyé" filter: currently-pending devis whose DEVIS DATE is in (year, month).
+
+        Unlike _filter_sent_month (which keyed on created_at = the Furious record
+        creation timestamp), this keys on the devis ``date``. Commercials often create
+        the Furious record long before the devis is finalised/sent (e.g. a devis dated
+        2026 whose record was created in 2024), so created_at badly under-counts the
+        "devis envoyés en N" pipe. Keying on the devis date puts each devis under the
+        year/month it was actually sent.
+
+        Status is restricted to WAITING so the result is a *live* snapshot of the open
+        pipe: a devis that has since been won or lost drops out automatically.
+        """
+        if df.empty or 'date' not in df.columns:
+            return df.iloc[0:0].copy()
+        mask = (
+            (df['date'].dt.year == year) &
+            (df['date'].dt.month == month) &
+            (df['statut_clean'].isin(STATUS_WAITING))
+        )
+        return df[mask].copy()
+
+    def build_sent_live_views(self, df: pd.DataFrame, years: List[int]) -> List[Tuple[int, ViewResult]]:
+        """
+        Build the live "Envoyé" monthly views (date-keyed open pipe) for the given years.
+
+        For the current year every month 1..12 is emitted, even when empty, so that any
+        pre-existing created_at-based sheet for that month gets overwritten/cleared. For
+        other (future) years only months that actually contain pending devis are emitted.
+
+        Returns a list of (year, ViewResult); each ViewResult.name is "Envoyé {Mois} {year}".
+        """
+        out: List[Tuple[int, ViewResult]] = []
+        for year in years:
+            for month in range(1, 13):
+                view_df = self._filter_sent_live_month(df, year, month)
+                if year != self.current_year and view_df.empty:
+                    continue
+                name = f"Envoyé {MONTH_MAP.get(month, 'Unknown')} {year}"
+                out.append((year, self._create_view_result(name, view_df, use_weighted=True)))
+        return out
 
     def _filter_won_month(
         self,
@@ -372,6 +419,20 @@ class ViewGenerator:
         sent = self._create_view_result(self.name_sent, df_sent, use_weighted=True)
         won = self._create_view_result(self.name_won, df_won, use_weighted=False)
 
+        # Live "Envoyé" views (date-keyed, full open pipe). Always rewrite the whole
+        # current year; additionally cover any *future* year that already has pending
+        # devis dated in it (e.g. a 2027-dated devis sent ahead of time). Unconfigured
+        # years are skipped at write time, so listing extra candidates here is safe.
+        if 'date' in df.columns and 'statut_clean' in df.columns and not df.empty:
+            pending = df[df['statut_clean'].isin(STATUS_WAITING)]
+            future_years = sorted({
+                int(y) for y in pending['date'].dt.year.dropna().unique()
+                if int(y) > self.current_year
+            })
+        else:
+            future_years = []
+        sent_live_views = self.build_sent_live_views(df, [self.current_year] + future_years)
+
         return ViewsOutput(
             snapshot=snapshot,
             sent_month=sent,
@@ -385,7 +446,8 @@ class ViewGenerator:
                 self.name_snapshot: len(df_snapshot),
                 self.name_sent: len(df_sent),
                 self.name_won: len(df_won)
-            }
+            },
+            sent_live_views=sent_live_views,
         )
 
     def get_combined_mask(self, df: pd.DataFrame) -> pd.Series:

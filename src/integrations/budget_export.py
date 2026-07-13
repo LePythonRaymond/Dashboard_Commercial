@@ -3,19 +3,14 @@ Budget {Y} workbook builder.
 
 Produces an .xlsx mirroring the layout of the manually-maintained
 "Budget {Y} avec légende" Google Sheet (see ``Budget 2026.xlsx`` reference):
+a single block (rows 11-25) with Légende, the ``Au DD/MM/YYYY`` date, headers
+per BU, then Devis/Contrats Signés/Potentiels/Envoyés numbers, Production
+sécurisée, Portefeuille sites au {today}, Total sécurisé maintenance,
+Objectifs and Production à aller chercher.
 
-- Sheet 1 "Budget {Y} avec légende": single block (rows 11-25) with
-  Légende, the ``Au DD/MM/YYYY`` date, headers per BU, then Devis/Contrats
-  Signés/Potentiels/Envoyés numbers, Production sécurisée, Portefeuille
-  sites au {today}, Total sécurisé maintenance, Objectifs and Production
-  à aller chercher.
-- Sheet 2 "Maintenance": per-row breakdown of new MAINTENANCE contracts
-  signed in {Y} (Nom, Montant HT Prod {Y}, Montant HT, Mois signature,
-  Mois démarrage), with the portefeuille at 1er Janvier {Y} and totals.
-
-All numeric inputs (BU sums, maintenance entries, portefeuille values)
-are computed from the processed proposals DataFrame the dashboard already
-loads — no new business logic, just aggregation + layout.
+All numeric inputs (BU sums, portefeuille values) are computed from the
+processed proposals DataFrames the dashboard already loads — no new business
+logic, just aggregation + layout.
 """
 
 from __future__ import annotations
@@ -40,11 +35,6 @@ except ImportError:
 
 
 BU_ORDER: List[str] = ['CONCEPTION', 'TRAVAUX', 'MAINTENANCE']
-
-MONTH_NAMES_FR: List[str] = [
-    "Janvier", "Février", "Mars", "Avril", "Mai", "Juin",
-    "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre",
-]
 
 LEGEND_TEXT_TEMPLATE = (
     "Devis Signés = Tous les devis déjà signés à produire en {year}\n"
@@ -99,10 +89,10 @@ def _compute_bu_amounts(df: pd.DataFrame, year: int, bu: str) -> Dict[str, float
     """
     Compute Signés / Potentiels / Envoyés totals for one BU and one year.
 
-    Definitions (from the legend in Budget {Y}.xlsx):
-    - Signés     = sum(Montant Total {Y}) where statut_clean ∈ STATUS_WON     and BU == bu
-    - Potentiels = sum(Montant Pondéré {Y}) where statut_clean ∈ STATUS_WAITING and BU == bu
-    - Envoyés    = sum(Montant Total {Y}) where statut_clean ∈ (WON ∪ WAITING) and BU == bu
+    Definitions (won and sent pipes stay disjoint — they never mix):
+    - Signés     = sum(Montant Total {Y})   where status ∈ STATUS_WON     and BU == bu
+    - Potentiels = sum(Montant Pondéré {Y}) where status ∈ STATUS_WAITING and BU == bu
+    - Envoyés    = sum(Montant Total {Y})   where status ∈ STATUS_WAITING and BU == bu
     """
     if df is None or df.empty:
         return {"signes": 0.0, "potentiels": 0.0, "envoyes": 0.0}
@@ -115,95 +105,103 @@ def _compute_bu_amounts(df: pd.DataFrame, year: int, bu: str) -> Dict[str, float
     bu_mask = bus == bu.upper()
     won_mask = bu_mask & statuses.isin(won)
     waiting_mask = bu_mask & statuses.isin(waiting)
-    sent_mask = bu_mask & statuses.isin(won | waiting)
 
     total_col = f"Montant Total {year}"
     pondere_col = f"Montant Pondéré {year}"
 
     signes = _safe_sum(_column(df, total_col)[won_mask])
     potentiels = _safe_sum(_column(df, pondere_col)[waiting_mask])
-    envoyes = _safe_sum(_column(df, total_col)[sent_mask])
+    envoyes = _safe_sum(_column(df, total_col)[waiting_mask])
 
     return {"signes": signes, "potentiels": potentiels, "envoyes": envoyes}
 
 
-def _parse_date(value: Any) -> Optional[pd.Timestamp]:
-    if value is None or value == "":
-        return None
-    try:
-        ts = pd.to_datetime(value, errors='coerce')
-        if pd.isna(ts):
-            return None
-        return ts
-    except Exception:
-        return None
-
-
-def _month_name_fr(value: Any) -> str:
-    ts = _parse_date(value)
-    if ts is None:
-        return ""
-    m = int(ts.month)
-    if 1 <= m <= 12:
-        return MONTH_NAMES_FR[m - 1]
-    return ""
-
-
-def _row_signature_year(row: pd.Series) -> Optional[int]:
+def _sum_production_by_bu(df: pd.DataFrame, year: int, bu: str, weighted: bool = False) -> float:
     """
-    Return the year a row was 'signed' for the purpose of the Budget Maintenance sheet.
+    Sum a production column (`Montant Total {Y}` or `Montant Pondéré {Y}`) for one BU.
 
-    Matches the Signé monthly view OR-logic: signature_date OR date_effective_won OR date.
-    """
-    for col in ('signature_date', 'date_effective_won', 'date'):
-        ts = _parse_date(row.get(col)) if col in row else None
-        if ts is not None:
-            return int(ts.year)
-    return None
-
-
-def _compute_maintenance_entries(df: pd.DataFrame, year: int) -> List[Dict[str, Any]]:
-    """
-    One row per new MAINTENANCE contract signed in {year}.
-
-    Filter: statut_clean ∈ STATUS_WON AND BU == MAINTENANCE AND
-            (signature_date.year == Y OR date_effective_won.year == Y OR date.year == Y)
+    Used with production-aggregated data (``load_aggregated_production_data``), which
+    already pulls the Signé/Envoyé sheets across signing years Y-2..Y and keeps only
+    rows producing in {Y}. This is how prior-year signatures cascade into year {Y}.
+    No status filter is needed: Signé sheets are all won, Envoyé sheets all waiting.
     """
     if df is None or df.empty:
-        return []
-
-    won = _to_year_set(STATUS_WON)
-    statuses = _normalize_status(df)
+        return 0.0
+    col = f"Montant {'Pondéré' if weighted else 'Total'} {year}"
     bus = _bu_column(df)
+    return _safe_sum(_column(df, col)[bus == bu.upper()])
 
-    base_mask = (bus == 'MAINTENANCE') & statuses.isin(won)
-    candidates = df[base_mask]
 
-    entries: List[Dict[str, Any]] = []
-    total_col = f"Montant Total {year}"
-    for _, row in candidates.iterrows():
-        if _row_signature_year(row) != year:
-            continue
+def dedupe_sent_pipe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Drop duplicate devis from the aggregated SENT pipe, keeping the freshest copy.
 
-        title = str(row.get('title') or row.get('name') or row.get('Name') or '').strip()
-        nom = f"(E) - {title}" if title else "(E) -"
+    Since the Envoyé sheets became a live snapshot (keyed on devis date), a pending
+    devis dated {Y} whose Furious record was created in {Y-1} appears twice in the
+    aggregation: once in the frozen {Y-1} monthly sheets and once in the live {Y}
+    sheets. Keep the copy from the highest ``signed_year`` (the live one — fresher
+    status and production columns); without the column, keep the last occurrence.
+    """
+    if df is None or df.empty or 'id' not in df.columns:
+        return df
+    if 'signed_year' in df.columns:
+        order = pd.to_numeric(df['signed_year'], errors='coerce').fillna(0)
+        df = df.iloc[order.argsort(kind='stable')]
+    return df.drop_duplicates(subset=['id'], keep='last')
 
-        amount = float(pd.to_numeric(row.get('amount', 0), errors='coerce') or 0.0)
-        prod = float(pd.to_numeric(row.get(total_col, 0), errors='coerce') or 0.0) if total_col in row else 0.0
 
-        sig_date = _parse_date(row.get('signature_date')) or _parse_date(row.get('date_effective_won'))
-        mois_signature = _month_name_fr(sig_date) if sig_date is not None else ""
-        mois_demarrage = _month_name_fr(row.get('projet_start'))
+def filter_carryover_by_pending(
+    df: pd.DataFrame,
+    budget_year: int,
+    pending_ids: Optional[set],
+) -> pd.DataFrame:
+    """
+    Keep prior-year carryover rows only if the devis is still pending in Furious.
 
-        entries.append({
-            "nom": nom,
-            "montant_ht_prod": prod,
-            "montant_ht": amount,
-            "mois_signature": mois_signature,
-            "mois_demarrage": mois_demarrage,
-        })
+    Rows from the frozen {Y-1} sheets have their status frozen at write time — a
+    devis lost months ago still reads "en attente" there. ``pending_ids`` is the
+    set of currently-WAITING devis ids written daily by the reconciliation sidecar
+    (data/pending_ids.json). Current-year rows are untouched: the live sheets are
+    rewritten daily so their statuses are already fresh.
 
-    return entries
+    With ``pending_ids`` None (store missing/stale), returns df unchanged so the
+    budget still generates — the projet_start pruning remains as a safety net.
+    """
+    if df is None or df.empty or pending_ids is None:
+        return df
+    if 'signed_year' not in df.columns or 'id' not in df.columns:
+        return df
+    signed_year = pd.to_numeric(df['signed_year'], errors='coerce')
+    is_carryover = signed_year < budget_year
+    still_pending = df['id'].astype(str).str.strip().isin({str(p) for p in pending_ids})
+    return df[~is_carryover | still_pending].copy()
+
+
+def drop_stale_sent_carryover(df: pd.DataFrame, budget_year: int, today: date) -> pd.DataFrame:
+    """
+    Remove stale carried-over proposals from the SENT (Envoyé) pipe.
+
+    Drops rows that were sent in a previous year (``signed_year`` < budget_year)
+    *and* whose ``projet_start`` is already overdue (before ``today``): a project
+    that should have started but is still unsigned is no longer a realistic
+    contributor to {budget_year} production.
+
+    Current-year-sent proposals are always kept, as are prior-year proposals
+    whose start is still in the future (or unknown).
+    """
+    if df is None or df.empty:
+        return df
+    if 'signed_year' not in df.columns or 'projet_start' not in df.columns:
+        return df
+
+    signed_year = pd.to_numeric(df['signed_year'], errors='coerce')
+    start = pd.to_datetime(df['projet_start'], errors='coerce')
+    today_ts = pd.Timestamp(today)
+
+    is_carryover = signed_year < budget_year
+    is_overdue = start.notna() & (start < today_ts)
+    stale = is_carryover & is_overdue
+    return df[~stale].copy()
 
 
 # =============================================================================
@@ -244,7 +242,7 @@ def _build_sheet1(ws, year: int, today: date, bu_totals: Dict[str, Dict[str, flo
       D25           : "Production à aller chercher"
       Row 25        : =Obj-Production sécurisée per BU
     """
-    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
 
     ws.title = f"Budget {year} avec légende"
@@ -252,7 +250,7 @@ def _build_sheet1(ws, year: int, today: date, bu_totals: Dict[str, Dict[str, flo
     # Column widths matching the reference workbook
     width_map = {
         'D': 28.1, 'E': 13.9, 'F': 16.0, 'G': 17.0, 'H': 14.0, 'I': 16.0, 'J': 17.0,
-        'K': 15.4, 'L': 16.4, 'M': 14.9, 'N': 21.5, 'O': 23.1, 'P': 22.2,
+        'K': 18.0, 'L': 16.4, 'M': 14.9, 'N': 21.5, 'O': 23.1, 'P': 22.2,
     }
     for col, w in width_map.items():
         ws.column_dimensions[col].width = w
@@ -261,20 +259,57 @@ def _build_sheet1(ws, year: int, today: date, bu_totals: Dict[str, Dict[str, flo
     bold_white = Font(bold=True, color="FFFFFF")
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
     legend_fill = PatternFill("solid", fgColor="FFF2CC")
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    # BU band colors aligned with the dashboard BU_COLORS (source of truth):
+    # CONCEPTION green, TRAVAUX gold, MAINTENANCE purple; TOTAL blue.
     bu_fills = {
-        'CONCEPTION': PatternFill("solid", fgColor="A9D18E"),
-        'TRAVAUX':    PatternFill("solid", fgColor="FFD966"),
-        'MAINTENANCE': PatternFill("solid", fgColor="B4A7D6"),
-        'TOTAL':      PatternFill("solid", fgColor="9DC3E6"),
+        'CONCEPTION': PatternFill("solid", fgColor="2D5A3F"),
+        'TRAVAUX':    PatternFill("solid", fgColor="F4C430"),
+        'MAINTENANCE': PatternFill("solid", fgColor="7B4B94"),
+        'TOTAL':      PatternFill("solid", fgColor="3D85C6"),
+    }
+    # Light tints for the sub-header row (row 18), matching the original workbook.
+    bu_sub_fills = {
+        'CONCEPTION': PatternFill("solid", fgColor="D9EAD3"),
+        'TRAVAUX':    PatternFill("solid", fgColor="FFF2CC"),
+        'MAINTENANCE': PatternFill("solid", fgColor="D9D2E9"),
+        'TOTAL':      PatternFill("solid", fgColor="CFE2F3"),
+    }
+    # Dark bands use white text; the gold TRAVAUX band stays black for contrast.
+    bu_fonts = {
+        'CONCEPTION': bold_white,
+        'TRAVAUX':    bold,
+        'MAINTENANCE': bold_white,
+        'TOTAL':      bold_white,
     }
 
     # --- Légende block --------------------------------------------------
+    from openpyxl.cell.rich_text import CellRichText, TextBlock
+    from openpyxl.cell.text import InlineFont
+
     ws['D11'] = 'Légende'
     ws['D11'].font = bold
+    ws.merge_cells('E11:L11')   # blank header bar next to "Légende"
     ws.merge_cells('D12:L14')
-    ws['D12'] = LEGEND_TEXT_TEMPLATE.format(year=year)
+    bold_term = InlineFont(b=True)
+    ws['D12'] = CellRichText(
+        TextBlock(bold_term, "Devis Signés"),
+        f" = Tous les devis déjà signés à produire en {year}\n",
+        TextBlock(bold_term, "Devis Potentiels"),
+        f" = Tous les devis envoyés multipliés par leur probabilité de gain à produire en {year}\n",
+        TextBlock(bold_term, "Devis Envoyés"),
+        f" = Tous les devis envoyés sans probabilité à produire en {year}",
+    )
     ws['D12'].alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-    ws['D12'].fill = legend_fill
+    # Outline + fill the whole légende box (title row + body), like the table.
+    for row in range(11, 15):
+        for col_idx in range(4, 13):  # D..L
+            cell = ws.cell(row=row, column=col_idx)
+            cell.border = border
+            if row >= 12:
+                cell.fill = legend_fill
 
     # --- Date row -------------------------------------------------------
     ws['D16'] = f"Au {today.strftime('%d/%m/%Y')}"
@@ -286,17 +321,18 @@ def _build_sheet1(ws, year: int, today: date, bu_totals: Dict[str, Dict[str, flo
     ws['D17'].font = bold
     ws['D17'].alignment = center
 
-    bu_header_ranges = [
-        ('CONCEPTION', 'E17:G17'),
-        ('TRAVAUX', 'H17:J17'),
-        ('MAINTENANCE', 'K17:M17'),
-        ('TOTAL', 'N17:P17'),
-    ]
-    for label, rng in bu_header_ranges:
+    bu_col_groups = {
+        'CONCEPTION': ('E', 'F', 'G'),
+        'TRAVAUX': ('H', 'I', 'J'),
+        'MAINTENANCE': ('K', 'L', 'M'),
+        'TOTAL': ('N', 'O', 'P'),
+    }
+    for label, cols in bu_col_groups.items():
+        rng = f"{cols[0]}17:{cols[2]}17"
         ws.merge_cells(rng)
-        first = rng.split(':')[0]
+        first = f"{cols[0]}17"
         ws[first] = label
-        ws[first].font = bold_white
+        ws[first].font = bu_fonts[label]
         ws[first].alignment = center
         ws[first].fill = bu_fills[label]
 
@@ -311,6 +347,9 @@ def _build_sheet1(ws, year: int, today: date, bu_totals: Dict[str, Dict[str, flo
         ws[coord] = label
         ws[coord].font = bold
         ws[coord].alignment = center
+    for label, cols in bu_col_groups.items():
+        for c in cols:
+            ws[f"{c}18"].fill = bu_sub_fills[label]
 
     # --- Row 19 numeric values -----------------------------------------
     cells_19 = [
@@ -345,21 +384,38 @@ def _build_sheet1(ws, year: int, today: date, bu_totals: Dict[str, Dict[str, flo
     for rng in ('E20:G20', 'H20:J20', 'K20:M20', 'N20:P20'):
         ws.merge_cells(rng)
 
+    maint_fill = PatternFill("solid", fgColor="D9D2E9")  # MAINTENANCE light purple
+
+    wrap_right = Alignment(horizontal="right", vertical="center", wrap_text=True)
+
     # --- Row 21 Portefeuille sites au {today} --------------------------
     ws['K21'] = f"Portefeuille sites au {today.strftime('%d/%m/%Y')}: "
-    ws['K21'].alignment = Alignment(horizontal="right")
+    ws['K21'].alignment = wrap_right
     if portefeuille_running is not None:
         _set_eur(ws['L21'], portefeuille_running)
     ws.merge_cells('L21:M21')
+    for coord in ('K21', 'L21', 'M21'):
+        ws[coord].fill = maint_fill
 
     # --- Row 22 Total sécurisé maintenance {YY} ------------------------
     ws['K22'] = f"Total sécurisé maintenance {str(year)[-2:]}"
-    ws['K22'].alignment = Alignment(horizontal="right")
+    ws['K22'].alignment = wrap_right
     ws['K22'].font = bold
     ws['L22'] = '=L19+L21'
     ws['L22'].number_format = EUR_FORMAT
     ws['L22'].font = bold
     ws.merge_cells('L22:M22')
+    for coord in ('K22', 'L22', 'M22'):
+        ws[coord].fill = maint_fill
+
+    # Merge the blank blocks flanking the maintenance portefeuille rows so the
+    # CONCEPTION/TRAVAUX and TOTAL sides read as single cells (like the original).
+    ws.merge_cells('D21:J22')
+    ws.merge_cells('N21:P22')
+
+    # Give rows 21-22 room for the wrapped maintenance labels (2 lines).
+    ws.row_dimensions[21].height = 30
+    ws.row_dimensions[22].height = 30
 
     # --- Row 23 Objectifs {Y} ------------------------------------------
     ws['D23'] = f"Objectifs {year}"
@@ -377,6 +433,9 @@ def _build_sheet1(ws, year: int, today: date, bu_totals: Dict[str, Dict[str, flo
     for rng in ('E23:G23', 'H23:J23', 'K23:M23', 'N23:P23'):
         ws.merge_cells(rng)
 
+    # Blank separator row 24 as one block.
+    ws.merge_cells('D24:P24')
+
     # --- Row 25 Production à aller chercher ----------------------------
     ws['D25'] = 'Production à aller chercher'
     ws['D25'].font = bold
@@ -390,93 +449,10 @@ def _build_sheet1(ws, year: int, today: date, bu_totals: Dict[str, Dict[str, flo
     for rng in ('E25:G25', 'H25:J25', 'K25:M25', 'N25:P25'):
         ws.merge_cells(rng)
 
-
-def _build_sheet2(ws, year: int, today: date,
-                  portefeuille_debut: Optional[float],
-                  entries: List[Dict[str, Any]]) -> None:
-    """
-    Layout (1-indexed rows) — mirrors the "Maintenance" tab:
-
-      B2:F2           : "Entrées/Sortie Portefeuille sites" (merged title)
-      Row 3 headers   : A3 "Au DD/MM/YY" (merged A3:A{last_entry_row}),
-                        B3 Nom | C3 Montant HT Prod {Y} | D3 Montant HT |
-                        E3 Mois signature | F3 Mois démarrage
-      Row 4           : "Total contrat de maintenance au 1er Janvier {Y}",
-                        C4=D4=portefeuille_debut
-      Rows 5..        : one per entry
-      Last 2 rows     : totals (SUM of entries; matching reference's two totals)
-    """
-    from openpyxl.styles import Alignment, Font, PatternFill
-    from openpyxl.utils import get_column_letter
-
-    ws.title = "Maintenance"
-
-    width_map = {'A': 14.0, 'B': 40.6, 'C': 32.9, 'D': 18.0, 'E': 16.0, 'F': 16.0}
-    for col, w in width_map.items():
-        ws.column_dimensions[col].width = w
-
-    bold = Font(bold=True)
-    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    title_fill = PatternFill("solid", fgColor="B4A7D6")
-    header_fill = PatternFill("solid", fgColor="D9E1F2")
-
-    ws.merge_cells('B2:F2')
-    ws['B2'] = 'Entrées/Sortie Portefeuille sites'
-    ws['B2'].font = Font(bold=True, color="FFFFFF")
-    ws['B2'].alignment = center
-    ws['B2'].fill = title_fill
-
-    headers = {
-        'A3': f"Au {today.strftime('%d/%m/%y')}",
-        'B3': 'Nom',
-        'C3': f"Montant HT Prod {year}",
-        'D3': 'Montant HT',
-        'E3': 'Mois signature',
-        'F3': 'Mois démarrage',
-    }
-    for coord, label in headers.items():
-        ws[coord] = label
-        ws[coord].font = bold
-        ws[coord].alignment = center
-        ws[coord].fill = header_fill
-
-    ws['B4'] = f"Total contrat de maintenance au 1er Janvier {year} "
-    ws['B4'].font = bold
-    if portefeuille_debut is not None:
-        _set_eur(ws['C4'], portefeuille_debut)
-        _set_eur(ws['D4'], portefeuille_debut)
-
-    start_row = 5
-    for i, entry in enumerate(entries):
-        r = start_row + i
-        ws.cell(row=r, column=2, value=entry.get("nom", ""))
-        _set_eur(ws.cell(row=r, column=3), entry.get("montant_ht_prod"))
-        _set_eur(ws.cell(row=r, column=4), entry.get("montant_ht"))
-        ws.cell(row=r, column=5, value=entry.get("mois_signature", ""))
-        ws.cell(row=r, column=6, value=entry.get("mois_demarrage", ""))
-
-    last_entry_row = start_row + len(entries) - 1 if entries else start_row - 1
-
-    a_merge_to = max(last_entry_row, start_row)
-    if a_merge_to > 3:
-        ws.merge_cells(f'A3:A{a_merge_to}')
-
-    if entries:
-        sum_row_a = last_entry_row + 1
-        sum_row_b = last_entry_row + 2
-        ws.cell(row=sum_row_a, column=3, value=f"=SUM(C{start_row}:C{last_entry_row})")
-        ws.cell(row=sum_row_a, column=3).number_format = EUR_FORMAT
-        ws.cell(row=sum_row_a, column=3).font = bold
-        ws.cell(row=sum_row_a, column=4, value=f"=SUM(D{start_row}:D{last_entry_row})")
-        ws.cell(row=sum_row_a, column=4).number_format = EUR_FORMAT
-        ws.cell(row=sum_row_a, column=4).font = bold
-
-        ws.cell(row=sum_row_b, column=3, value=f"=C4+SUM(C{start_row}:C{last_entry_row})")
-        ws.cell(row=sum_row_b, column=3).number_format = EUR_FORMAT
-        ws.cell(row=sum_row_b, column=3).font = bold
-        ws.cell(row=sum_row_b, column=4, value=f"=D4+SUM(D{start_row}:D{last_entry_row})")
-        ws.cell(row=sum_row_b, column=4).number_format = EUR_FORMAT
-        ws.cell(row=sum_row_b, column=4).font = bold
+    # --- Borders on the whole projection grid (D17:P25) ----------------
+    for row in range(17, 26):
+        for col_idx in range(4, 17):  # D..P
+            ws.cell(row=row, column=col_idx).border = border
 
 
 # =============================================================================
@@ -485,41 +461,38 @@ def _build_sheet2(ws, year: int, today: date,
 
 def build_budget_workbook(
     year: int,
-    df_processed: pd.DataFrame,
-    portefeuille_debut_annee: Optional[float],
-    portefeuille_running: Optional[float],
+    df_processed: Optional[pd.DataFrame] = None,
+    portefeuille_debut_annee: Optional[float] = None,
+    portefeuille_running: Optional[float] = None,
     today: Optional[date] = None,
+    *,
+    bu_totals: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> bytes:
     """
     Build the Budget {year} xlsx and return its bytes.
 
     Args:
         year: Target budget year (e.g. 2026).
-        df_processed: DataFrame combining WON + WAITING proposals contributing
-            to year {year}. Must expose columns: ``statut_clean``/``statut``,
-            ``final_bu``/``cf_bu``, ``amount``, ``Montant Total {year}``,
-            ``Montant Pondéré {year}``, ``signature_date``/``date_effective_won``/
-            ``date``, ``projet_start``, ``title``.
+        df_processed: Single-DataFrame legacy path (status-filtered) used only
+            when ``bu_totals`` is not provided.
         portefeuille_debut_annee: Maintenance Entretien début {year}
-            (sum of "Total HT Cette année" in Notion).
-        portefeuille_running: Running maintenance portefeuille at click time.
+            (sum of "Total HT Cette année" in Notion, start-of-year snapshot).
+        portefeuille_running: Running maintenance portefeuille at click time
+            (live Notion sum) — shown as "Portefeuille sites au {today}".
         today: Date stamped in the workbook headers (defaults to ``date.today()``).
+        bu_totals: Precomputed {BU: {signes, potentiels, envoyes}} (preferred —
+            lets the caller use production-year aggregation with carryover).
     """
     from openpyxl import Workbook
 
     today = today or date.today()
 
-    bu_totals: Dict[str, Dict[str, float]] = {
-        bu: _compute_bu_amounts(df_processed, year, bu) for bu in BU_ORDER
-    }
-    entries = _compute_maintenance_entries(df_processed, year)
+    if bu_totals is None:
+        bu_totals = {bu: _compute_bu_amounts(df_processed, year, bu) for bu in BU_ORDER}
 
     wb = Workbook()
     ws1 = wb.active
     _build_sheet1(ws1, year, today, bu_totals, portefeuille_debut_annee, portefeuille_running)
-
-    ws2 = wb.create_sheet("Maintenance")
-    _build_sheet2(ws2, year, today, portefeuille_debut_annee, entries)
 
     buf = BytesIO()
     wb.save(buf)
