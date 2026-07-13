@@ -61,10 +61,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from config.settings import settings, MONTH_MAP, get_secret, MYRIUM_ROOT
 from src.integrations.google_sheets import GoogleSheetsClient
 from src.integrations.notion_entretien_start import fetch_maintenance_entretien_start_2026
-from src.integrations.notion_maintenance_portefeuille import (
-    fetch_maintenance_portefeuille_running,
+from src.integrations.budget_export import (
+    build_budget_workbook,
+    _sum_production_by_bu,
+    dedupe_sent_pipe,
+    drop_stale_sent_carryover,
+    filter_carryover_by_pending,
 )
-from src.integrations.budget_export import build_budget_workbook
+from src.integrations.pending_ids_store import (
+    fetch_pending_ids_live,
+    get_store_path as get_pending_ids_store_path,
+    read_pending_ids,
+)
 from src.integrations.entretien_start_store import (
     get_store_path,
     read_entretien_start_2026_from_file,
@@ -5054,31 +5062,57 @@ def _build_budget_xlsx_for_year(year: int) -> bytes:
     """
     Build the Budget {year} xlsx for download.
 
-    Loads WON (Signé sheets) and WAITING (Envoyé sheets) for the year and
-    unions them on `id_devis` so each proposal contributes once.
-    Resolves portefeuille values for the Maintenance section.
+    Data sources mirror the Objectifs tab (production-year aggregation, which
+    carries prior-year deals producing in {year} into the {year} pipe):
+    - Devis Signés (CONCEPTION / TRAVAUX): WON pipe — `load_aggregated_production_data(year, "Signé")`, raw `Montant Total {year}`.
+    - Devis Potentiels: SENT pipe — `load_aggregated_production_data(year, "Envoyé")`, weighted `Montant Pondéré {year}` (same value as the Objectifs "Envoyé" view).
+    - Devis Envoyés: same SENT pipe, raw `Montant Total {year}`.
+    - MAINTENANCE "Nouveaux contrats {year}": WON contracts signed *in* {year}
+      only (prior maintenance is carried by the Notion portefeuille; production
+      carryover here would double-count it).
+    - Portefeuille sites au {today}: live Notion sum (running portefeuille).
+
+    Signés (won) and Potentiels/Envoyés (sent) never mix — they come from
+    disjoint datasets (Signé sheets vs Envoyé sheets).
+
+    Stale carryover is pruned from the sent pipe: prior-year-sent proposals
+    whose projet_start is already overdue (never signed) are dropped, so the
+    Potentiels/Envoyés don't accumulate dead deals from past years.
     """
-    df_signe = load_year_data(year, "Signé")
-    df_envoye = load_year_data(year, "Envoyé")
+    df_signe_prod = parse_numeric_columns(load_aggregated_production_data(year, "Signé"))
+    df_envoye_prod = parse_numeric_columns(load_aggregated_production_data(year, "Envoyé"))
+    # 1. Dedup: a pending devis dated {year} whose record was created in {year-1}
+    #    sits in both the frozen {year-1} sheets and the live {year} sheets — keep
+    #    the live (freshest) copy.
+    df_envoye_prod = dedupe_sent_pipe(df_envoye_prod)
+    # 2. Carryover freshness: prior-year-sent rows have statuses frozen at write
+    #    time — keep them only if the devis is still pending in Furious today
+    #    (pending-ids store written daily by the reconciliation sidecar).
+    pending_ids = read_pending_ids(get_pending_ids_store_path(DASHBOARD_PROJECT_ROOT))
+    if pending_ids is None:
+        # No fresh store on this host (e.g. Streamlit Cloud has no VPS
+        # filesystem): fetch the pending set live from Furious; on failure the
+        # filter is skipped and the projet_start safety net below still applies.
+        pending_ids = fetch_pending_ids_live()
+    df_envoye_prod = filter_carryover_by_pending(df_envoye_prod, year, pending_ids)
+    # 3. Safety net (also covers a stale/missing store): drop prior-year rows
+    #    whose project start is already overdue.
+    df_envoye_prod = drop_stale_sent_carryover(df_envoye_prod, year, date.today())
 
-    frames = [d for d in (df_signe, df_envoye) if d is not None and not d.empty]
-    if frames:
-        all_columns = sorted({c for d in frames for c in d.columns})
-        aligned = []
-        for d in frames:
-            for col in all_columns:
-                if col not in d.columns:
-                    d[col] = None
-            aligned.append(d[all_columns])
-        df_combined = pd.concat(aligned, ignore_index=True)
-        if 'id_devis' in df_combined.columns:
-            df_combined = df_combined.drop_duplicates(subset=['id_devis'], keep='first')
-        elif 'id' in df_combined.columns:
-            df_combined = df_combined.drop_duplicates(subset=['id'], keep='first')
+    # MAINTENANCE "Nouveaux contrats" = won deals signed in {year} only.
+    if not df_signe_prod.empty and 'signed_year' in df_signe_prod.columns:
+        df_signe_current = df_signe_prod[df_signe_prod['signed_year'] == year]
     else:
-        df_combined = pd.DataFrame()
+        df_signe_current = df_signe_prod
 
-    df_combined = parse_numeric_columns(df_combined)
+    bu_totals: dict = {}
+    for bu in BU_ORDER:
+        signes_src = df_signe_current if bu == "MAINTENANCE" else df_signe_prod
+        bu_totals[bu] = {
+            "signes": _sum_production_by_bu(signes_src, year, bu, weighted=False),
+            "potentiels": _sum_production_by_bu(df_envoye_prod, year, bu, weighted=True),
+            "envoyes": _sum_production_by_bu(df_envoye_prod, year, bu, weighted=False),
+        }
 
     portefeuille_debut: Optional[float] = None
     if year == 2026:
@@ -5090,28 +5124,25 @@ def _build_budget_xlsx_for_year(year: int) -> bytes:
         or get_secret("NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATABASE_ID", "").strip()
     )
 
+    # Running portefeuille = live Notion sum (same source as Entretien, which
+    # grows as new sites are added). This is the "Portefeuille sites au {today}".
     portefeuille_running: Optional[float] = None
     if api_key and ds_id:
         try:
-            portefeuille_running = fetch_maintenance_portefeuille_running(api_key, ds_id)
+            portefeuille_running = fetch_maintenance_entretien_start_2026(api_key, ds_id)
         except Exception:
             portefeuille_running = None
 
-    if portefeuille_running is None and portefeuille_debut is not None:
-        # Fallback: début + new contracts of the year (matches the manual
-        # `=996697.45 + 47011.71` pattern visible in Budget 2026.xlsx).
-        from src.integrations.budget_export import _compute_maintenance_entries
-        entries = _compute_maintenance_entries(df_combined, year)
-        portefeuille_running = float(portefeuille_debut) + sum(
-            float(e.get("montant_ht") or 0.0) for e in entries
-        )
+    if portefeuille_running is None:
+        # Notion unavailable: fall back to the start-of-year snapshot.
+        portefeuille_running = portefeuille_debut
 
     return build_budget_workbook(
         year=year,
-        df_processed=df_combined,
         portefeuille_debut_annee=portefeuille_debut,
         portefeuille_running=portefeuille_running,
         today=date.today(),
+        bu_totals=bu_totals,
     )
 
 
