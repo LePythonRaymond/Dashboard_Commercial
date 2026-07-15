@@ -61,18 +61,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from config.settings import settings, MONTH_MAP, get_secret, MYRIUM_ROOT
 from src.integrations.google_sheets import GoogleSheetsClient
 from src.integrations.notion_entretien_start import fetch_maintenance_entretien_start_2026
-from src.integrations.budget_export import (
-    build_budget_workbook,
-    _sum_production_by_bu,
-    dedupe_sent_pipe,
-    drop_stale_sent_carryover,
-    filter_carryover_by_pending,
-)
-from src.integrations.pending_ids_store import (
-    fetch_pending_ids_live,
-    get_store_path as get_pending_ids_store_path,
-    read_pending_ids,
-)
+from src.integrations.budget_export import build_budget_workbook
 from src.integrations.entretien_start_store import (
     get_store_path,
     read_entretien_start_2026_from_file,
@@ -5062,85 +5051,46 @@ def _build_budget_xlsx_for_year(year: int) -> bytes:
     """
     Build the Budget {year} xlsx for download.
 
-    Data sources mirror the Objectifs tab (production-year aggregation, which
-    carries prior-year deals producing in {year} into the {year} pipe):
-    - Devis Signés (CONCEPTION / TRAVAUX): WON pipe — `load_aggregated_production_data(year, "Signé")`, raw `Montant Total {year}`.
-    - Devis Potentiels: SENT pipe — `load_aggregated_production_data(year, "Envoyé")`, weighted `Montant Pondéré {year}` (same value as the Objectifs "Envoyé" view).
-    - Devis Envoyés: same SENT pipe, raw `Montant Total {year}`.
-    - MAINTENANCE "Nouveaux contrats {year}": WON contracts signed *in* {year}
-      only (prior maintenance is carried by the Notion portefeuille; production
-      carryover here would double-count it).
-    - Portefeuille sites au {today}: live Notion sum (running portefeuille).
+    Every number mirrors what the dashboard itself displays, using the SAME
+    loaders and helpers as the on-screen tabs — the Excel must never disagree
+    with the app for the same year:
 
-    Signés (won) and Potentiels/Envoyés (sent) never mix — they come from
-    disjoint datasets (Signé sheets vs Envoyé sheets).
+    - Devis Signés     = Signé (Won) view → "À produire {year}" per BU
+                         (`load_year_data(year, "Signé")`, `Montant Total {year}`).
+    - Devis Potentiels = Envoyé (Sent) view → "À produire {year}" per BU
+                         (`load_year_data(year, "Envoyé")`, `Montant Pondéré {year}`).
+    - Devis Envoyés    = same Envoyé view, raw `Montant Total {year}`.
+    - Portefeuille sites = the exact number the app's "Maintenance Entretien –
+      Début d'année" box shows (`_resolve_entretien_start_2026`: Google Sheets
+      'Paramètres' first — synced daily from Notion by the pipeline).
 
-    Stale carryover is pruned from the sent pipe: prior-year-sent proposals
-    whose projet_start is already overdue (never signed) are dropped, so the
-    Potentiels/Envoyés don't accumulate dead deals from past years.
+    MAINTENANCE "Nouveaux contrats {year}" comes naturally from the Signé view:
+    the {year} Signé sheets only contain deals signed in {year}.
     """
-    df_signe_prod = parse_numeric_columns(load_aggregated_production_data(year, "Signé"))
-    df_envoye_prod = parse_numeric_columns(load_aggregated_production_data(year, "Envoyé"))
-    # 1. Dedup: a pending devis dated {year} whose record was created in {year-1}
-    #    sits in both the frozen {year-1} sheets and the live {year} sheets — keep
-    #    the live (freshest) copy.
-    df_envoye_prod = dedupe_sent_pipe(df_envoye_prod)
-    # 2. Carryover freshness: prior-year-sent rows have statuses frozen at write
-    #    time — keep them only if the devis is still pending in Furious today
-    #    (pending-ids store written daily by the reconciliation sidecar).
-    pending_ids = read_pending_ids(get_pending_ids_store_path(DASHBOARD_PROJECT_ROOT))
-    if pending_ids is None:
-        # No fresh store on this host (e.g. Streamlit Cloud has no VPS
-        # filesystem): fetch the pending set live from Furious; on failure the
-        # filter is skipped and the projet_start safety net below still applies.
-        pending_ids = fetch_pending_ids_live()
-    df_envoye_prod = filter_carryover_by_pending(df_envoye_prod, year, pending_ids)
-    # 3. Safety net (also covers a stale/missing store): drop prior-year rows
-    #    whose project start is already overdue.
-    df_envoye_prod = drop_stale_sent_carryover(df_envoye_prod, year, date.today())
+    df_envoye = parse_numeric_columns(load_year_data(year, "Envoyé"))
+    df_signe = parse_numeric_columns(load_year_data(year, "Signé"))
 
-    # MAINTENANCE "Nouveaux contrats" = won deals signed in {year} only.
-    if not df_signe_prod.empty and 'signed_year' in df_signe_prod.columns:
-        df_signe_current = df_signe_prod[df_signe_prod['signed_year'] == year]
-    else:
-        df_signe_current = df_signe_prod
+    bu_envoye = get_production_bu_amounts(df_envoye, year, include_pondere=True)
+    bu_signe = get_production_bu_amounts(df_signe, year, include_pondere=False)
 
     bu_totals: dict = {}
     for bu in BU_ORDER:
-        signes_src = df_signe_current if bu == "MAINTENANCE" else df_signe_prod
+        env = bu_envoye.get(bu) or {}
+        sig = bu_signe.get(bu) or {}
         bu_totals[bu] = {
-            "signes": _sum_production_by_bu(signes_src, year, bu, weighted=False),
-            "potentiels": _sum_production_by_bu(df_envoye_prod, year, bu, weighted=True),
-            "envoyes": _sum_production_by_bu(df_envoye_prod, year, bu, weighted=False),
+            "signes": float(sig.get("total") or 0.0),
+            "potentiels": float(env.get("pondere") or 0.0),
+            "envoyes": float(env.get("total") or 0.0),
         }
 
-    portefeuille_debut: Optional[float] = None
+    portefeuille: Optional[float] = None
     if year == 2026:
-        portefeuille_debut = _get_entretien_start_2026_value()
-
-    api_key = get_secret("NOTION_API_KEY", "")
-    ds_id = (
-        get_secret("NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID", "").strip()
-        or get_secret("NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATABASE_ID", "").strip()
-    )
-
-    # Running portefeuille = live Notion sum (same source as Entretien, which
-    # grows as new sites are added). This is the "Portefeuille sites au {today}".
-    portefeuille_running: Optional[float] = None
-    if api_key and ds_id:
-        try:
-            portefeuille_running = fetch_maintenance_entretien_start_2026(api_key, ds_id)
-        except Exception:
-            portefeuille_running = None
-
-    if portefeuille_running is None:
-        # Notion unavailable: fall back to the start-of-year snapshot.
-        portefeuille_running = portefeuille_debut
+        portefeuille = _get_entretien_start_2026_value()
 
     return build_budget_workbook(
         year=year,
-        portefeuille_debut_annee=portefeuille_debut,
-        portefeuille_running=portefeuille_running,
+        portefeuille_debut_annee=portefeuille,
+        portefeuille_running=portefeuille,
         today=date.today(),
         bu_totals=bu_totals,
     )
