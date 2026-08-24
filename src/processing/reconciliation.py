@@ -20,10 +20,12 @@ catch the discrepancy. Reusing the view code here would make the test circular.
 
 from __future__ import annotations
 
+import time
+
 import pandas as pd
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Callable, Dict, List, Any, Optional, Tuple
 
 from config.settings import STATUS_WON, STATUS_WAITING
 
@@ -43,6 +45,20 @@ DEFAULT_ALERT_MISSING_GROSS = 100_000.0  # OR >= this much missing gross (€)
 # until the next rewrite. Only flag "extra" if there are a lot — which would mean the
 # live rewrite itself stopped working.
 DEFAULT_ALERT_EXTRA_COUNT = 30
+
+# --- Reading the sheet side safely -------------------------------------------
+# GoogleSheetsClient.list_worksheets() and read_worksheet() swallow EVERY exception
+# (a Google rate-limit included) and return [] / an empty DataFrame. So an empty
+# result is our only signal that a read failed, and we must never mistake it for
+# "the sheet is really empty" — doing so once reported all 201 signed devis as
+# missing (2026-08-23) when the sheets were perfectly fine.
+SHEET_LIST_RETRIES = 3        # a configured year always has worksheets
+SHEET_READ_PASSES = 2         # re-read the whole view if it comes back with no rows
+SHEET_BACKOFF_S = 20.0        # Google read quota is per-minute; wait it out
+SHEET_PACING_S = 1.0          # spread reads so we don't trip the quota to begin with
+# Below this many expected devis, a genuinely empty sheet side is plausible
+# (new year, first month), so we still treat it as real data rather than a failure.
+EMPTY_SIDE_MIN_TRUTH = 5
 
 
 def _is_manual_id(value: Any) -> bool:
@@ -73,6 +89,12 @@ class ViewRecon:
     sheet_gross: float
     missing: List[Dict[str, Any]] = field(default_factory=list)  # in Furious, not in sheets
     extra: List[Dict[str, Any]] = field(default_factory=list)    # in sheets, not in Furious
+    # Set when the sheet side could not be read reliably. The view is then reported
+    # as "not verified" — never as devis missing, which would be a false alarm.
+    inconclusive: bool = False
+    problems: List[str] = field(default_factory=list)
+    sheets_listed: int = 0
+    sheets_with_rows: int = 0
 
     def significant_missing(self, min_amount: float) -> List[Dict[str, Any]]:
         return [m for m in self.missing if abs(m["amount"]) >= min_amount]
@@ -86,6 +108,10 @@ class ViewRecon:
             "sheet_count": self.sheet_count,
             "furious_gross": round(self.furious_gross, 2),
             "sheet_gross": round(self.sheet_gross, 2),
+            "inconclusive": self.inconclusive,
+            "problems": self.problems,
+            "sheets_listed": self.sheets_listed,
+            "sheets_with_rows": self.sheets_with_rows,
             "missing_count": len(self.missing),
             "missing_significant_count": len(sig),
             "missing_gross": round(sum(m["amount"] for m in self.missing), 2),
@@ -125,29 +151,88 @@ def _ground_truth(df: pd.DataFrame, view: str, year: int) -> pd.DataFrame:
     return out
 
 
-def _sheet_amounts(sheets_client, view: str, year: int) -> Dict[str, float]:
-    """Map of {devis_id -> gross amount} actually present in the dashboard's sheets."""
-    out: Dict[str, float] = {}
-    try:
-        sheet_names = sheets_client.list_worksheets(view_type=view, year=year)
-    except Exception as exc:  # pragma: no cover - network
-        print(f"  reconciliation: could not list {view} {year} sheets: {exc}")
-        return out
-    for name in sheet_names:
+@dataclass
+class SheetSide:
+    """What we managed to read from the dashboard's sheets for one view/year."""
+    amounts: Dict[str, float] = field(default_factory=dict)
+    sheets_listed: int = 0
+    sheets_with_rows: int = 0
+    problems: List[str] = field(default_factory=list)
+
+
+def _list_sheets(sheets_client, view: str, year: int) -> Tuple[List[str], List[str]]:
+    """List the view's worksheets, retrying while the listing comes back empty.
+
+    ``list_worksheets`` returns [] both when the spreadsheet genuinely has no tabs
+    and when the API call failed, so we retry: for a configured year an empty
+    listing is never legitimate.
+    """
+    problems: List[str] = []
+    for attempt in range(SHEET_LIST_RETRIES):
+        try:
+            names = list(sheets_client.list_worksheets(view_type=view, year=year) or [])
+        except Exception as exc:
+            names = []
+            problems.append(f"listing {view} {year} a échoué ({type(exc).__name__}: {exc})")
+        if names:
+            return names, problems
+        if attempt < SHEET_LIST_RETRIES - 1:
+            time.sleep(SHEET_BACKOFF_S * (attempt + 1))
+    problems.append(f"aucun onglet listé pour {view} {year}")
+    return [], problems
+
+
+def _read_pass(
+    sheets_client, view: str, year: int, names: List[str]
+) -> Tuple[Dict[str, float], int, List[str]]:
+    """One read of every worksheet: {id -> amount}, how many tabs yielded rows, problems."""
+    amounts: Dict[str, float] = {}
+    problems: List[str] = []
+    with_rows = 0
+    for idx, name in enumerate(names):
+        if idx and SHEET_PACING_S:
+            time.sleep(SHEET_PACING_S)  # stay under the per-minute read quota
         try:
             d = sheets_client.read_worksheet(name, view_type=view, year=year)
         except Exception as exc:
-            print(f"  reconciliation: could not read sheet '{name}': {exc}")
+            problems.append(f"lecture de '{name}' impossible ({type(exc).__name__}: {exc})")
             continue
-        if d is None or d.empty or "id" not in d.columns:
+        if d is None or d.empty:
             continue
+        if "id" not in d.columns:
+            problems.append(f"onglet '{name}' lu sans colonne 'id'")
+            continue
+        rows_here = 0
         for _, row in d.iterrows():
             rid = str(row.get("id", "")).strip()
             if not rid or _is_manual_id(rid):
                 continue
-            if rid not in out:
-                out[rid] = _amount(row.get("amount"))
-    return out
+            rows_here += 1
+            if rid not in amounts:
+                amounts[rid] = _amount(row.get("amount"))
+        if rows_here:
+            with_rows += 1
+    return amounts, with_rows, problems
+
+
+def _read_sheet_side(sheets_client, view: str, year: int) -> SheetSide:
+    """Read the sheet side, retrying the whole view if it comes back with no rows."""
+    names, problems = _list_sheets(sheets_client, view, year)
+    side = SheetSide(sheets_listed=len(names), problems=list(problems))
+    if not names:
+        return side
+
+    for attempt in range(SHEET_READ_PASSES):
+        amounts, with_rows, pass_problems = _read_pass(sheets_client, view, year, names)
+        if with_rows or attempt == SHEET_READ_PASSES - 1:
+            side.amounts = amounts
+            side.sheets_with_rows = with_rows
+            side.problems.extend(pass_problems)
+            return side
+        # Every tab came back empty — far more likely a throttled read than a
+        # genuinely empty year. Wait out the quota window and read again.
+        time.sleep(SHEET_BACKOFF_S)
+    return side
 
 
 def reconcile_view(df: pd.DataFrame, sheets_client, view: str, year: int) -> ViewRecon:
@@ -156,9 +241,35 @@ def reconcile_view(df: pd.DataFrame, sheets_client, view: str, year: int) -> Vie
     truth_rows: Dict[str, pd.Series] = {}
     for _, r in truth.iterrows():
         truth_rows[str(r.get("id", "")).strip()] = r
-    sheet = _sheet_amounts(sheets_client, view, year)
+    side = _read_sheet_side(sheets_client, view, year)
+    sheet = side.amounts
     truth_ids = set(truth_rows)
     sheet_ids = set(sheet)
+    truth_gross = float(sum(_amount(r.get("amount")) for r in truth_rows.values()))
+
+    # Could we trust what we read? An unreadable sheet side must never be reported
+    # as "every devis is missing" — that is a checker failure, not a data gap.
+    blocker: Optional[str] = None
+    if side.sheets_listed == 0:
+        blocker = "aucun onglet n'a pu être listé (lecture Google Sheets en échec)"
+    elif not sheet_ids and len(truth_ids) >= EMPTY_SIDE_MIN_TRUTH:
+        blocker = (
+            f"les {side.sheets_listed} onglets ont été lus vides alors que Furious "
+            f"en attend {len(truth_ids)} — lecture Google Sheets en échec (quota ?)"
+        )
+    if blocker is not None:
+        return ViewRecon(
+            view=view,
+            year=year,
+            furious_count=len(truth_ids),
+            sheet_count=0,
+            furious_gross=truth_gross,
+            sheet_gross=0.0,
+            inconclusive=True,
+            problems=[blocker] + side.problems,
+            sheets_listed=side.sheets_listed,
+            sheets_with_rows=side.sheets_with_rows,
+        )
 
     missing = []
     for rid in truth_ids - sheet_ids:
@@ -182,10 +293,13 @@ def reconcile_view(df: pd.DataFrame, sheets_client, view: str, year: int) -> Vie
         year=year,
         furious_count=len(truth_ids),
         sheet_count=len(sheet_ids),
-        furious_gross=float(sum(_amount(r.get("amount")) for r in truth_rows.values())),
+        furious_gross=truth_gross,
         sheet_gross=float(sum(sheet.values())),
         missing=missing,
         extra=extra,
+        problems=side.problems,
+        sheets_listed=side.sheets_listed,
+        sheets_with_rows=side.sheets_with_rows,
     )
 
 
@@ -213,8 +327,18 @@ def reconcile(
     recons = {v: reconcile_view(df, sheets_client, v, year) for v in views}
 
     alert = False
+    infrastructure_alert = False
     reasons: List[str] = []
     for v, rc in recons.items():
+        if rc.inconclusive:
+            # The sheets could not be read, so we know nothing about this view.
+            # Say exactly that — never dress it up as missing devis.
+            infrastructure_alert = True
+            reasons.append(
+                f"{v}: contrôle impossible — {rc.problems[0] if rc.problems else 'lecture en échec'} "
+                f"(aucun devis n'est déclaré manquant)"
+            )
+            continue
         sig_missing = rc.significant_missing(min_amount)
         miss_gross = sum(m["amount"] for m in sig_missing)
         if len(sig_missing) >= alert_missing_count or miss_gross >= alert_missing_gross:
@@ -247,6 +371,7 @@ def reconcile(
             "alert_extra_count": alert_extra_count,
         },
         "alert": alert,
+        "infrastructure_alert": infrastructure_alert,
         "reasons": reasons,
         "views": {v: rc.to_dict(min_amount) for v, rc in recons.items()},
         "recons": recons,  # in-memory objects (not serialised by callers that json.dump views only)
@@ -281,8 +406,12 @@ def _rows_html(items: List[Dict[str, Any]], cols: List, limit: int = 40) -> str:
 def build_report_html(report: Dict[str, Any]) -> str:
     year = report["year"]
     min_amount = report["min_amount_eur"]
-    status_color = "#dc2626" if report["alert"] else "#16a34a"
-    status_text = "⚠️ ÉCART DÉTECTÉ" if report["alert"] else "✅ Cohérent"
+    if report["alert"]:
+        status_color, status_text = "#dc2626", "⚠️ ÉCART DÉTECTÉ"
+    elif report.get("infrastructure_alert"):
+        status_color, status_text = "#d97706", "🔧 CONTRÔLE IMPOSSIBLE"
+    else:
+        status_color, status_text = "#16a34a", "✅ Cohérent"
 
     blocks = []
     for v in ("envoye", "signe"):
@@ -290,6 +419,25 @@ def build_report_html(report: Dict[str, Any]) -> str:
         if not rc:
             continue
         label = _VIEW_LABEL.get(v, v)
+        if rc.get("inconclusive"):
+            problems_html = "".join(f"<li>{p}</li>" for p in rc.get("problems", []))
+            blocks.append(f"""
+        <h3 style="margin:18px 0 4px;">{label} {year} — non vérifié</h3>
+        <div style="padding:10px 12px;background:#fef3c7;border-left:4px solid #d97706;">
+          <p style="margin:0 0 6px;">
+            Les onglets Google Sheets de cette vue n'ont pas pu être lus, donc
+            <b>aucune comparaison n'a été faite</b>. Ce n'est pas un problème de données :
+            les {rc['furious_count']} devis correspondants dans Furious ne sont
+            <b>pas</b> déclarés manquants.
+          </p>
+          <ul style="margin:0;color:#78350f;font-size:13px;">{problems_html}</ul>
+          <p style="margin:6px 0 0;color:#78350f;font-size:12px;">
+            Cause la plus fréquente : quota de lecture Google Sheets atteint.
+            La vue sera revérifiée au prochain passage.
+          </p>
+        </div>
+        """)
+            continue
         miss_cols = [
             (lambda it: it["id"], "text-align:left;"),
             (lambda it: it["title"], "text-align:left;"),
