@@ -84,6 +84,7 @@ def main() -> int:
         "min_amount_eur": report["min_amount_eur"],
         "thresholds": report.get("thresholds", {}),
         "alert": report["alert"],
+        "infrastructure_alert": report.get("infrastructure_alert", False),
         "reasons": report["reasons"],
         "views": report["views"],
     }
@@ -96,23 +97,35 @@ def main() -> int:
     logger.info("Report written to %s", out_path)
 
     for v, rc in report["views"].items():
+        if rc.get("inconclusive"):
+            logger.warning(
+                "  %-7s | NOT VERIFIED (sheets unreadable): %s",
+                v, "; ".join(rc.get("problems", [])) or "unknown",
+            )
+            continue
         logger.info(
             "  %-7s | Furious %d/%.0f€  Sheets %d/%.0f€  missing(sig)=%d  extra=%d",
             v, rc["furious_count"], rc["furious_gross"], rc["sheet_count"],
             rc["sheet_gross"], rc["missing_significant_count"], rc["extra_count"],
         )
 
+    infra = report.get("infrastructure_alert", False)
     if report["alert"]:
         logger.warning("DRIFT DETECTED: %s", " | ".join(report["reasons"]))
+    elif infra:
+        logger.warning("CHECK INCONCLUSIVE: %s", " | ".join(report["reasons"]))
     else:
         logger.info("No significant drift.")
 
-    should_email = (not args.no_email) and (report["alert"] or args.always_email)
+    should_email = (not args.no_email) and (report["alert"] or infra or args.always_email)
     if should_email:
-        subject = (
-            f"{'⚠️ Écart' if report['alert'] else '✅ OK'} — "
-            f"Réconciliation Dashboard/Furious {args.year}"
-        )
+        if report["alert"]:
+            tag = "⚠️ Écart"
+        elif infra:
+            tag = "🔧 Contrôle impossible"
+        else:
+            tag = "✅ OK"
+        subject = f"{tag} — Réconciliation Dashboard/Furious {args.year}"
         html = build_report_html(report)
         try:
             ok = EmailSender()._send_email(args.to, subject, html)
