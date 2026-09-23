@@ -42,6 +42,7 @@ class ManualProject:
     date: Optional[str] = None
     projet_start: Optional[str] = None
     projet_stop: Optional[str] = None
+    signature_date: Optional[str] = None
     cf_bu: str = "AUTRE"
     cf_typologie_de_devis: str = ""
     assigned_to: str = ""
@@ -63,6 +64,7 @@ class ManualProject:
             date=raw.get("date") or None,
             projet_start=raw.get("projet_start") or None,
             projet_stop=raw.get("projet_stop") or None,
+            signature_date=raw.get("signature_date") or None,
             cf_bu=str(raw.get("cf_bu") or "AUTRE"),
             cf_typologie_de_devis=str(raw.get("cf_typologie_de_devis") or ""),
             assigned_to=str(raw.get("assigned_to") or ""),
@@ -168,6 +170,7 @@ class ManualProjectsStore:
         projet_stop: Optional[str],
         cf_bu: str,
         cf_typologie_de_devis: str,
+        signature_date: Optional[str] = None,
         assigned_to: str = "",
         statut: str = DEFAULT_STATUT,
         created_by: str = "",
@@ -183,6 +186,7 @@ class ManualProjectsStore:
                 date=date or None,
                 projet_start=projet_start or None,
                 projet_stop=projet_stop or None,
+                signature_date=signature_date or None,
                 cf_bu=(cf_bu or "AUTRE").strip(),
                 cf_typologie_de_devis=(cf_typologie_de_devis or "").strip(),
                 assigned_to=(assigned_to or "").strip(),
@@ -203,6 +207,7 @@ class ManualProjectsStore:
             "date",
             "projet_start",
             "projet_stop",
+            "signature_date",
             "cf_bu",
             "cf_typologie_de_devis",
             "assigned_to",

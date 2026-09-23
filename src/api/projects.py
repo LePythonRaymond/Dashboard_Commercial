@@ -89,7 +89,7 @@ class ProjectsClient:
   Project(
     limit: {self.page_limit},
     offset: {offset},
-    order: [{{created_at:desc}}],
+    order: [{{created_at:desc}},{{id:desc}}],
     {filter_clause}
   ){{
     {fields_str}

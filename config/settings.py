@@ -150,6 +150,15 @@ class Settings:
     notion_maintenance_won_database_id: str = field(
         default_factory=lambda: get_secret("NOTION_MAINTENANCE_WON_DATABASE_ID", "")
     )
+    # Notion database/datasource for ALL won devis (all BUs), with the signature date
+    # typed in Notion (Furious refuses API changes on won devis). Daily sync, step 11.
+    notion_won_devis_database_id: str = field(
+        default_factory=lambda: get_secret("NOTION_WON_DEVIS_DATABASE_ID", "")
+    )
+    # First devis date (ISO) included in the won devis sync.
+    won_devis_sync_start_date: str = field(
+        default_factory=lambda: get_secret("WON_DEVIS_SYNC_START_DATE", "2026-01-01")
+    )
 
     # API Request Settings
     api_timeout: int = 30

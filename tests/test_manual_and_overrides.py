@@ -9,10 +9,12 @@ from src.processing.manual_and_overrides import (
     apply_input_overrides,
     apply_quarter_overrides,
     inject_manual_projects,
+    make_manual_row,
 )
-from src.processing.manual_projects_store import ManualProjectsStore
+from src.processing.manual_projects_store import ManualProject, ManualProjectsStore
 from src.processing.overrides_store import OverridesStore
 from src.processing.revenue_engine import RevenueEngine
+from src.processing.views import ViewGenerator
 
 
 CURRENT_YEAR = datetime.now().year
@@ -125,6 +127,97 @@ def test_inject_manual_projects_no_op_when_store_empty(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# make_manual_row — won vs waiting
+# ---------------------------------------------------------------------------
+
+
+def _manual(**overrides) -> ManualProject:
+    base = dict(
+        manual_id="MAN-2026-0001",
+        title="Oral deal",
+        company_name="Axa",
+        amount=120000,
+        probability=100,
+        date=f"{CURRENT_YEAR}-06-01",
+        projet_start=f"{CURRENT_YEAR}-07-01",
+        projet_stop=f"{CURRENT_YEAR}-09-30",
+        cf_bu="CONCEPTION",
+        cf_typologie_de_devis="Conception Paysage",
+    )
+    base.update(overrides)
+    return ManualProject(**base)
+
+
+def test_make_manual_row_won_sets_effective_won_date():
+    row = make_manual_row(
+        _manual(statut="gagné", signature_date=f"{CURRENT_YEAR}-06-02"),
+        RevenueEngine(),
+    )
+    assert row["statut_clean"] == "gagné"
+    assert row["date_effective_won"] == pd.Timestamp(f"{CURRENT_YEAR}-06-02")
+    assert row["signature_date"] == pd.Timestamp(f"{CURRENT_YEAR}-06-02")
+
+
+def test_make_manual_row_waiting_has_no_effective_won_date():
+    row = make_manual_row(_manual(statut="en cours"), RevenueEngine())
+    assert row["statut_clean"] == "en cours"
+    assert pd.isna(row["date_effective_won"])
+
+
+def test_won_manual_routes_into_signe_view_only():
+    """A won manual must land in the Signé (won) view, never snapshot/sent."""
+    engine = RevenueEngine()
+    base_df = pd.DataFrame(
+        [
+            {
+                "id": "111",
+                "title": "Furious waiting",
+                "company_name": "C",
+                "amount": 1000.0,
+                "probability": 50,
+                "probability_calc": 50.0,
+                "probability_factor": 0.5,
+                "date": pd.Timestamp(f"{CURRENT_YEAR}-06-01"),
+                "projet_start": pd.Timestamp(f"{CURRENT_YEAR}-06-01"),
+                "projet_stop": pd.Timestamp(f"{CURRENT_YEAR}-06-30"),
+                "final_bu": "MAINTENANCE",
+                "cf_bu": "MAINTENANCE",
+                "cf_typologie_de_devis": "Maintenance Entretien",
+                "statut": "en cours",
+                "statut_clean": "en cours",
+                "created_at": pd.Timestamp(f"{CURRENT_YEAR}-06-01"),
+                "signature_date": pd.NaT,
+                "date_effective_won": pd.NaT,
+            }
+        ]
+    )
+    base = engine.process(base_df)
+
+    class _SingleManualStore:
+        def all(self):
+            return [
+                _manual(
+                    manual_id="MAN-9999-0001",
+                    statut="gagné",
+                    signature_date=datetime.now().strftime("%Y-%m-%d"),
+                )
+            ]
+
+        def count(self):
+            return 1
+
+    df = inject_manual_projects(base, _SingleManualStore(), engine)
+    views = ViewGenerator().generate(df)
+
+    def _ids(view):
+        return view.data["id"].astype(str).tolist()
+
+    assert "MAN-9999-0001" in _ids(views.won_month)
+    assert "MAN-9999-0001" not in _ids(views.snapshot)
+    assert "MAN-9999-0001" not in _ids(views.sent_month)
+
+
+# ---------------------------------------------------------------------------
 # apply_quarter_overrides
 # ---------------------------------------------------------------------------
 
@@ -152,6 +245,34 @@ def test_apply_quarter_overrides_replaces_cell_and_recomputes_year(tmp_path):
     # Pondéré recomputed from probability=50 → factor 0.5.
     assert row[f"Montant Pondéré Q1_{CURRENT_YEAR}"] == pytest.approx(150.0)
     assert row[f"Montant Pondéré {CURRENT_YEAR}"] == pytest.approx(150.0)
+
+
+def test_apply_quarter_overrides_syncs_amount_with_breakdown(tmp_path):
+    df = _build_proposal_df()
+    engine = RevenueEngine()
+    df = engine.process(df)
+
+    # Split the deal across two years with a grand total (300 + 700 = 1000)
+    # different from the engine's natural 12000 → amount should follow.
+    store = OverridesStore(tmp_path / "overrides.json")
+    next_year = CURRENT_YEAR + 1
+    store.upsert(
+        "12345",
+        quarter_overrides={
+            f"Montant Total Q1_{CURRENT_YEAR}": 300.0,
+            f"Montant Total Q2_{CURRENT_YEAR}": 0.0,
+            f"Montant Total Q3_{CURRENT_YEAR}": 0.0,
+            f"Montant Total Q4_{CURRENT_YEAR}": 0.0,
+            f"Montant Total Q1_{next_year}": 700.0,
+        },
+    )
+
+    result = apply_quarter_overrides(df, store, engine.years_to_track)
+    row = result.iloc[0]
+    assert row[f"Montant Total {CURRENT_YEAR}"] == pytest.approx(300.0)
+    assert row[f"Montant Total {next_year}"] == pytest.approx(700.0)
+    # amount tracks the sum of all year totals (300 + 700).
+    assert row["amount"] == pytest.approx(1000.0)
 
 
 def test_apply_quarter_overrides_no_op_when_store_empty(tmp_path):

@@ -165,7 +165,7 @@ def inject_manual_projects(
     base_columns = list(df.columns) if df is not None and not df.empty else []
     new_rows: List[dict] = []
     for manual in manuals:
-        row = _manual_to_row(manual, engine)
+        row = make_manual_row(manual, engine)
         new_rows.append(row)
 
     if not new_rows:
@@ -189,7 +189,20 @@ def inject_manual_projects(
     return combined
 
 
-def _manual_to_row(manual: ManualProject, engine: RevenueEngine) -> dict:
+def make_manual_row(manual: ManualProject, engine: RevenueEngine) -> dict:
+    """Build a single processed proposal row from a manual project.
+
+    The row carries the same columns a Furious proposal would after the
+    revenue engine, so it can be appended to a processed DataFrame and
+    participate in views / summaries / dashboard. When the manual is won,
+    its ``signature_date`` populates ``date_effective_won`` so the won-month
+    filter and the dashboard route it into the Signé pipe.
+    """
+    signature_ts = (
+        pd.to_datetime(manual.signature_date, errors="coerce")
+        if getattr(manual, "signature_date", None)
+        else pd.NaT
+    )
     payload = {
         "id": manual.manual_id,
         "title": manual.title,
@@ -208,9 +221,9 @@ def _manual_to_row(manual: ManualProject, engine: RevenueEngine) -> dict:
         "statut": manual.statut,
         "statut_clean": (manual.statut or "").lower().strip(),
         "created_at": pd.NaT,
-        "signature_date": pd.NaT,
+        "signature_date": signature_ts,
         "last_updated_at": pd.NaT,
-        "date_effective_won": pd.NaT,
+        "date_effective_won": signature_ts,
         "is_manual": True,
     }
     prob = payload["probability"]
@@ -256,6 +269,7 @@ def apply_quarter_overrides(
         years_present |= {int(y) for y in years_to_track}
 
     affected_rows = 0
+    affected_ids: set = set()
     for project_id, override in overrides.items():
         if not override.quarter_overrides:
             continue
@@ -263,6 +277,7 @@ def apply_quarter_overrides(
         if not mask.any():
             continue
         affected_rows += int(mask.sum())
+        affected_ids.add(str(project_id))
         for col, value in override.quarter_overrides.items():
             if col not in df.columns:
                 df[col] = 0.0
@@ -294,6 +309,22 @@ def apply_quarter_overrides(
             mp_q = f"Montant Pondéré Q{q}_{year}"
             if mt_q in df.columns and mp_q in df.columns:
                 df[mp_q] = df[mt_q].astype(float) * prob_factor
+
+    # Keep the deal total (``amount``) and weighted amount in sync with the
+    # overridden breakdown, for affected rows only. The per-year totals become
+    # the source of truth: editing a quarter therefore moves the project's
+    # displayed "Montant" so the table stays internally consistent.
+    year_total_cols = [
+        f"Montant Total {y}" for y in sorted(years_present)
+        if f"Montant Total {y}" in df.columns
+    ]
+    if year_total_cols and affected_ids:
+        amask = id_str.isin(affected_ids)
+        new_amount = df.loc[amask, year_total_cols].fillna(0).astype(float).sum(axis=1)
+        if "amount" in df.columns:
+            df.loc[amask, "amount"] = new_amount
+        if "amount_pondere" in df.columns:
+            df.loc[amask, "amount_pondere"] = new_amount * prob_factor[amask]
 
     logger.info("Applied quarter overrides on %d row(s)", affected_rows)
     return df

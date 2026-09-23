@@ -1,0 +1,322 @@
+{
+  "id": "SitesGeresMois01",
+  "name": "📈 Sites gérés par mois (Notion)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 📈 Sites gérés par mois\nChaque matin, compte les sites en gestion dans la base Notion **Sites** et met à jour la ligne du mois dans **📈 Sites gérés par mois** (une ligne par mois, créée le 1er, figée à la fin du mois).\n\n**Règle** : un site compte s'il a un nom, si son contrat a démarré (Date debut contrat, ou date de création de la fiche si vide) et s'il n'est pas marqué Perdu ou Archivé avec une date de fin déjà passée.\n\nSi la lecture de Sites est incomplète ou vide, le nœud *Compter les sites* s'arrête en erreur au lieu d'écrire un faux total.",
+        "height": 300,
+        "width": 520
+      },
+      "id": "4d5dac3b-267b-52f9-8b3d-d1ab136c20fd",
+      "name": "Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -360
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 7
+            }
+          ]
+        }
+      },
+      "id": "21c1fc9d-3ecf-5a8f-ac54-784441f0a3b4",
+      "name": "Chaque jour à 7 h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/data_sources/285d9278-02d7-808a-9395-000b04dfc654/query",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2025-09-03"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"page_size\": 100\n}",
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "body",
+                    "name": "start_cursor",
+                    "value": "={{ $response.body.next_cursor }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ $response.body.has_more === false }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50
+            }
+          },
+          "lowercaseHeaders": false
+        }
+      },
+      "id": "e52caaad-6be8-5f2f-ade2-641312e0a31e",
+      "name": "Lire la base Sites",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ],
+      "credentials": {
+        "notionApi": {
+          "id": "ciGEF85fAeNKNsVu",
+          "name": "Notion Rapport"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code node \"Compter les sites\" (mode: Run Once for All Items).\n// Input: one item per page of results of the Notion query on the Sites database.\n// Rule: a site counts on day J (today, Paris time) when it has a name, its contract\n// has started (Date debut contrat <= J, or the page creation date when the start is\n// empty), and it is not marked lost or archived with an end date already past.\nconst responses = $input.all().map(item => item.json);\nif (responses.length === 0 || responses[responses.length - 1].has_more) {\n  throw new Error('Lecture de la base Sites incomplète : relevé annulé pour ne pas écrire un faux total.');\n}\nconst pages = responses.flatMap(r => r.results || []);\nif (pages.length === 0) {\n  throw new Error('Aucun site lu dans la base Sites : relevé annulé.');\n}\nconst today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Paris' }).format(new Date());\nconst plain = prop => ((prop && (prop.title || prop.rich_text)) || []).map(t => t.plain_text || '').join('').trim();\nconst day = prop => ((prop && prop.date && prop.date.start) || '').slice(0, 10) || null;\n\nlet sites = 0, ext = 0, int = 0, portefeuille = 0;\nfor (const page of pages) {\n  const p = page.properties || {};\n  if (!plain(p['Nom'])) continue;\n  const start = day(p['Date debut contrat']) || String(page.created_time || '').slice(0, 10);\n  if (!start || start > today) continue;\n  const lost = ((p['Reconduction'] && p['Reconduction'].multi_select) || []).some(o => o.name === 'Perdu')\n    || (p['Archivé'] && p['Archivé'].checkbox === true);\n  const end = day(p['Date fin Contrat']);\n  if (lost && (!end || end < today)) continue;\n  sites += 1;\n  const side = (p['INT EXT ?'] && p['INT EXT ?'].select && p['INT EXT ?'].select.name) || '';\n  if (side === 'EXT' || side === 'INT/EXT') ext += 1;\n  if (side === 'INT' || side === 'INT/EXT') int += 1;\n  portefeuille += (p['Total HT Annuel'] && p['Total HT Annuel'].number) || 0;\n}\nconst mois = today.slice(0, 7);\nportefeuille = Math.round(portefeuille * 100) / 100;\n// Row of the \"Sites gérés par mois\" table, ready to send to Notion as-is.\nconst properties = {\n  'Mois': { title: [{ text: { content: mois } }] },\n  'Date': { date: { start: `${mois}-01` } },\n  'Sites gérés': { number: sites },\n  'Sites extérieur': { number: ext },\n  'Sites intérieur': { number: int },\n  'Portefeuille annuel HT': { number: portefeuille },\n  'Source': { select: { name: 'Relevé' } },\n  'Relevé le': { date: { start: today } },\n};\nreturn [{ json: { mois, releve: today, sites, ext, int, portefeuille, pagesLues: pages.length, properties } }];\n"
+      },
+      "id": "e133e925-d461-52d4-8e68-310ae1ec276a",
+      "name": "Compter les sites",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/data_sources/3fd02456-d7fe-4a38-b44a-f5b6d8e05f62/query",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2025-09-03"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ page_size: 1, filter: { property: 'Mois', title: { equals: $json.mois } } }) }}",
+        "options": {
+          "lowercaseHeaders": false
+        }
+      },
+      "id": "9a6871c0-98a9-5ccd-9b95-c8fd5915f6cc",
+      "name": "Chercher la ligne du mois",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        0
+      ],
+      "credentials": {
+        "notionApi": {
+          "id": "ciGEF85fAeNKNsVu",
+          "name": "Notion Rapport"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "3ebc5510-f4e4-546b-9ec7-0ce9c29eef78",
+              "leftValue": "={{ $json.results.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d06d99ba-1914-5822-80d3-2ef02e23ab09",
+      "name": "Ligne du mois existe ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.notion.com/v1/pages/{{ $json.results[0].id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2025-09-03"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: $('Compter les sites').first().json.properties }) }}",
+        "options": {
+          "lowercaseHeaders": false
+        }
+      },
+      "id": "9b87be3d-27a7-533e-92c9-cce0b9f21913",
+      "name": "Mettre à jour la ligne",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        -100
+      ],
+      "credentials": {
+        "notionApi": {
+          "id": "ciGEF85fAeNKNsVu",
+          "name": "Notion Rapport"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/pages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2025-09-03"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ parent: { data_source_id: '3fd02456-d7fe-4a38-b44a-f5b6d8e05f62' }, properties: $('Compter les sites').first().json.properties }) }}",
+        "options": {
+          "lowercaseHeaders": false
+        }
+      },
+      "id": "65dd4082-6785-52c3-a245-92e39e73349b",
+      "name": "Créer la ligne",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        100
+      ],
+      "credentials": {
+        "notionApi": {
+          "id": "ciGEF85fAeNKNsVu",
+          "name": "Notion Rapport"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Chaque jour à 7 h": {
+      "main": [
+        [
+          {
+            "node": "Lire la base Sites",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire la base Sites": {
+      "main": [
+        [
+          {
+            "node": "Compter les sites",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compter les sites": {
+      "main": [
+        [
+          {
+            "node": "Chercher la ligne du mois",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chercher la ligne du mois": {
+      "main": [
+        [
+          {
+            "node": "Ligne du mois existe ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ligne du mois existe ?": {
+      "main": [
+        [
+          {
+            "node": "Mettre à jour la ligne",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Créer la ligne",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Paris"
+  },
+  "pinData": {},
+  "tags": []
+}

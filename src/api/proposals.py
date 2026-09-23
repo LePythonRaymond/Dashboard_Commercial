@@ -83,11 +83,15 @@ class ProposalsClient:
             Formatted query string
         """
         fields_str = ",".join(self.fields)
+        # The id tie-breaker makes the order total. Ordering by date alone let
+        # offset pagination return some devis twice and skip others: on
+        # 2026-09-23, 4 devis sharing a date across a page boundary were
+        # duplicated and 4 were missing from every run.
         query = f"""{{
   Proposal(
     limit: {self.page_limit},
     offset: {offset},
-    order: [{{date:desc}}],
+    order: [{{date:desc}},{{id:desc}}],
     filter: {{}}
   ){{
     {fields_str}
@@ -176,7 +180,13 @@ class ProposalsClient:
         if not all_proposals:
             return pd.DataFrame()
 
-        return pd.DataFrame(all_proposals)
+        df = pd.DataFrame(all_proposals)
+        duplicated = df["id"].astype(str).duplicated() if "id" in df.columns else None
+        if duplicated is not None and duplicated.any():
+            print(f"  Warning: {int(duplicated.sum())} duplicated proposal id(s) dropped: "
+                  f"{sorted(df.loc[duplicated, 'id'].astype(str).unique())[:10]}")
+            df = df.loc[~duplicated].reset_index(drop=True)
+        return df
 
     def fetch_filtered(
         self,
