@@ -46,6 +46,7 @@ from src.integrations.google_sheets import GoogleSheetsClient
 from src.integrations.email_sender import EmailSender
 from src.integrations.notion_alerts_sync import NotionAlertsSync
 from src.integrations.notion_maintenance_won_sync import NotionMaintenanceWonSync
+from src.integrations.notion_won_devis_sync import NotionWonDevisSync, select_won_devis
 from src.processing.manual_and_overrides import (
     apply_input_overrides,
     apply_quarter_overrides,
@@ -512,6 +513,23 @@ class PipelineRunner:
                     logger.error(f"Notion MAINTENANCE won sync error: {e}")
                     import traceback
                     self._log_step("notion_maintenance_won_sync", "error", {"error": str(e), "traceback": traceback.format_exc()})
+
+            # Step 11: Sync ALL won devis (all BUs, since WON_DEVIS_SYNC_START_DATE) to the "Devis gagnés" DB.
+            # Furious-owned fields are refreshed; "Date signature" is typed in Notion and never overwritten.
+            logger.info("\n--- Step 11: Syncing won devis (all BUs) to Notion ---")
+            if not self.sync_notion or not settings.notion_won_devis_database_id:
+                reason = "dry_run" if self.dry_run else "disabled" if not self.sync_notion else "NOTION_WON_DEVIS_DATABASE_ID not set"
+                self._log_step("notion_won_devis_sync", "skipped", {"reason": reason})
+            else:
+                try:
+                    won_items, status_by_id = select_won_devis(df_processed, settings.won_devis_sync_start_date)
+                    logger.info(f"Won devis since {settings.won_devis_sync_start_date}: {len(won_items)} proposal(s)")
+                    won_devis_stats = NotionWonDevisSync().sync_won_devis(won_items, status_by_id)
+                    self._log_step("notion_won_devis_sync", "success", won_devis_stats)
+                except Exception as e:
+                    logger.error(f"Notion won devis sync error: {e}")
+                    import traceback
+                    self._log_step("notion_won_devis_sync", "error", {"error": str(e), "traceback": traceback.format_exc()})
 
             # Pipeline completed
             self.results["status"] = "completed"

@@ -9,6 +9,8 @@ env/
 # Credentials
 config/credentials/
 *.json
+# n8n workflow exports: no secret inside, credentials are referenced by name only
+!deploy/n8n/*.json
 
 # Python
 __pycache__/

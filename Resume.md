@@ -111,7 +111,7 @@ The original system was built in **n8n** (workflow automation tool) with Python 
          │
          ├──► Daily Full Pipeline (run_pipeline.py --skip-emails)
          │    ├──► Google Sheets (État actuel + monthly views)
-         │    └──► Notion Sync (Alerts + TRAVAUX + MAINTENANCE won)
+         │    └──► Notion Sync (Alerts + TRAVAUX + MAINTENANCE won + Devis gagnés all BUs)
          │
          ├──► Bi-Monthly Emails (run_pipeline_scheduled.py --emails-only)
          │    ├──► Email Alerts (Weird + Follow-ups)
@@ -135,7 +135,7 @@ The original system was built in **n8n** (workflow automation tool) with Python 
 5. **View Generation**: Filter and aggregate into 3 main views
 
 **Pipeline-Specific Outputs**:
-- **Daily Pipeline**: Writes to "État actuel" (stable snapshot) and monthly sheets. Syncs Notion databases (alerts, TRAVAUX, MAINTENANCE won). MAINTENANCE won: all proposals won in the current year with BU MAINTENANCE; POST if ID Devis not in Notion, PATCH if already present; no archiving (all years/months kept for grouping in Notion). **Maintenance Entretien début 2026**: same état spreadsheet gets a **Paramètres** worksheet (Notion → JSON + Sheets); see `run_sheets_update.py` Step 7 and `run_pipeline.py` after Step 7 (§18.11).
+- **Daily Pipeline**: Writes to "État actuel" (stable snapshot) and monthly sheets. Syncs Notion databases (alerts, TRAVAUX, MAINTENANCE won, and all won devis in step 11, §18.16). MAINTENANCE won: all proposals won in the current year with BU MAINTENANCE; POST if ID Devis not in Notion, PATCH if already present; no archiving (all years/months kept for grouping in Notion). **Maintenance Entretien début 2026**: same état spreadsheet gets a **Paramètres** worksheet (Notion → JSON + Sheets); see `run_sheets_update.py` Step 7 and `run_pipeline.py` after Step 7 (§18.11).
 - **Bi-Monthly Pipeline**: Sends emails only (objectives + alerts). No external writes to avoid overwriting daily data.
 - **Weekly Pipeline**: Dedicated TRAVAUX projection email + Notion sync.
 
@@ -337,7 +337,7 @@ myrium/
 ## 7. Key Features & Capabilities
 
 ### 7.1 Data Extraction
-- **Automatic Pagination**: Handles 1,700+ proposals
+- **Automatic Pagination**: Handles 2,300+ proposals; offset pages ordered on a total order (`date desc, id desc`) so no devis is duplicated or skipped (§18.16)
 - **Field Selection**: Fetches 29 specific fields
 - **Error Recovery**: Continues on individual page failures
 
@@ -364,7 +364,7 @@ myrium/
 - **Assignee Visibility**: Shows all assignees in alert tables
 
 ### 7.6 Notion Integration
-- **5 Databases**: Weird Proposals, Follow-up, TRAVAUX Projection, Recent TRAVAUX Projects, MAINTENANCE Won (current year)
+- **6 Databases**: Weird Proposals, Follow-up, TRAVAUX Projection, Recent TRAVAUX Projects, MAINTENANCE Won (current year), Devis gagnés (all BUs since 2026-01-01, signature date typed in Notion, §18.16)
 - **Commercial/Chef de projet Split**: People properties for clear responsibility
 - **Schema-Aware Sync**: Only sets properties that exist in database schema (prevents 400 errors)
 - **TRAVAUX Projection dates**: Sync maps to both "Date"/"Début projet" and "Date Signature"/"Début Chantier" when present in schema; projection passes `signature_date` for "Date Signature"
@@ -379,7 +379,9 @@ myrium/
 - **Time Filtering**: Filter by Month/Quarter based on source sheet
 - **Date Columns**: Full visibility of proposal dates
 - **Clickable Project Lists**: KPI cards display project counts with clickable "🔎 Voir projets" buttons that open large modal dialogs showing detailed project lists with Furious CRM links
+- **Inline Editing & Manual Projects** (§18.13): the "Voir projets" dialog is an editable `st.data_editor` (all years' Total + T1–T4 at once); edit cells, add a project via the trailing row, delete manual rows. Edits persist as JSON overrides/manuals (`data/overrides.json`, `data/manual_projects.json`) re-applied at read-time and by the daily pipeline, so they survive the Furious re-pull. Read-only/computed columns are greyed; sidebar panel manages/links manual projects to Furious ids
 - **Objectifs Signé (Production vs Signature)**: For the Signé view, the Objectifs tab shows two blocks: **Objectif Production** vs **Réalisé** (signed-to-produce in the period; **exception** in 2026: BU MAINTENANCE and typologie Maintenance Entretien use **only** prorated début d’année — §18.12) and **Objectif Signature** vs **Signature** (ex-Pur). Objectives data: `signe` = production (Réalisé), `signature` = signature (Signé). **Début 2026** resolution (Sheets Paramètres, JSON, Notion, secret): **§18.11**; same resolver drives **Envoyé 2026** when applicable. **Objectifs tab end section**: projection + Pur-by-month + expanders + colors (§18.10–18.12).
+- **Budget Export** (§18.14): sidebar "Générer budget {année}" produces the one-sheet "Budget {Y} avec légende" `.xlsx` (download or Drive-as-Google-Sheet upload); Signés/Potentiels/Envoyés use production-year aggregation, sent pipe prunes stale overdue carryover, portefeuille from live Notion
 - **Optimization**: Lazy loading, caching, efficient multi-sheet reading
 - **PDF Removal**: Export feature removed for performance/simplicity
 
@@ -402,9 +404,12 @@ NOTION_DATABASE_ID=...
 NOTION_TRAVAUX_PROJECTION_DATABASE_ID=...
 NOTION_TRAVAUX_RECENT_PROJECTS_DATABASE_ID=...
 NOTION_MAINTENANCE_WON_DATABASE_ID=...
+NOTION_WON_DEVIS_DATABASE_ID=...     # "Devis gagnés" DB, step 11 (§18.16)
+WON_DEVIS_SYNC_START_DATE=2026-01-01  # Optional: first devis date synced by step 11
 MAINTENANCE_ENTRETIEN_START_2026=...   # Optional fallback: value for "Maintenance Entretien – Début 2026" (e.g. 1084000)
 NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID=...  # Optional: data source ID (preferred)
 NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATABASE_ID=...   # Optional: legacy database ID if no datasource
+BUDGET_EXPORT_DRIVE_FOLDER_ID=...   # Optional: Drive folder for "Générer budget" upload-as-Google-Sheet (§18.14)
 ```
 
 ### 8.2 Business Constants
@@ -438,6 +443,7 @@ The pipeline supports granular flags to control execution components:
 ```
 - Runs full pipeline daily: Auth → Fetch → Clean → Revenue → Views → Sheets + Notion sync
 - **Step 10**: Syncs current year’s MAINTENANCE won proposals to Notion (when `NOTION_MAINTENANCE_WON_DATABASE_ID` is set); POST new by ID Devis, PATCH existing; no archiving
+- **Step 11**: Syncs every won devis since `WON_DEVIS_SYNC_START_DATE` (all BUs, avenants included, test devis excluded) to the "Devis gagnés" DB when `NOTION_WON_DEVIS_DATABASE_ID` is set; Furious fields refreshed only when changed, `Date signature` never overwritten (§18.16)
 - Skips all emails (objectives + alerts) to avoid daily email noise
 - Uses stable "État actuel" snapshot (no daily dated sheets)
 - Provides complete data refresh including Notion sync for dashboard
@@ -861,6 +867,110 @@ See original documentation for details on performance, security, error handling,
 
 **Plan closure**: Table logic in `src/dashboard/app.py` skips `calculate_production_period_with_carryover` / `calculate_production_amount_with_carryover` for BU **MAINTENANCE** and typologie **Maintenance Entretien** when 2026 début d’année is resolved; **Réalisé** = prorated slice only (`realized_prev` = 0). Same rule feeds projection (`entretien_start_2026` on `compute_projection_and_objective` / `plot_objectives_projection_chart`) and optional `plot_objectives_line_chart` via `_entretien_start_monthly_series`. **Notion source** unchanged: sum of property **Total HT Cette année** in `notion_entretien_start.py`. **Resolution order** and Sheets **Paramètres**: §18.11; **file store API**: `entretien_start_store.py` (`get_store_path`, `fetch_and_write_entretien_start_2026`, `read_entretien_start_2026_from_file`).
 
+### 18.13 Manual Projects, Per-Project Overrides, Inline Editing & VPS Docker Deploy (June 2026)
+
+**Feature**: Modify and create projects directly from the dashboard, with edits persisting across the daily Furious→Sheets recompute. Two persistent JSON stores (under `data/`, bind-mounted on VPS) hold user data; a shared merge layer re-injects it both at dashboard read-time and in every pipeline run, so user edits survive the daily re-pull from Furious.
+
+**Stores** (atomic tempfile+`os.replace` writes, `RLock`):
+- `src/processing/overrides_store.py` — `OverridesStore` / `ProjectOverride` keyed by proposal id. Two override kinds: **`input_overrides`** (amount, dates, BU, typologie, probability… applied BEFORE the engine → clean quarterly recompute) and **`quarter_overrides`** (direct `Montant Total Q{q}_{year}` cells applied AFTER the engine). `quarter_overrides` win; overrides are **sticky** (never expire until reset). `migrate(old,new)` moves overrides when a manual is linked to a real Furious id. Store: `data/overrides.json`.
+- `src/processing/manual_projects_store.py` — `ManualProjectsStore` / `ManualProject`; sequential ids `MAN-{year}-{NNNN}`. Store: `data/manual_projects.json`.
+
+**Merge layer** (`src/processing/manual_and_overrides.py`, pure functions + factories `get_overrides_store` / `get_manual_projects_store`):
+- `apply_input_overrides(df, store)` — before engine; mutates whitelisted input cols, recomputes `probability_*` aux.
+- `inject_manual_projects(df, store, engine)` — after engine; one row per manual via `RevenueEngine.process_single_row` (new method in `revenue_engine.py`); id = `MAN-…`.
+- `apply_quarter_overrides(df, store, years_to_track)` — after engine; sets overridden quarter cells, re-sums `Montant Total {year}`, recomputes every `Montant Pondéré`. **June change**: for overridden rows it now also re-derives **`amount`** (and `amount_pondere` when present) as the **sum of all year totals**, so the displayed **Montant follows the breakdown** (editing a quarter/year moves the deal total; raw Furious value no longer diverges). No conservation check — totals are the literal sum of typed quarters.
+
+**Pipeline wiring** (3 hook points, `scripts/run_pipeline.py` ~lines 237-253 and `scripts/run_sheets_update.py`): `apply_input_overrides` after `DataCleaner` → `RevenueEngine.process` → `inject_manual_projects` → `apply_quarter_overrides`, then ViewGenerator/Sheets write. So the daily 06:00 cron re-applies all user edits on top of fresh Furious data before writing the Sheet. Validated via a read-only `--dry-run` (override loaded & applied on 2073 real proposals; cross-year T4-2026→T1-2027 split correctly re-summed both years + pondéré). `src/integrations/google_sheets.py` id filter accepts `MAN-` ids.
+
+**Dashboard** (`src/dashboard/app.py`):
+- `_apply_user_layer` re-applies the merge layer on data read from Sheets so edits show immediately (before the next cron). Cache invalidated via `stores_signature` = combined mtime of the two JSON files (`_stores_mtime_signature`). **Superseded by §18.15**: `_apply_user_layer` now applies **quarter overrides only**; manual-project injection moved to `load_year_data` (`_inject_year_manuals`), status- and home-month-aware, to avoid per-sheet multiplication and wrong-pipe placement.
+- **Inline editor** replaced the old nested-dialog approach (which crashed with "Dialogs may not be nested"). `_show_projects_dialog` now renders one `st.data_editor(num_rows="dynamic")` showing **all tracked years at once** (Total + T1–T4 per year). Add a project via the trailing "+" row; delete only manual (`MAN-`) rows (Furious deletions refused and restored next refresh). Helpers: `_build_editable_projects_frame` (resets to RangeIndex so dynamic add works + index hidden), `_build_projects_editor_config` (SelectboxColumn BU/typologie, NumberColumn €/%, DateColumn; read-only = id/year totals/pondéré), `_persist_projects_table_changes` (diffs edited vs snapshot → routes to input/quarter overrides, manual add/update/delete), `_create_manual_from_row`, value coercers `_to_iso_date`/`_values_differ`/`_normalize_for_store`. **Read-only columns greyed** (`#f0f2f6`) via a pandas `Styler` (Streamlit applies Styler styles only to non-editable columns; verified compatible with `num_rows="dynamic"` in Streamlit 1.56). Editable cells can't be colored (canvas grid; no `column_config` color API).
+- Sidebar **`render_pending_links_sidebar`** (`src/dashboard/components/pending_links_panel.py`): list/create/edit/delete manuals and "Lier à Furious" (migrates overrides to the real id). Dialog components `create_manual_project_dialog.py` / `edit_project_dialog.py` remain, now used only by this sidebar (not by the in-table flow).
+
+**Tests**: `tests/test_overrides_store.py`, `tests/test_manual_projects_store.py`, `tests/test_manual_and_overrides.py` (input/quarter overrides, manual injection, `process_single_row`, and `test_apply_quarter_overrides_syncs_amount_with_breakdown` for the June amount-sync rule).
+
+**VPS deployment (Docker + Traefik)**: dashboard runs as a side-car container alongside existing n8n (untouched). `Dockerfile`, `.dockerignore`, `deploy/docker-compose.yml` (binds `../data` and `../config/credentials`, joins `root_merci_net`, Traefik labels), `deploy/dashboard.env.example`. Cron repo's `data/` symlinks to the shared host dir so cron + container read/write the same JSON. Deploy: `git pull` then `cd deploy && docker compose up -d --build`; cron picks up code changes with no rebuild. **Known HTTPS caveat**: Let's Encrypt rate-limits the shared `*.hstgr.cloud` parent domain (HTTP 429) → temporary URL serves a self-signed cert. Fix runbook (pivot to `dashboard-commercial.merciraymond.fr` via one A record + one compose label) in **`deploy/HTTPS_FIX_PIVOT_TO_MERCIRAYMOND.md`**.
+
+**Ops note**: `.env` values containing spaces must be quoted (e.g. `SMTP_PASSWORD="…"`) or a shell `source .env` truncates them; production crons use python-dotenv and are unaffected.
+
+### 18.14 Budget Export — "Générer budget {année}" xlsx (June 2026)
+
+**Feature**: Sidebar button (below the Année selector in `src/dashboard/app.py`) that generates a one-sheet `.xlsx` replicating the manual **"Budget {Y} avec légende"** Google Sheet (reference `Budget 2026.xlsx`), then either offers a local download or, when `BUDGET_EXPORT_DRIVE_FOLDER_ID` is set, uploads it to Drive as a **native Google Sheet** and shows the link. Two-step `st.session_state` flow avoids recompute on rerun.
+
+**Modules**:
+- `src/integrations/budget_export.py` — `build_budget_workbook(year, *, bu_totals, portefeuille_debut_annee, portefeuille_running, today)` builds the sheet; helpers `_compute_bu_amounts` (legacy single-df fallback), `_sum_production_by_bu(df, year, bu, weighted)`, `drop_stale_sent_carryover(df, budget_year, today)`. Builder also accepts legacy `df_processed` path (computes bu_totals itself).
+- `src/integrations/drive_uploader.py` — `upload_xlsx_as_google_sheet(...)` reuses `GoogleSheetsClient` credential resolution + Drive API (`google-api-python-client`) to upload+convert to a Sheet in the target folder.
+- `_build_budget_xlsx_for_year(year)` (app.py) — orchestrates data + portefeuille + calls builder.
+
+**Data methodology** (mirrors the Objectifs tab's production-year aggregation, `load_aggregated_production_data`):
+- **Devis Signés (CONCEPTION/TRAVAUX)** = `load_aggregated_production_data(year,"Signé")` summed on raw `Montant Total {Y}` → carries prior-year signatures producing in Y into the pipe.
+- **MAINTENANCE "Nouveaux contrats {Y}"** = won signed **in Y only** (`signed_year == year` filter); prior maintenance is carried by the portefeuille, so no production carryover here (avoids double-count).
+- **Devis Potentiels** = `load_aggregated_production_data(year,"Envoyé")` on weighted `Montant Pondéré {Y}` — **same value as the Objectifs "Envoyé" view** (`use_pondere=True`).
+- **Devis Envoyés** = same sent dataset, raw `Montant Total {Y}`. **Won (Signé) and sent (Envoyé) never mix** — disjoint datasets; legacy `_compute_bu_amounts` also updated so Envoyés = waiting-only.
+- **Stale carryover pruning (budget export ONLY, not the dashboard tab)**: `drop_stale_sent_carryover` drops prior-year-sent (`signed_year < year`) waiting proposals whose `projet_start` is overdue (< today); current-year-sent and future/unknown-start kept. Decided via user Q&A (scope=budget-only, rule=past-years-only). Caveat: a genuine multi-year deal sent last year with an overdue start is also pruned (could switch to `projet_stop` if needed).
+- **Portefeuille sites au {today}** (L21) = live Notion sum via `fetch_maintenance_entretien_start_2026(api_key, ds_id)` (the same "Total HT Cette année" source as Entretien, grows as sites are added); fallback = start-of-year `_get_entretien_start_2026_value()`. The earlier wrong-property module `notion_maintenance_portefeuille.py` was **deleted**.
+
+**Layout/visuals** (single sheet; the old second "Maintenance" detail tab and all its helpers `_build_sheet2`/`_compute_maintenance_entries`/date helpers were **removed**):
+- BU band colors = dashboard `BU_COLORS`: CONCEPTION `2D5A3F` green, TRAVAUX `F4C430` gold, MAINTENANCE `7B4B94` purple, TOTAL `3D85C6` blue; row-18 light sub-tints; thin borders on the whole grid (D17:P25).
+- **Légende**: rich-text (`CellRichText`/`InlineFont`) so the terms "Devis Signés/Potentiels/Envoyés" are **bold**; bordered box; `E11:L11` merged.
+- **Blank-block merges** copied from the reference exactly: `D21:J22`, `N21:P22`, `D24:P24` (plus existing per-BU value merges). Verified output merge set == reference.
+- Maintenance **Portefeuille** (row 21) and **Total sécurisé** (row 22) rows: light-purple fill `D9D2E9`; column **K widened 15.4→18** and labels `K21`/`K22` wrapped (rows 21-22 height 30) so they aren't clipped by the merged blank block.
+
+**Data fact (no expected signature date)**: Furious proposals (`src/api/proposals.py` `ProposalFields`) expose only `date` (devis date), `signature_date` (Furious e-signature date: **empty on every devis** as of 2026-09, only avenants carry one; won devis are locked for API updates, see §18.16), `projet_start`/`projet_stop` (production window), `created_at`/`last_updated_at`, and `probability`. There is **no forecast/expected signing date**; `projet_start` is the only forward-looking date.
+
+**Config / deps**: env `BUDGET_EXPORT_DRIVE_FOLDER_ID` (in `deploy/dashboard.env.example`); `requirements.txt` adds `openpyxl>=3.1.0`, `google-api-python-client>=2.100.0`.
+
+**Tests**: `tests/test_budget_export.py` (13) — `_compute_bu_amounts` (won/waiting, Envoyés waiting-only), `_sum_production_by_bu` carryover, `drop_stale_sent_carryover`, single-sheet builder structure/legend/merges, precomputed `bu_totals` path.
+
+**Ops**: set `BUDGET_EXPORT_DRIVE_FOLDER_ID` on the VPS and ensure the Drive folder is shared with the service account; rebuild the dashboard Docker image so `openpyxl` + Drive client are installed. Local download over the self-signed temporary HTTPS URL is blocked by Chrome → use the Drive upload path (or the proper domain per `deploy/HTTPS_FIX_PIVOT_TO_MERCIRAYMOND.md`).
+
+### 18.15 Manual WON Projects (oral agreements) + duplicate-prevention (June 2026)
+
+**Goal**: enter a deal in the dashboard **before Furious has it**, including ones already **won** (oral agreement). It feeds the Signé/production views + budget like a real won deal, and is linked to its real `ID Devis` later — with **zero duplicates** as a hard constraint (extends §18.13, which previously allowed waiting-only manuals).
+
+**Model** (`src/processing/manual_projects_store.py`): `ManualProject` gains **`signature_date`** (field + `from_dict`/`add`/`update` plumbing). When the status is won, this date anchors the deal's month/year.
+
+**Injection** (`src/processing/manual_and_overrides.py`): `_manual_to_row` renamed to public **`make_manual_row`**; for a won manual it sets `signature_date` **and** `date_effective_won` from the manual (else `NaT`), so `ViewGenerator._filter_won_month` (+ orphan sweep) routes it into a Signé sheet. Pipeline path unchanged (inject ALL manuals → `ViewGenerator` status-filters): a won manual lands in Signé, a waiting one in snapshot/Envoyé (verified end-to-end).
+
+**Dialogs**:
+- `create_manual_project_dialog.py` — `STATUT_OPTIONS` now = waiting + **won** (`gagné`/`signé`, `_is_won_statut` vs `STATUS_WON`); a **Date de signature** field shows only for won; passed to `store.add(signature_date=…)`.
+- `edit_project_dialog.py` + sidebar trigger — manuals (`is_manual`) can edit **statut + signature_date** (Furious-edit path untouched); `trigger_edit_project_dialog` gains `statut`/`signature_date`.
+
+**Duplicate blind spots fixed**:
+1. **Notion MAINTENANCE-Won** (`scripts/run_pipeline.py` Step 10): added `mask_not_manual = ~id.startswith("MAN-")` so manuals are **excluded** from that DB (decided w/ user — Notion mirrors real CRM only; a `MAN-` page would duplicate the deal once linked).
+2. **Dashboard multiplication / wrong pipe** (`src/dashboard/app.py`): the old per-sheet `_apply_user_layer` injection multiplied a manual across every monthly sheet (`load_year_data` concats with no id-dedup) and ignored status. Now `load_worksheet_data` does overrides-only; new **`_inject_year_manuals(df, year, view_type)`** runs once post-concat in `load_year_data` (+ empty-result path): drops any `MAN-` rows, then injects **WON→"signe"** / **WAITING→"envoye"** only, for the manual's **home year**, with `source_sheet` = its home-month sheet name → **counted exactly once**, correct pipe & month. `etat`/snapshot untouched. Also fixes the same latent bug for existing waiting manuals.
+3. **Link window** (deal in Furious but not yet linked): sidebar `render_pending_links_sidebar` (`src/dashboard/components/pending_links_panel.py`) now (a) flags manuals open **>7 days** ("à lier ?"), and (b) shows **soft auto-match** suggestions (same normalized client + amount ±5%) as one-click link buttons. Candidates via cached `_load_link_candidates(year, stores_signature)` (current-year Signé+Envoyé, `MAN-` excluded), passed as a lazy loader (computed only when a link panel opens). `_perform_link` shared by suggestions + manual confirm.
+
+**Tests**: `tests/test_manual_projects_store.py` (signature_date persistence; update statut+signature_date); `tests/test_manual_and_overrides.py` (`make_manual_row` won vs waiting; **won manual routes into Signé view only** via real `ViewGenerator`). 66 passed across touched areas (manual stores, overrides, budget, maintenance-won, views, objectives, both dashboard test files). Note: full `pytest` hangs on a **pre-existing** network-dependent test (collection OK; unrelated to this change).
+
+### 18.16 Devis gagnés in Notion (signature date), Furious pagination fix, sites monthly history (September 2026)
+
+**Need (sales team)**: every devis won since 1 Jan 2026, split "gagné pas encore signé" / "gagné et signé", followed **by month** (her explicit choice); a 2025 vs 2026 analysis (sent devis, conversion, losses and reasons, DV); and, for Entretien, a monthly count of managed sites next to the signatures chart of the "Analytique" page.
+
+**Furious facts checked on 2026-09-23**: `signature_date` is empty on all 2,305 devis (Furious e-signature unused). Won = `Gagnés en cours` / `Gagnés et finis`, and each win creates a project; the devis `date` is re-stamped at the win (≈ project creation) and at the loss (85 % within 3 days of the last update). **The API refuses any change on a won devis**: `POST /api/v2/proposal/` with `{"action":"update","data":{...}}` answers "La modification d'un devis gagné est interdite" (no-op test on devis 263464 left it untouched). Projects do accept updates. Consequence: the signature date lives in Notion; a Furious write-back would need a project custom field created by an admin.
+
+**Notion DB "🖋️ Devis gagnés (synchro Furious)"** (db `c5d23eb32a3c45278ef066bf14066269`, data source `828e0a50-3487-4f8a-a0a9-56275fc27776`, under "🏮 Suivi Commercial (Devis)"): Nom, ID Devis (upsert key), Client, BU, Typologie, Montant HT, Statut Furious, Date gagné, **Date signature**, Statut signature (formula ⏳/✅), Commercial, Chef de projet, Début/Fin projet, Lien Furious (+ Mois gagné / Mois signature text formulas, unused by the views).
+- `src/integrations/notion_won_devis_sync.py`: `select_won_devis(df, start_date)` keeps won statuses, date ≥ start, no `MAN-` rows, no test titles (`TEST_TITLE_RE`: 54 test devis in Furious, 4 of them won in 2026). `NotionWonDevisSync` reuses the plumbing of `NotionMaintenanceWonSync`. Rules: Furious-owned properties are written only when their value changed (compared page vs payload, else counted "unchanged"); `Nom` is set at creation only; **`Date signature` is human-owned**, never overwritten or cleared, filled from Furious `signature_date` only when Notion is empty; a page whose devis left the won statuses gets `Statut Furious` relabelled; orphans are left alone; 409/429/5xx retried with backoff. Avenant rows `<devis>_AV<id>` (cross-year addons from `merge_addons_into_proposals`) are synced too, linked to the parent devis, and arrive with real Furious signature dates.
+- Step 11 in `scripts/run_pipeline.py` (after step 10, gated by `sync_notion` and `NOTION_WON_DEVIS_DATABASE_ID`); settings `notion_won_devis_database_id`, `won_devis_sync_start_date` in `config/settings.py`.
+- `scripts/run_won_devis_sync.py [--dry-run]`: steps 1 to 4.5 of the pipeline, then only this sync (first load: 243 rows = 234 devis + 9 avenants, 4.64 M€).
+- `scripts/setup_won_devis_views.py [--page <id>]`: views written through the **Notion REST views API** (`/v1/views`): ⏳ not signed grouped by month of Date gagné, ✅ signed grouped by month of Date signature (newest month first), 📊 amount won per month stacked by BU, 🖋️ amount signed per month, 📋 all. The MCP view DSL cannot express this (date grouping defaults to "relative", chart x-axis to "day", formula grouping and STACK BY are silently dropped). `--page` requires the page to be shared with the integration.
+
+**Pagination bug fixed** (`src/api/proposals.py`, `proposal_addons.py`, `projects.py`): ordering on `date` alone made offset pagination return 4 devis twice and miss 4 others on every run (e.g. won devis 263037 absent from the dashboard and the MAINTENANCE Notion DB). Queries now order on `date desc, id desc` (`id_system` for addons, `id` for projects); `ProposalsClient.fetch_all` also drops duplicate ids with a warning.
+
+**Tests**: `tests/test_won_devis_sync.py` (12: selection, test titles, mapping, signature protection, unchanged skip, relabel/orphans, retry, avenant link, pagination order); 86 passed across the related suites.
+
+**Sales page** (private draft "🖋️ Suivi des devis gagnés et signés", `3e4d927802d781fbb195fa90667b96a2`, to be moved by Tadd): links to the DB views, then the 2025 vs 2026 analysis at 23/09/2026 as native tables plus a self-contained HTML block with inline SVG charts. Notion HTML blocks run sandboxed: no network, no Notion data, so they are snapshots only (live figures stay in native databases and charts). Definitions: cohorts by `created_at`; "envoyé" excludes Brief/En cours drafts and "Devis en doublon"; win date = project creation; loss date = devis date; DV = title prefix "(DV…)" or typologie containing DV. Headline results (1 Jan to 23 Sep): 384 devis sent vs 338, 16.96 M€ vs 10.33 M€; won by win date 4.54 M€ vs 2.62 M€ (top 5 deals = 39 %); conversion at equal age (90 days) unchanged overall (45 %) but 22 % vs 31 % for devis ≥ 15 k€; 133 devis created in 2026 still pending (10.9 M€); 170 real losses since 1 Oct 2025 (9.08 M€); 95 DV devis vs 115.
+
+**Sites monthly history (Entretien)**: DB "📈 Sites gérés par mois" (db `5f285a54a8354408a3a59feed7d6fb09`, data source `3fd02456-d7fe-4a38-b44a-f5b6d8e05f62`, under "🎆 Entretiens X IA" next to Sites): Mois (key `AAAA-MM`), Date (1st of month), Sites gérés, Sites extérieur (EXT + INT/EXT), Sites intérieur (INT + INT/EXT), Portefeuille annuel HT (sum of Total HT Annuel), Source (Relevé / Reconstitué), Relevé le. Rule for day J: the site has a name, its contract has started (Date debut contrat ≤ J, else page creation date), and it is not Perdu/Archivé with an end date already past. Jan–Aug 2026 rebuilt from contract dates (121 → 155 sites), Sep = 160 sites, 1.39 M€. Linked charts (sites: line, portfolio: columns) appended at the end of the Analytique page.
+- n8n workflow `deploy/n8n/sites_geres_par_mois.json` (for n8n.srv1082911.hstgr.cloud, credential "Notion Rapport" `ciGEF85fAeNKNsVu`): daily 07:00 Paris → paginated query of Sites → Code node count (throws instead of writing when the read is incomplete or empty) → upsert of the current month row (past months stay frozen). The HTTP nodes set `lowercaseHeaders: false`: otherwise n8n's Notion credential, which only adds `Notion-Version: 2022-02-22` when it cannot see that header, overrides 2025-09-03 and data source endpoints answer "Invalid request URL". Both branches (update, create) tested end to end on a throwaway n8n 1.76. `.gitignore` gains `!deploy/n8n/*.json`.
+
+**Next steps (ops)**:
+- Deploy step 11 and the pagination fix: add `NOTION_WON_DEVIS_DATABASE_ID=c5d23eb32a3c45278ef066bf14066269` to the VPS `.env` and push (the working tree also holds uncommitted June work, §18.13 to §18.15).
+- Import and activate the n8n workflow.
+- Move the draft page to the sales space and share it with the integration; optionally run `setup_won_devis_views.py --page <id>` for in-page monthly views.
+- Optional Furious write-back of the signature date through a project custom field (admin action first).
+- Security: the live n8n workflow "Projet Add Furious PIPELINE" hardcodes a Notion token and the Furious API password in HTTP nodes (also present in local backups): move them to n8n credentials and rotate them.
+
 ---
 
 ## 17. Conclusion
@@ -876,7 +986,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.38
-**Last Updated**: April 2026
+**Document Version**: 1.42
+**Last Updated**: September 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System

@@ -58,7 +58,7 @@ class ProposalAddonsClient:
   ProposalAddon(
     limit: {self.page_limit},
     offset: {offset},
-    order: [{{date:desc}}],
+    order: [{{date:desc}},{{id_system:desc}}],
     filter: {{status:{{in:["1","2"]}}}}
   ){{
     {fields_str}
