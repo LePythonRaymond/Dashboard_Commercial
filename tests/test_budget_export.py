@@ -9,7 +9,8 @@ import pytest
 from src.integrations.budget_export import (
     LEGEND_TEXT_TEMPLATE,
     _compute_bu_amounts,
-    _compute_maintenance_entries,
+    _sum_production_by_bu,
+    drop_stale_sent_carryover,
     build_budget_workbook,
 )
 
@@ -90,10 +91,10 @@ def test_compute_bu_amounts_potentiels_uses_waiting_montant_pondere(sample_df):
     assert out['potentiels'] == pytest.approx(90.0)
 
 
-def test_compute_bu_amounts_envoyes_uses_won_plus_waiting_montant_total(sample_df):
+def test_compute_bu_amounts_envoyes_is_waiting_pipe_only(sample_df):
     out = _compute_bu_amounts(sample_df, 2026, 'CONCEPTION')
-    # Won 90 + Waiting 180 (both Montant Total 2026)
-    assert out['envoyes'] == pytest.approx(270.0)
+    # Sent pipe only (waiting), raw Montant Total 2026 — won is NOT mixed in.
+    assert out['envoyes'] == pytest.approx(180.0)
 
 
 def test_compute_bu_amounts_maintenance_excludes_other_bus(sample_df):
@@ -102,7 +103,8 @@ def test_compute_bu_amounts_maintenance_excludes_other_bus(sample_df):
     expected_signes = 7088 / 12 * 10
     assert out['signes'] == pytest.approx(expected_signes)
     assert out['potentiels'] == pytest.approx(1000.0)
-    assert out['envoyes'] == pytest.approx(expected_signes + 2000.0)
+    # Envoyés = waiting pipe only (won not mixed in)
+    assert out['envoyes'] == pytest.approx(2000.0)
 
 
 def test_compute_bu_amounts_handles_empty_df():
@@ -111,45 +113,71 @@ def test_compute_bu_amounts_handles_empty_df():
 
 
 # ---------------------------------------------------------------------------
-# _compute_maintenance_entries
+# _sum_production_by_bu (production-year aggregation, no status filter)
 # ---------------------------------------------------------------------------
 
-def test_compute_maintenance_entries_filters_won_year_bu_maintenance(sample_df):
-    entries = _compute_maintenance_entries(sample_df, 2026)
-    assert len(entries) == 1
-    e = entries[0]
-    assert e["nom"].startswith("(E) - Maintenance Won 1")
-    assert e["mois_signature"] == "Mars"
-    assert e["mois_demarrage"] == "Mars"
+@pytest.fixture
+def production_df() -> pd.DataFrame:
+    """
+    Production-aggregated-style frame: rows from several signing years that all
+    produce in 2026. No status column — Signé sheets are implicitly all won.
+    """
+    return pd.DataFrame([
+        {"cf_bu": "CONCEPTION", "Montant Total 2026": 100.0, "Montant Pondéré 2026": 100.0, "signed_year": 2024},
+        {"cf_bu": "CONCEPTION", "Montant Total 2026": 250.0, "Montant Pondéré 2026": 250.0, "signed_year": 2025},
+        {"cf_bu": "CONCEPTION", "Montant Total 2026": 50.0,  "Montant Pondéré 2026": 50.0,  "signed_year": 2026},
+        {"cf_bu": "TRAVAUX",    "Montant Total 2026": 900.0, "Montant Pondéré 2026": 900.0, "signed_year": 2025},
+    ])
 
 
-def test_compute_maintenance_entries_uses_montant_total_year_for_prod_amount(sample_df):
-    entries = _compute_maintenance_entries(sample_df, 2026)
-    assert entries[0]["montant_ht_prod"] == pytest.approx(7088 / 12 * 10)
-    assert entries[0]["montant_ht"] == pytest.approx(7088.10)
+def test_sum_production_by_bu_aggregates_across_signing_years(production_df):
+    # 100 (2024) + 250 (2025) + 50 (2026) — the carryover cascade
+    assert _sum_production_by_bu(production_df, 2026, "CONCEPTION") == pytest.approx(400.0)
 
 
-def test_compute_maintenance_entries_excludes_previous_year_signature(sample_df):
-    # M-W-OLD has signature_date 2025-11-01 → must be excluded
-    entries = _compute_maintenance_entries(sample_df, 2026)
-    titles = [e["nom"] for e in entries]
-    assert all("Last Year" not in t for t in titles)
+def test_sum_production_by_bu_isolates_bu(production_df):
+    assert _sum_production_by_bu(production_df, 2026, "TRAVAUX") == pytest.approx(900.0)
 
 
-def test_compute_maintenance_entries_handles_missing_columns():
-    df = pd.DataFrame([{
-        "id_devis": "X", "title": "Bare", "statut_clean": "gagné", "final_bu": "MAINTENANCE",
-    }])
-    entries = _compute_maintenance_entries(df, 2026)
-    # No signature_date / date / date_effective_won → cannot resolve year → excluded
-    assert entries == []
+def test_sum_production_by_bu_handles_empty():
+    assert _sum_production_by_bu(pd.DataFrame(), 2026, "CONCEPTION") == 0.0
+
+
+# ---------------------------------------------------------------------------
+# drop_stale_sent_carryover (prune dead prior-year sent proposals)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def sent_carryover_df() -> pd.DataFrame:
+    return pd.DataFrame([
+        # prior-year sent, start already overdue → STALE, dropped
+        {"id_devis": "old-overdue", "signed_year": 2025, "projet_start": "2026-02-01"},
+        # prior-year sent, start still in the future → kept
+        {"id_devis": "old-future", "signed_year": 2025, "projet_start": "2026-11-01"},
+        # current-year sent, overdue start → kept (benefit of the doubt)
+        {"id_devis": "cur-overdue", "signed_year": 2026, "projet_start": "2026-02-01"},
+        # prior-year sent, no start date → kept (cannot judge)
+        {"id_devis": "old-nostart", "signed_year": 2025, "projet_start": None},
+    ])
+
+
+def test_drop_stale_sent_carryover_removes_only_overdue_prior_year(sent_carryover_df):
+    out = drop_stale_sent_carryover(sent_carryover_df, 2026, date(2026, 6, 1))
+    kept = set(out["id_devis"])
+    assert kept == {"old-future", "cur-overdue", "old-nostart"}
+
+
+def test_drop_stale_sent_carryover_passthrough_when_columns_missing():
+    df = pd.DataFrame([{"id_devis": "x", "Montant Total 2026": 10.0}])
+    out = drop_stale_sent_carryover(df, 2026, date(2026, 6, 1))
+    assert len(out) == 1
 
 
 # ---------------------------------------------------------------------------
 # build_budget_workbook (integration)
 # ---------------------------------------------------------------------------
 
-def test_build_budget_workbook_produces_two_sheets_with_expected_headers(sample_df):
+def test_build_budget_workbook_produces_single_sheet_with_expected_headers(sample_df):
     import openpyxl
 
     blob = build_budget_workbook(
@@ -163,13 +191,15 @@ def test_build_budget_workbook_produces_two_sheets_with_expected_headers(sample_
     assert len(blob) > 0
 
     wb = openpyxl.load_workbook(BytesIO(blob), data_only=False)
-    assert wb.sheetnames == ["Budget 2026 avec légende", "Maintenance"]
+    # Maintenance tab removed — only the main projection sheet remains.
+    assert wb.sheetnames == ["Budget 2026 avec légende"]
 
     ws1 = wb["Budget 2026 avec légende"]
-    # Légende block
+    # Légende block — rich text with bold terms; flatten to plain text to assert.
     assert ws1["D11"].value == "Légende"
-    assert "Devis Signés" in (ws1["D12"].value or "")
-    assert LEGEND_TEXT_TEMPLATE.format(year=2026).split("\n")[0] in ws1["D12"].value
+    legend_plain = str(ws1["D12"].value or "")
+    assert "Devis Signés" in legend_plain
+    assert LEGEND_TEXT_TEMPLATE.format(year=2026).split("\n")[0] in legend_plain
 
     # Date stamp
     assert ws1["D16"].value == "Au 16/03/2026"
@@ -188,9 +218,9 @@ def test_build_budget_workbook_produces_two_sheets_with_expected_headers(sample_
     assert ws1["K18"].value == "Nouveaux contrats 2026"
 
     # Numeric values come from sample_df aggregation
-    assert ws1["E19"].value == pytest.approx(90.0)   # CONCEPTION signes
-    assert ws1["F19"].value == pytest.approx(90.0)   # CONCEPTION potentiels
-    assert ws1["G19"].value == pytest.approx(270.0)  # CONCEPTION envoyes
+    assert ws1["E19"].value == pytest.approx(90.0)   # CONCEPTION signes (won)
+    assert ws1["F19"].value == pytest.approx(90.0)   # CONCEPTION potentiels (waiting, weighted)
+    assert ws1["G19"].value == pytest.approx(180.0)  # CONCEPTION envoyes (waiting, raw)
 
     # Formulas in row 20 / row 22 / row 25
     assert ws1["E20"].value == "=E19+F19"
@@ -201,18 +231,30 @@ def test_build_budget_workbook_produces_two_sheets_with_expected_headers(sample_
     # Portefeuille values
     assert ws1["L21"].value == pytest.approx(1043709.16)
 
-    ws2 = wb["Maintenance"]
-    assert ws2["B2"].value == "Entrées/Sortie Portefeuille sites"
-    assert ws2["B3"].value == "Nom"
-    assert ws2["C3"].value == "Montant HT Prod 2026"
-    assert ws2["D3"].value == "Montant HT"
-    assert ws2["E3"].value == "Mois signature"
-    assert ws2["F3"].value == "Mois démarrage"
-    assert ws2["A3"].value == "Au 16/03/26"
-    assert ws2["C4"].value == pytest.approx(996697.45)
-    # First (and only) entry row
-    assert (ws2["B5"].value or "").startswith("(E) - Maintenance Won 1")
-    assert ws2["E5"].value == "Mars"
+
+def test_build_budget_workbook_accepts_precomputed_bu_totals():
+    import openpyxl
+
+    bu_totals = {
+        "CONCEPTION": {"signes": 400.0, "potentiels": 10.0, "envoyes": 20.0},
+        "TRAVAUX": {"signes": 900.0, "potentiels": 30.0, "envoyes": 40.0},
+        "MAINTENANCE": {"signes": 111.0, "potentiels": 5.0, "envoyes": 6.0},
+    }
+    blob = build_budget_workbook(
+        year=2026,
+        portefeuille_debut_annee=996697.45,
+        portefeuille_running=1160616.0,
+        today=date(2026, 6, 1),
+        bu_totals=bu_totals,
+    )
+    wb = openpyxl.load_workbook(BytesIO(blob), data_only=False)
+    assert wb.sheetnames == ["Budget 2026 avec légende"]
+    ws1 = wb["Budget 2026 avec légende"]
+    # Row 19 reflects the precomputed (production-aggregated) values verbatim.
+    assert ws1["E19"].value == pytest.approx(400.0)
+    assert ws1["H19"].value == pytest.approx(900.0)
+    assert ws1["K19"].value == pytest.approx(111.0)
+    assert ws1["L21"].value == pytest.approx(1160616.0)
 
 
 def test_build_budget_workbook_handles_missing_portefeuille(sample_df):

@@ -25,7 +25,12 @@ from src.processing.manual_projects_store import ManualProjectsStore
 from src.processing.overrides_store import OverridesStore, ProjectOverride
 from src.processing.typologie_allocation import CANONICAL_TYPOLOGIES
 
-from .create_manual_project_dialog import BU_OPTIONS, BU_TO_TYPOLOGIES
+from .create_manual_project_dialog import (
+    BU_OPTIONS,
+    BU_TO_TYPOLOGIES,
+    STATUT_OPTIONS,
+    _is_won_statut,
+)
 
 
 EDIT_DIALOG_PAYLOAD_KEY = "edit_project_dialog_payload"
@@ -43,6 +48,8 @@ def trigger_edit_project_dialog(
     date_envoi: Optional[str] = None,
     projet_start: Optional[str] = None,
     projet_stop: Optional[str] = None,
+    statut: Optional[str] = None,
+    signature_date: Optional[str] = None,
     available_years: Optional[Iterable[int]] = None,
     quarter_snapshot: Optional[dict] = None,
     is_manual: bool = False,
@@ -59,6 +66,8 @@ def trigger_edit_project_dialog(
         "date": date_envoi,
         "projet_start": projet_start,
         "projet_stop": projet_stop,
+        "statut": statut or "",
+        "signature_date": signature_date,
         "available_years": sorted({int(y) for y in (available_years or [])}),
         "quarter_snapshot": dict(quarter_snapshot or {}),
         "is_manual": bool(is_manual),
@@ -156,6 +165,27 @@ def show_edit_project_dialog() -> None:
                 key=f"edit_stop_{project_id}",
             )
 
+        manual_statut: Optional[str] = None
+        manual_signature_date = None
+        if payload.get("is_manual"):
+            statut_default = payload.get("statut") or STATUT_OPTIONS[0]
+            statut_options = list(STATUT_OPTIONS)
+            if statut_default not in statut_options:
+                statut_options = statut_options + [statut_default]
+            manual_statut = st.selectbox(
+                "Statut",
+                statut_options,
+                index=statut_options.index(statut_default),
+                key=f"edit_statut_{project_id}",
+                help="« gagné » / « signé » placent le projet dans la vue Signé.",
+            )
+            if _is_won_statut(manual_statut):
+                manual_signature_date = st.date_input(
+                    "Date de signature",
+                    value=_parse_date(payload.get("signature_date")) or date.today(),
+                    key=f"edit_signature_{project_id}",
+                )
+
     with tab_quarters:
         st.caption(
             "Surcharges directes appliquées **après** le moteur. "
@@ -217,8 +247,7 @@ def show_edit_project_dialog() -> None:
             quarter_overrides=new_quarters,
         )
         if payload.get("is_manual"):
-            manual_store.update(
-                project_id,
+            manual_update_fields = dict(
                 title=payload["title"],
                 company_name=payload["company_name"],
                 amount=amount,
@@ -229,6 +258,14 @@ def show_edit_project_dialog() -> None:
                 cf_bu=cf_bu,
                 cf_typologie_de_devis=cf_typologie,
             )
+            if manual_statut:
+                manual_update_fields["statut"] = manual_statut
+                manual_update_fields["signature_date"] = (
+                    manual_signature_date.isoformat()
+                    if (_is_won_statut(manual_statut) and manual_signature_date)
+                    else None
+                )
+            manual_store.update(project_id, **manual_update_fields)
         st.toast("Modifications enregistrées", icon="✅")
         st.rerun()
 

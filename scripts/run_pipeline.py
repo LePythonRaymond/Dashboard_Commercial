@@ -493,7 +493,11 @@ class PipelineRunner:
                         (df_processed["final_bu"] == "MAINTENANCE")
                         | ((df_processed["final_bu"] == "TRAVAUX") & df_processed["title"].str.contains("TS", case=False, na=False))
                     )
-                    df_maintenance_won = df_processed.loc[mask_won & mask_year & mask_maintenance].copy()
+                    # Exclude manual (dashboard-only) projects: they have no real
+                    # Furious ID Devis yet, so syncing them would create a Notion
+                    # page that duplicates the deal once it's linked to Furious.
+                    mask_not_manual = ~df_processed["id"].astype(str).str.startswith("MAN-")
+                    df_maintenance_won = df_processed.loc[mask_won & mask_year & mask_maintenance & mask_not_manual].copy()
                     maintenance_won_items = df_maintenance_won.to_dict("records") if not df_maintenance_won.empty else []
                     logger.info(f"MAINTENANCE won (current year {current_year}): {len(maintenance_won_items)} proposal(s)")
                     notion_maintenance_won_sync = NotionMaintenanceWonSync()

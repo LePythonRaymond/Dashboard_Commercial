@@ -95,3 +95,27 @@ def test_next_seq_persists_after_reload(tmp_path):
     p3 = _add_default(fresh)
     year = datetime.now().year
     assert p3.manual_id == f"MAN-{year}-0003"
+
+
+def test_signature_date_persists_for_won_manual(tmp_path):
+    path = tmp_path / "manual.json"
+    store = ManualProjectsStore(path)
+    p = _add_default(
+        store, statut="gagné", signature_date="2026-06-02"
+    )
+    assert p.signature_date == "2026-06-02"
+
+    fresh = ManualProjectsStore(path)
+    found = fresh.get(p.manual_id)
+    assert found.signature_date == "2026-06-02"
+    assert found.statut == "gagné"
+
+
+def test_update_can_set_statut_and_signature_date(tmp_path):
+    store = ManualProjectsStore(tmp_path / "manual.json")
+    p = _add_default(store)
+    updated = store.update(
+        p.manual_id, statut="signé", signature_date="2026-07-10"
+    )
+    assert updated.statut == "signé"
+    assert updated.signature_date == "2026-07-10"

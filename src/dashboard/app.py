@@ -58,10 +58,11 @@ def increment_run():
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from config.settings import settings, MONTH_MAP, get_secret, MYRIUM_ROOT
+from config.settings import settings, MONTH_MAP, get_secret, MYRIUM_ROOT, STATUS_WON
 from src.integrations.google_sheets import GoogleSheetsClient
 from src.integrations.notion_entretien_start import fetch_maintenance_entretien_start_2026
 from src.integrations.budget_export import build_budget_workbook
+from src.integrations.drive_uploader import upload_xlsx_as_google_sheet
 from src.integrations.entretien_start_store import (
     get_store_path,
     read_entretien_start_2026_from_file,
@@ -105,22 +106,15 @@ from src.processing.manual_and_overrides import (
     get_manual_projects_store,
     get_overrides_store,
     inject_manual_projects,
+    make_manual_row,
 )
 from src.processing.manual_projects_store import (
     DEFAULT_STATUT as MANUAL_DEFAULT_STATUT,
     ManualProject,
+    ManualProjectsStore,
 )
 from src.processing.overrides_store import ProjectOverride
 
-from src.dashboard.components.create_manual_project_dialog import (
-    PREFILL_KEY as MANUAL_PREFILL_KEY,
-    show_create_manual_project_dialog,
-    trigger_create_manual_dialog,
-)
-from src.dashboard.components.edit_project_dialog import (
-    show_edit_project_dialog,
-    trigger_edit_project_dialog,
-)
 from src.dashboard.components.pending_links_panel import (
     render_pending_links_sidebar,
 )
@@ -423,6 +417,86 @@ def _apply_user_layer(
     return df
 
 
+_MANUAL_WON_SET = {s.strip().lower() for s in STATUS_WON}
+
+
+def _manual_is_won(manual: ManualProject) -> bool:
+    return (manual.statut or "").strip().lower() in _MANUAL_WON_SET
+
+
+def _manual_home_year_month(manual: ManualProject, is_won: bool) -> Tuple[int, int]:
+    """Year/month the manual belongs to: signature date when won, else date d'envoi."""
+    raw = (manual.signature_date or manual.date) if is_won else manual.date
+    ts = pd.to_datetime(raw, errors="coerce") if raw else pd.NaT
+    if pd.isna(ts):
+        today = datetime.now()
+        return today.year, today.month
+    return int(ts.year), int(ts.month)
+
+
+def _inject_year_manuals(df: pd.DataFrame, year: int, view_type: Optional[str]) -> pd.DataFrame:
+    """
+    Inject manual projects into a year's aggregated frame EXACTLY ONCE.
+
+    - "signe" view receives only WON manuals; "envoye" only WAITING manuals.
+    - Each manual is placed in the year that matches its home date (signature
+      date for won, date d'envoi for waiting), so it is never multiplied across
+      the monthly sheets that ``load_year_data`` concatenates.
+    - "etat" (snapshot) is left untouched: the pipeline already writes manuals
+      to that sheet, so re-injecting here would double-count.
+    """
+    if view_type not in ("signe", "envoye"):
+        return df
+
+    manuals_store = get_manual_projects_store(DASHBOARD_PROJECT_ROOT)
+    if manuals_store.count() == 0:
+        return df
+
+    want_won = view_type == "signe"
+    sheet_prefix = "Signé" if want_won else "Envoyé"
+
+    selected: List[Tuple[ManualProject, int]] = []
+    for manual in manuals_store.all():
+        if _manual_is_won(manual) != want_won:
+            continue
+        home_year, home_month = _manual_home_year_month(manual, want_won)
+        if home_year != year:
+            continue
+        selected.append((manual, home_month))
+
+    # Drop any manual rows the pipeline already wrote to this year's sheets,
+    # so the store remains the single source of truth (no double count).
+    if df is not None and not df.empty and "id" in df.columns:
+        df = df[~df["id"].astype(str).str.startswith("MAN-")].copy()
+
+    if not selected:
+        return df
+
+    engine = RevenueEngine()
+    rows: List[dict] = []
+    for manual, home_month in selected:
+        row = make_manual_row(manual, engine)
+        row["source_sheet"] = f"{sheet_prefix} {MONTH_MAP.get(home_month, '')} {year}".strip()
+        rows.append(row)
+
+    new_df = pd.DataFrame(rows)
+    if df is None or df.empty:
+        combined = new_df
+    else:
+        for col in df.columns:
+            if col not in new_df.columns:
+                new_df[col] = pd.NA
+        for col in new_df.columns:
+            if col not in df.columns:
+                df[col] = pd.NA
+        new_df = new_df[df.columns]
+        combined = pd.concat([df, new_df], ignore_index=True)
+
+    overrides_store = get_overrides_store(DASHBOARD_PROJECT_ROOT)
+    combined = apply_quarter_overrides(combined, overrides_store)
+    return combined
+
+
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_worksheet_data(
     sheet_name: str,
@@ -443,8 +517,11 @@ def load_worksheet_data(
     # #endregion
     client = get_sheets_client()
     result = client.read_worksheet(sheet_name, view_type=view_type, year=year)
-    inject_manuals = view_type != "etat"
-    result = _apply_user_layer(result, inject_manuals=inject_manuals, year_for_engine=year)
+    # Per-sheet pass applies quarter overrides only. Manual projects are injected
+    # once per year in ``load_year_data`` (status- and home-month-aware) so a
+    # manual is never multiplied across the monthly sheets nor placed in the
+    # wrong pipe (Signé vs Envoyé).
+    result = _apply_user_layer(result, inject_manuals=False, year_for_engine=year)
     # #region agent log
     debug_log("load_worksheet_data:DONE", f"Loaded {len(result)} rows in {time.time()-ws_start:.2f}s",
               {"sheet": sheet_name, "rows": len(result), "duration_s": round(time.time()-ws_start, 2)}, "A")
@@ -545,7 +622,8 @@ def load_year_data(year: int, sheet_type: str = "Signé") -> pd.DataFrame:
 
     if not dfs:
         #st.warning(f"No data loaded from any sheets for {sheet_type} {year}")
-        return pd.DataFrame()
+        # A manual project may exist for a year that has no sheets yet.
+        return _inject_year_manuals(pd.DataFrame(), year, view_type)
 
     # Ensure all DataFrames have the same columns before concatenation
     # Get union of all columns
@@ -566,12 +644,50 @@ def load_year_data(year: int, sheet_type: str = "Signé") -> pd.DataFrame:
         aligned_dfs.append(df)
 
     result = pd.concat(aligned_dfs, ignore_index=True)
+    result = _inject_year_manuals(result, year, view_type)
     print(f"✓ Combined {len(result)} total rows from {len(dfs)} sheets")
     # #region agent log
     debug_log("load_year_data:DONE", f"Combined {len(result)} rows in {time.time()-year_start:.2f}s",
               {"total_rows": len(result), "sheets_loaded": len(dfs), "duration_s": round(time.time()-year_start, 2)}, "B")
     # #endregion
     return result
+
+
+@st.cache_data(ttl=300)
+def _load_link_candidates(year: int, stores_signature: float) -> List[Dict[str, Any]]:
+    """
+    Lightweight pool of real Furious proposals for the "Lier à Furious" soft match.
+
+    Pulls id / client / amount / title from the current year's Signé + Envoyé
+    data and drops manual (MAN-) rows. Cached; ``stores_signature`` keeps it in
+    sync with user edits.
+    """
+    del stores_signature  # cache key only
+    records: List[Dict[str, Any]] = []
+    seen: set = set()
+    for sheet_type in ("Signé", "Envoyé"):
+        try:
+            df = load_year_data(year, sheet_type)
+        except Exception:
+            df = pd.DataFrame()
+        if df is None or df.empty or "id" not in df.columns:
+            continue
+        for _, row in df.iterrows():
+            rid = str(row.get("id", "")).strip()
+            if not rid or rid.startswith("MAN-") or rid in seen:
+                continue
+            seen.add(rid)
+            try:
+                amount = float(pd.to_numeric(row.get("amount"), errors="coerce"))
+            except (TypeError, ValueError):
+                amount = 0.0
+            records.append({
+                "id": rid,
+                "company_name": str(row.get("company_name", "") or ""),
+                "amount": amount if amount == amount else 0.0,  # guard NaN
+                "title": str(row.get("title", "") or ""),
+            })
+    return records
 
 
 # =============================================================================
@@ -3491,85 +3607,393 @@ def _detect_years_from_columns(columns) -> List[int]:
     return sorted(years)
 
 
-def prepare_projects_table(
-    df: pd.DataFrame,
+_PROJECTS_EDITOR_BU_OPTIONS: List[str] = ["MAINTENANCE", "TRAVAUX", "CONCEPTION", "AUTRE"]
+
+# Editor cell columns that map directly to engine input-override keys.
+# Keys = data_editor column name, values = OverridesStore.input_overrides key.
+_INPUT_OVERRIDE_COLUMN_MAP: Dict[str, str] = {
+    "title": "title",
+    "company_name": "company_name",
+    "cf_bu": "cf_bu",
+    "cf_typologie_de_devis": "cf_typologie_de_devis",
+    "amount": "amount",
+    "probability": "probability",
+    "date": "date",
+    "projet_start": "projet_start",
+    "projet_stop": "projet_stop",
+}
+
+
+def _to_iso_date(value) -> Optional[str]:
+    """Best-effort conversion of any date-like value to an ISO `YYYY-MM-DD` string."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):  # type: ignore[arg-type]
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return pd.to_datetime(value).date().isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def _values_differ(col: str, new_value, old_value) -> bool:
+    """Cell-level diff that knows the column's expected dtype."""
+    if col in ("date", "projet_start", "projet_stop"):
+        return _to_iso_date(new_value) != _to_iso_date(old_value)
+    if col in ("amount", "probability"):
+        try:
+            return abs(float(new_value or 0) - float(old_value or 0)) > 1e-6
+        except (TypeError, ValueError):
+            return True
+    return (str(new_value or "").strip()) != (str(old_value or "").strip())
+
+
+def _normalize_for_store(col: str, value):
+    """Convert a data_editor cell value to the form expected by OverridesStore."""
+    if col in ("date", "projet_start", "projet_stop"):
+        return _to_iso_date(value)
+    if col in ("amount", "probability"):
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return None
+    text = str(value or "").strip()
+    return text or None
+
+
+def _build_editable_projects_frame(
+    projects_df: pd.DataFrame,
     *,
-    show_pondere: bool = False,
-    breakdown_year: Optional[int] = None,
-) -> pd.DataFrame:
+    show_pondere: bool,
+    available_years: List[int],
+) -> Tuple[pd.DataFrame, Dict[str, Dict[str, Any]]]:
     """
-    Prepare a minimal projects table for display in popover.
-
-    Args:
-        df: DataFrame with project data
-        show_pondere: Whether to include weighted amount column
-        breakdown_year: When set, append the year totals + 4 quarterly cells for that year.
-
-    Returns:
-        DataFrame with minimal columns formatted for display
+    Build the typed DataFrame fed into ``st.data_editor`` plus a snapshot
+    keyed by id used to detect what changed at save time.
     """
-    if df.empty:
-        return pd.DataFrame()
+    if projects_df is None or projects_df.empty:
+        return pd.DataFrame(), {}
 
-    display_cols = ['title', 'company_name', 'amount']
-    if show_pondere and 'amount_pondere' in df.columns:
-        display_cols.append('amount_pondere')
-    display_cols.extend(['probability', 'date', 'projet_start', 'projet_stop', 'cf_bu', 'cf_typologie_de_devis'])
+    df = projects_df.copy()
 
-    breakdown_cols: List[str] = []
-    if breakdown_year:
-        candidates = (
-            [f"Montant Total {breakdown_year}"]
-            + [f"Montant Total Q{q}_{breakdown_year}" for q in range(1, 5)]
+    if "id" not in df.columns:
+        df["id"] = ""
+    df["id"] = df["id"].astype(str)
+
+    for date_col in ("date", "projet_start", "projet_stop"):
+        if date_col in df.columns:
+            df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+
+    for num_col in ("amount", "probability", "amount_pondere"):
+        if num_col in df.columns:
+            df[num_col] = pd.to_numeric(df[num_col], errors="coerce").fillna(0.0)
+
+    base_cols: List[str] = [
+        "id",
+        "title",
+        "company_name",
+        "cf_bu",
+        "cf_typologie_de_devis",
+        "amount",
+        "probability",
+        "date",
+        "projet_start",
+        "projet_stop",
+    ]
+    if show_pondere and "amount_pondere" in df.columns:
+        base_cols.append("amount_pondere")
+
+    year_cols: List[str] = []
+    for year in available_years:
+        year_cols.append(f"Montant Total {year}")
+        year_cols.extend(f"Montant Total Q{q}_{year}" for q in range(1, 5))
+
+    final_cols = [c for c in base_cols + year_cols if c in df.columns]
+    # Reset to a clean RangeIndex: st.data_editor(num_rows="dynamic") ignores
+    # hide_index and forces the user to type an index value for new rows when
+    # the frame carries a non-range index (e.g. after concat/filtering sheets).
+    editable_df = df[final_cols].copy().reset_index(drop=True)
+
+    for col in year_cols:
+        if col in editable_df.columns:
+            editable_df[col] = pd.to_numeric(editable_df[col], errors="coerce").fillna(0.0)
+
+    snapshot: Dict[str, Dict[str, Any]] = {}
+    for _, row in editable_df.iterrows():
+        row_id = str(row["id"])
+        snapshot[row_id] = {col: row[col] for col in editable_df.columns}
+
+    return editable_df, snapshot
+
+
+def _build_projects_editor_config(
+    *,
+    editable_df: pd.DataFrame,
+    show_pondere: bool,
+    available_years: List[int],
+) -> Tuple[Dict[str, Any], List[str]]:
+    """Build column_config + the list of read-only column names."""
+    config: Dict[str, Any] = {}
+    disabled: List[str] = []
+
+    if "id" in editable_df.columns:
+        config["id"] = st.column_config.TextColumn(
+            "ID",
+            help="Auto-attribué pour les nouveaux projets manuels (MAN-YYYY-NNNN).",
+            width="small",
+            disabled=True,
         )
-        breakdown_cols = [c for c in candidates if c in df.columns]
-        display_cols.extend(breakdown_cols)
+        disabled.append("id")
 
-    if 'id' in df.columns:
-        display_cols.append('id')
+    if "title" in editable_df.columns:
+        config["title"] = st.column_config.TextColumn("Titre", width="large", required=True)
+    if "company_name" in editable_df.columns:
+        config["company_name"] = st.column_config.TextColumn("Client", width="medium", required=True)
+    if "cf_bu" in editable_df.columns:
+        config["cf_bu"] = st.column_config.SelectboxColumn(
+            "BU", options=_PROJECTS_EDITOR_BU_OPTIONS, width="small", required=True,
+        )
+    if "cf_typologie_de_devis" in editable_df.columns:
+        config["cf_typologie_de_devis"] = st.column_config.SelectboxColumn(
+            "Typologie", options=list(CANONICAL_TYPOLOGIES), width="medium", required=True,
+        )
+    if "amount" in editable_df.columns:
+        config["amount"] = st.column_config.NumberColumn(
+            "Montant", format="%.0f €", min_value=0.0, step=500.0, width="small",
+        )
+    if "probability" in editable_df.columns:
+        config["probability"] = st.column_config.NumberColumn(
+            "Proba", format="%d %%", min_value=0, max_value=100, step=5, width="small",
+        )
+    if "date" in editable_df.columns:
+        config["date"] = st.column_config.DateColumn("Date envoi", format="DD/MM/YYYY", width="small")
+    if "projet_start" in editable_df.columns:
+        config["projet_start"] = st.column_config.DateColumn("Début", format="DD/MM/YYYY", width="small")
+    if "projet_stop" in editable_df.columns:
+        config["projet_stop"] = st.column_config.DateColumn("Fin", format="DD/MM/YYYY", width="small")
 
-    display_cols = [c for c in display_cols if c in df.columns]
+    if show_pondere and "amount_pondere" in editable_df.columns:
+        config["amount_pondere"] = st.column_config.NumberColumn(
+            "Pondéré", format="%.0f €", width="small", disabled=True,
+        )
+        disabled.append("amount_pondere")
 
-    result_df = df[display_cols].copy()
+    for year in available_years:
+        total_col = f"Montant Total {year}"
+        if total_col in editable_df.columns:
+            config[total_col] = st.column_config.NumberColumn(
+                f"Total {year}",
+                help="Recalculé après modification des inputs ou des trimestres.",
+                format="%.0f €",
+                width="small",
+                disabled=True,
+            )
+            disabled.append(total_col)
+        for q in range(1, 5):
+            qcol = f"Montant Total Q{q}_{year}"
+            if qcol in editable_df.columns:
+                config[qcol] = st.column_config.NumberColumn(
+                    f"T{q} {year}",
+                    help=(
+                        "Surcharge directe sur ce trimestre — "
+                        "remplace la valeur du moteur."
+                    ),
+                    format="%.0f €",
+                    min_value=0.0,
+                    step=100.0,
+                    width="small",
+                )
 
-    date_cols = ['date', 'projet_start', 'projet_stop']
-    for col in date_cols:
-        if col in result_df.columns:
-            result_df[col] = pd.to_datetime(result_df[col], errors='coerce')
-            result_df[col] = result_df[col].apply(
-                lambda x: x.strftime('%d/%m/%Y') if pd.notna(x) else ''
+    return config, disabled
+
+
+def _create_manual_from_row(
+    row: pd.Series,
+    manual_store: ManualProjectsStore,
+    *,
+    bu_prefill: Optional[str],
+    typologie_prefill: Optional[str],
+) -> Tuple[bool, Optional[str]]:
+    """
+    Try to persist a new manual project from a freshly added editor row.
+
+    Returns ``(success, error_message)``. Empty placeholder rows
+    (user clicked "+" but typed nothing) return ``(False, None)`` silently.
+    """
+    title = str(row.get("title") or "").strip()
+    company = str(row.get("company_name") or "").strip()
+    amount_raw = row.get("amount")
+    bu = (str(row.get("cf_bu") or "").strip().upper()) or (bu_prefill or "").upper()
+    typologie = (str(row.get("cf_typologie_de_devis") or "").strip()) or (typologie_prefill or "")
+
+    has_any_data = bool(
+        title
+        or company
+        or (amount_raw and float(amount_raw or 0) > 0)
+        or row.get("date") is not pd.NaT and pd.notna(row.get("date"))
+    )
+    if not has_any_data:
+        return False, None
+
+    missing: List[str] = []
+    if not title:
+        missing.append("Titre")
+    if not company:
+        missing.append("Client")
+    try:
+        amount = float(amount_raw or 0)
+    except (TypeError, ValueError):
+        amount = 0.0
+    if amount <= 0:
+        missing.append("Montant > 0")
+    if not bu:
+        missing.append("BU")
+    if not typologie:
+        missing.append("Typologie")
+    if missing:
+        return False, (
+            f"Nouveau projet « {title or company or '(sans titre)'} » ignoré "
+            f"— champs manquants : {', '.join(missing)}."
+        )
+
+    try:
+        prob = float(row.get("probability") or 80)
+    except (TypeError, ValueError):
+        prob = 80.0
+
+    manual_store.add(
+        title=title,
+        company_name=company,
+        amount=amount,
+        probability=prob,
+        date=_to_iso_date(row.get("date")),
+        projet_start=_to_iso_date(row.get("projet_start")),
+        projet_stop=_to_iso_date(row.get("projet_stop")),
+        cf_bu=bu,
+        cf_typologie_de_devis=typologie,
+    )
+    return True, None
+
+
+def _persist_projects_table_changes(
+    *,
+    edited_df: pd.DataFrame,
+    original_snapshot: Dict[str, Dict[str, Any]],
+    available_years: List[int],
+    bu_prefill: Optional[str],
+    typologie_prefill: Optional[str],
+) -> Dict[str, Any]:
+    """Diff ``edited_df`` against ``original_snapshot`` and route changes to the right store."""
+    overrides_store = get_overrides_store(DASHBOARD_PROJECT_ROOT)
+    manual_store = get_manual_projects_store(DASHBOARD_PROJECT_ROOT)
+
+    quarter_cols_by_year: Dict[int, List[str]] = {
+        year: [f"Montant Total Q{q}_{year}" for q in range(1, 5)] for year in available_years
+    }
+
+    edited_ids: set[str] = set()
+    errors: List[str] = []
+    updated = 0
+    created = 0
+    deleted = 0
+
+    for _, row in edited_df.iterrows():
+        row_id = str(row.get("id") or "").strip()
+        is_new = row_id == "" or row_id.lower() in {"none", "nan", "<na>"}
+
+        if is_new:
+            ok, err = _create_manual_from_row(
+                row, manual_store,
+                bu_prefill=bu_prefill, typologie_prefill=typologie_prefill,
+            )
+            if ok:
+                created += 1
+            elif err:
+                errors.append(err)
+            continue
+
+        edited_ids.add(row_id)
+        original = original_snapshot.get(row_id)
+        if original is None:
+            errors.append(f"ID inconnu ignoré : {row_id}.")
+            continue
+
+        new_inputs: Dict[str, Any] = {}
+        for col, store_key in _INPUT_OVERRIDE_COLUMN_MAP.items():
+            if col not in edited_df.columns:
+                continue
+            new_value = row[col]
+            old_value = original.get(col)
+            if _values_differ(col, new_value, old_value):
+                normalized = _normalize_for_store(col, new_value)
+                if normalized is not None:
+                    new_inputs[store_key] = normalized
+
+        new_quarters: Dict[str, float] = {}
+        for qcols in quarter_cols_by_year.values():
+            for qcol in qcols:
+                if qcol not in edited_df.columns:
+                    continue
+                try:
+                    new_value = float(row[qcol] or 0)
+                    old_value = float(original.get(qcol) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if abs(new_value - old_value) > 1e-6:
+                    new_quarters[qcol] = new_value
+
+        if not new_inputs and not new_quarters:
+            continue
+
+        existing = overrides_store.get(row_id) or ProjectOverride()
+        merged_inputs: Optional[Dict[str, Any]] = None
+        if new_inputs:
+            merged_inputs = dict(existing.input_overrides)
+            merged_inputs.update(new_inputs)
+        merged_quarters: Optional[Dict[str, float]] = None
+        if new_quarters:
+            merged_quarters = dict(existing.quarter_overrides)
+            merged_quarters.update(new_quarters)
+
+        overrides_store.upsert(
+            row_id,
+            input_overrides=merged_inputs,
+            quarter_overrides=merged_quarters,
+        )
+        updated += 1
+
+        if row_id.startswith("MAN-") and new_inputs:
+            mirror_keys = {
+                "title", "company_name", "amount", "probability",
+                "cf_bu", "cf_typologie_de_devis",
+                "date", "projet_start", "projet_stop",
+            }
+            mirror = {k: v for k, v in new_inputs.items() if k in mirror_keys}
+            if mirror:
+                manual_store.update(row_id, **mirror)
+
+    for orig_id in original_snapshot:
+        if orig_id in edited_ids:
+            continue
+        if orig_id.startswith("MAN-"):
+            manual_store.delete(orig_id)
+            overrides_store.delete(orig_id)
+            deleted += 1
+        else:
+            errors.append(
+                f"Suppression refusée pour le projet Furious {orig_id} "
+                "(à supprimer dans Furious). Restauré au prochain rafraîchissement."
             )
 
-    if 'amount' in result_df.columns:
-        result_df['amount'] = result_df['amount'].apply(lambda x: f"{float(x):,.0f}€" if pd.notna(x) else '')
-    if 'amount_pondere' in result_df.columns:
-        result_df['amount_pondere'] = result_df['amount_pondere'].apply(
-            lambda x: f"{float(x):,.0f}€" if pd.notna(x) else ''
-        )
-
-    for col in breakdown_cols:
-        result_df[col] = pd.to_numeric(result_df[col], errors='coerce').fillna(0.0)
-
-    if 'probability' in result_df.columns:
-        result_df['probability'] = result_df['probability'].apply(
-            lambda x: f"{float(x):.0f}%" if pd.notna(x) else ''
-        )
-
-    if 'id' in result_df.columns:
-        result_df['furious_url'] = result_df['id'].apply(build_furious_url)
-        cols = result_df.columns.tolist()
-        if 'id' in cols and 'furious_url' in cols:
-            id_idx = cols.index('id')
-            cols.remove('furious_url')
-            cols.insert(id_idx + 1, 'furious_url')
-            result_df = result_df[cols]
-
-    return result_df
+    return {"updated": updated, "created": created, "deleted": deleted, "errors": errors}
 
 
 @st.dialog("Projets", width="large")
 def _show_projects_dialog() -> None:
-    """Large modal to display projects table (reads from session state)."""
+    """Inline-editable projects table (no nested dialogs)."""
     data = st.session_state.get("dialog_projects_data")
     if not data:
         st.info("Aucun projet disponible")
@@ -3582,143 +4006,102 @@ def _show_projects_dialog() -> None:
     typologie_prefill = data.get("typologie_prefill")
 
     if projects_df is None or projects_df.empty:
-        st.info("Aucun projet disponible")
+        st.info(
+            "Aucun projet dans cette sélection. "
+            "Utilisez le panneau « Projets manuels » de la barre latérale pour en créer un."
+        )
         return
 
     if header_text:
         st.markdown(f"**{header_text}**")
-    st.markdown(f"**{len(projects_df)} projet(s)**")
-
-    new_col, year_col = st.columns([1, 2])
-    with new_col:
-        if st.button(
-            "+ Ajouter projet manuel",
-            type="secondary",
-            use_container_width=True,
-            key=f"projects_dialog_new_{abs(hash(header_text or 'projects')) % 10**8}",
-        ):
-            trigger_create_manual_dialog(
-                cf_bu=bu_prefill,
-                cf_typologie_de_devis=typologie_prefill,
-            )
-            return
+    if bu_prefill or typologie_prefill:
+        prefill_bits = [b for b in (bu_prefill, typologie_prefill) if b]
+        st.caption("Préremplissage actif pour les nouveaux projets : " + " · ".join(prefill_bits))
+    st.caption(
+        f"**{len(projects_df)} projet(s)** — modifiez directement les cellules. "
+        "Ajoutez un projet manuel via la **dernière ligne** du tableau, "
+        "ou supprimez une ligne manuelle avec l'icône ✕ à droite."
+    )
 
     available_years = _detect_years_from_columns(projects_df.columns)
-    breakdown_year: Optional[int] = None
-    if available_years:
-        with year_col:
-            default_year = datetime.now().year
-            year_index = (
-                available_years.index(default_year)
-                if default_year in available_years
-                else len(available_years) - 1
-            )
-            breakdown_year = st.selectbox(
-                "Détail année",
-                available_years,
-                index=year_index,
-                key=f"projects_dialog_year_{abs(hash(header_text or 'projects')) % 10**8}",
-            )
-
-    prepared_df = prepare_projects_table(
-        projects_df, show_pondere=show_pondere, breakdown_year=breakdown_year
+    editable_df, original_snapshot = _build_editable_projects_frame(
+        projects_df, show_pondere=show_pondere, available_years=available_years,
+    )
+    column_config, disabled_cols = _build_projects_editor_config(
+        editable_df=editable_df, show_pondere=show_pondere, available_years=available_years,
     )
 
-    column_config = {}
-    if 'furious_url' in prepared_df.columns:
-        column_config['furious_url'] = st.column_config.LinkColumn(
-            "🔗 Furious",
-            help="Ouvrir dans Furious CRM",
-            max_chars=100
-        )
-    if 'amount' in prepared_df.columns:
-        column_config['amount'] = st.column_config.TextColumn("Montant", width="medium")
-    if 'amount_pondere' in prepared_df.columns:
-        column_config['amount_pondere'] = st.column_config.TextColumn("Montant Pondéré", width="medium")
-    if 'title' in prepared_df.columns:
-        column_config['title'] = st.column_config.TextColumn("Titre", width="large")
-    if 'company_name' in prepared_df.columns:
-        column_config['company_name'] = st.column_config.TextColumn("Client", width="medium")
-    if 'probability' in prepared_df.columns:
-        column_config['probability'] = st.column_config.TextColumn("Probabilité", width="small")
-    if breakdown_year:
-        for col_name in (
-            f"Montant Total {breakdown_year}",
-            *[f"Montant Total Q{q}_{breakdown_year}" for q in range(1, 5)],
-        ):
-            if col_name in prepared_df.columns:
-                short_label = (
-                    f"Total {breakdown_year}"
-                    if col_name == f"Montant Total {breakdown_year}"
-                    else col_name.replace(f"Montant Total ", "").replace(f"_{breakdown_year}", f" {breakdown_year}")
-                )
-                column_config[col_name] = st.column_config.NumberColumn(
-                    short_label, format="%.0f €"
-                )
+    safe_key = re.sub(r"[^a-zA-Z0-9_]+", "_", header_text or "projects")[:60] or "projects"
+    edit_key = f"projects_dialog_editor_{safe_key}"
 
-    st.dataframe(
-        prepared_df,
-        use_container_width=True,
+    # Grey out the auto-computed / read-only columns so the team sees at a glance
+    # which cells are editable (white) vs derived (grey). Streamlit only honors
+    # Styler styles on non-editable columns, which is exactly disabled_cols.
+    readonly_cols = [c for c in disabled_cols if c in editable_df.columns]
+    editor_data = editable_df
+    if readonly_cols:
+        editor_data = editable_df.style.set_properties(
+            subset=readonly_cols, **{"background-color": "#f0f2f6"}
+        )
+
+    edited_df = st.data_editor(
+        editor_data,
+        num_rows="dynamic",
+        column_config=column_config,
+        disabled=disabled_cols,
         hide_index=True,
-        column_config=column_config if column_config else None,
+        use_container_width=True,
+        key=edit_key,
     )
 
-    st.markdown("---")
-    st.caption("Modifier ou surcharger les valeurs d'un projet :")
-    edit_col, id_col = st.columns([1, 2])
-    with id_col:
-        target_id = st.text_input(
-            "ID du projet à modifier",
-            placeholder="ex. 12345 ou MAN-2026-0001",
-            key=f"projects_dialog_edit_id_{abs(hash(header_text or 'projects')) % 10**8}",
-        )
-    with edit_col:
+    # Force both action buttons to fill their column. Streamlit 1.56 sometimes
+    # falls back to content-width for secondary buttons, leaving "Fermer sans
+    # enregistrer" narrower than the primary one; this key-scoped CSS guarantees
+    # equal, aligned widths regardless of that quirk.
+    st.markdown(
+        f"""
+        <style>
+        .st-key-{edit_key}_save button,
+        .st-key-{edit_key}_cancel button {{
+            width: 100%;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    save_col, cancel_col = st.columns(2)
+    with save_col:
         if st.button(
-            "Modifier",
+            "Enregistrer les modifications",
             type="primary",
-            use_container_width=True,
-            disabled=not target_id.strip(),
-            key=f"projects_dialog_edit_btn_{abs(hash(header_text or 'projects')) % 10**8}",
+            width="stretch",
+            key=f"{edit_key}_save",
         ):
-            _open_edit_dialog_for_id(projects_df, target_id.strip(), available_years)
+            result = _persist_projects_table_changes(
+                edited_df=edited_df,
+                original_snapshot=original_snapshot,
+                available_years=available_years,
+                bu_prefill=bu_prefill,
+                typologie_prefill=typologie_prefill,
+            )
+            for err in result["errors"]:
+                st.warning(err)
+            if not result["errors"]:
+                st.toast(
+                    f"✅ {result['updated']} modifié · "
+                    f"{result['created']} créé · {result['deleted']} supprimé",
+                    icon="✅",
+                )
+                st.rerun()
 
-
-def _open_edit_dialog_for_id(
-    projects_df: pd.DataFrame, project_id: str, available_years: List[int]
-) -> None:
-    """Look up ``project_id`` in ``projects_df`` and open the edit dialog."""
-    if 'id' not in projects_df.columns:
-        st.warning("Ce tableau ne contient pas de colonne `id`, modification impossible.")
-        return
-    matches = projects_df[projects_df['id'].astype(str) == str(project_id)]
-    if matches.empty:
-        st.warning(f"Aucun projet avec l'ID `{project_id}` dans cette sélection.")
-        return
-    row = matches.iloc[0]
-    quarter_snapshot: dict = {}
-    for year in available_years:
-        for col in [f"Montant Total {year}"] + [f"Montant Total Q{q}_{year}" for q in range(1, 5)]:
-            if col in row.index:
-                try:
-                    quarter_snapshot[col] = float(row[col] or 0)
-                except (TypeError, ValueError):
-                    quarter_snapshot[col] = 0.0
-    is_manual = str(project_id).startswith("MAN-")
-    trigger_edit_project_dialog(
-        project_id=str(project_id),
-        title=str(row.get("title", "")),
-        company_name=str(row.get("company_name", "")),
-        cf_bu=str(row.get("cf_bu", "")),
-        cf_typologie_de_devis=str(row.get("cf_typologie_de_devis", "")),
-        amount=float(row.get("amount") or 0),
-        probability=float(row.get("probability") or 0),
-        date_envoi=str(row.get("date") or "") or None,
-        projet_start=str(row.get("projet_start") or "") or None,
-        projet_stop=str(row.get("projet_stop") or "") or None,
-        available_years=available_years,
-        quarter_snapshot=quarter_snapshot,
-        is_manual=is_manual,
-    )
+    with cancel_col:
+        if st.button(
+            "Fermer sans enregistrer",
+            width="stretch",
+            key=f"{edit_key}_cancel",
+        ):
+            st.rerun()
 
 
 def render_projects_popover(
@@ -3735,9 +4118,9 @@ def render_projects_popover(
 
     We use a dialog because Streamlit popovers don't reliably support sizing.
 
-    ``bu_prefill`` / ``typologie_prefill`` are forwarded to the « + Ajouter projet manuel »
-    button so the create dialog opens with the right defaults when launched
-    from a typology-specific KPI card.
+    ``bu_prefill`` / ``typologie_prefill`` are forwarded to the inline editor so any
+    new rows the user adds via the trailing "+" line inherit the BU/typologie of the
+    KPI card that opened the dialog when those fields are left blank.
     """
     base = (header_text or "projects").strip()
     safe = re.sub(r"[^a-zA-Z0-9_]+", "_", base)[:80] or "projects"
@@ -5153,6 +5536,9 @@ def main():
     render_pending_links_sidebar(
         manual_store=manual_projects_store,
         overrides_store=overrides_store,
+        candidates_loader=lambda: _load_link_candidates(
+            datetime.now().year, _stores_mtime_signature()
+        ),
     )
 
     with st.sidebar:
@@ -5170,22 +5556,49 @@ def main():
         debug_log("sidebar:YEAR_SELECTED", f"Year: {selected_year}", {"year": selected_year}, "D")
         # #endregion
 
-        # Generate budget xlsx (build then download — keeps build cost off rerun)
+        # Generate budget — builds xlsx, then uploads to Drive as a native Google Sheet.
+        # Local xlsx download is kept as a fallback when Drive upload fails (or no folder
+        # ID configured). Two-step UX (build → result) avoids paying the cost on every rerun.
         budget_bytes_key = f"_budget_xlsx_bytes_{selected_year}"
+        budget_url_key = f"_budget_drive_url_{selected_year}"
+        budget_error_key = f"_budget_error_{selected_year}"
         if st.button(
             f"📊 Générer budget {selected_year}",
             use_container_width=True,
             key=f"_generate_budget_btn_{selected_year}",
         ):
+            for k in (budget_bytes_key, budget_url_key, budget_error_key):
+                st.session_state.pop(k, None)
             with st.spinner(f"Génération du budget {selected_year}..."):
                 try:
-                    st.session_state[budget_bytes_key] = _build_budget_xlsx_for_year(int(selected_year))
+                    blob = _build_budget_xlsx_for_year(int(selected_year))
+                    st.session_state[budget_bytes_key] = blob
                 except Exception as e:
-                    st.session_state[budget_bytes_key] = None
-                    st.error(f"Erreur lors de la génération du budget : {e}")
+                    st.session_state[budget_error_key] = f"Erreur génération : {e}"
+
+            blob = st.session_state.get(budget_bytes_key)
+            folder_id = get_secret("BUDGET_EXPORT_DRIVE_FOLDER_ID", "").strip()
+            if blob and folder_id:
+                with st.spinner("Upload sur Google Drive..."):
+                    try:
+                        sheet_name = f"Budget {selected_year} — {date.today().strftime('%Y-%m-%d')}"
+                        result = upload_xlsx_as_google_sheet(blob, sheet_name, folder_id)
+                        st.session_state[budget_url_key] = result["url"]
+                    except Exception as e:
+                        st.session_state[budget_error_key] = f"Upload Drive échoué : {e}"
+
+        if st.session_state.get(budget_error_key):
+            st.error(st.session_state[budget_error_key])
+        if st.session_state.get(budget_url_key):
+            st.success(f"✅ Google Sheet créé pour {selected_year}")
+            st.link_button(
+                f"📤 Ouvrir Budget {selected_year} dans Drive",
+                st.session_state[budget_url_key],
+                use_container_width=True,
+            )
         if st.session_state.get(budget_bytes_key):
             st.download_button(
-                label=f"⬇️ Télécharger budget {selected_year}.xlsx",
+                label=f"⬇️ Télécharger {selected_year}.xlsx",
                 data=st.session_state[budget_bytes_key],
                 file_name=f"Budget_{selected_year}_{date.today().strftime('%Y-%m-%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

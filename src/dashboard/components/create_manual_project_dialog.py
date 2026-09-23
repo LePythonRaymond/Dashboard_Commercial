@@ -14,6 +14,7 @@ from typing import Iterable, List, Optional
 
 import streamlit as st
 
+from config.settings import STATUS_WON
 from src.processing.manual_projects_store import (
     DEFAULT_STATUT,
     ManualProjectsStore,
@@ -42,14 +43,24 @@ BU_TO_TYPOLOGIES = {
     ],
 }
 
-STATUT_OPTIONS = [
+# Waiting statuses keep the deal in the Envoyé / pipeline pipe; won statuses
+# move it into the Signé pipe (used for an oral agreement not yet in Furious).
+STATUT_WAITING_OPTIONS = [
     DEFAULT_STATUT,
     "envoyée(s) attente réponse",
     "brief",
     "en cours",
 ]
+STATUT_WON_OPTIONS = ["gagné", "signé"]
+STATUT_OPTIONS = STATUT_WAITING_OPTIONS + STATUT_WON_OPTIONS
+
+_WON_SET = {s.strip().lower() for s in STATUS_WON}
 
 PREFILL_KEY = "manual_project_prefill"
+
+
+def _is_won_statut(statut: str) -> bool:
+    return (statut or "").strip().lower() in _WON_SET
 
 
 def trigger_create_manual_dialog(
@@ -146,6 +157,20 @@ def show_create_manual_project_dialog() -> None:
             "Statut", STATUT_OPTIONS, index=0, key="manual_create_statut"
         )
 
+    is_won = _is_won_statut(statut)
+    signature_date = None
+    if is_won:
+        signature_date = st.date_input(
+            "Date de signature *",
+            value=date.today(),
+            key="manual_create_signature",
+            help="Accord oral / signature : place le projet dans la vue Signé de ce mois.",
+        )
+        st.info(
+            "Projet **gagné** : il alimente la production Signé. "
+            "Liez-le à Furious dès qu'il y est créé pour éviter tout doublon."
+        )
+
     error_msg = _validate_inputs(
         title=title,
         company_name=company_name,
@@ -169,6 +194,9 @@ def show_create_manual_project_dialog() -> None:
             date=date_envoi.isoformat() if date_envoi else None,
             projet_start=date_start.isoformat() if date_start else None,
             projet_stop=date_stop.isoformat() if date_stop else None,
+            signature_date=(
+                signature_date.isoformat() if (is_won and signature_date) else None
+            ),
             cf_bu=cf_bu,
             cf_typologie_de_devis=cf_typologie,
             assigned_to=assigned_to,
