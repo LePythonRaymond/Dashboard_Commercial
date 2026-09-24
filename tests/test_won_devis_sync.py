@@ -3,14 +3,19 @@ Tests for NotionWonDevisSync: devis selection, property mapping, and the rule th
 a "Date signature" typed in Notion is never overwritten or cleared by the sync.
 """
 
+from datetime import datetime
+
 import pandas as pd
 import pytest
 
+from src.integrations.notion_values import value_from_page, value_from_payload
 from src.integrations.notion_won_devis_sync import (
     NotionWonDevisSync,
+    add_previous_year_avenants,
     is_test_devis,
     page_signature_date,
     select_won_devis,
+    won_devis_window_start,
 )
 
 SCHEMA = {name: {"type": kind} for name, kind in {
@@ -18,6 +23,8 @@ SCHEMA = {name: {"type": kind} for name, kind in {
     "Montant HT": "number", "Statut Furious": "select", "Date gagné": "date", "Date signature": "date",
     "Statut signature": "formula", "Commercial": "people", "Chef de projet": "people",
     "Début projet": "date", "Fin projet": "date", "Lien Furious": "url",
+    # team columns, owned by people
+    "Commentaire": "rich_text", "Pris en charge": "checkbox", "Date archivage": "date", "Origine Transfo": "select",
 }.items()}
 
 
@@ -88,14 +95,19 @@ def _item(**overrides):
     return item
 
 
+def _text(content):
+    """A rich text item as Notion returns it (both text.content and plain_text)."""
+    return {"type": "text", "text": {"content": content, "link": None}, "plain_text": content}
+
+
 def _as_page(page_id, payload):
     """What Notion would return after storing `payload` (read-back format)."""
     props = {}
     for name, value in payload.items():
         if "title" in value:
-            props[name] = {"type": "title", "title": [{"plain_text": t["text"]["content"]} for t in value["title"]]}
+            props[name] = {"type": "title", "title": [_text(t["text"]["content"]) for t in value["title"]]}
         elif "rich_text" in value:
-            props[name] = {"type": "rich_text", "rich_text": [{"plain_text": t["text"]["content"]} for t in value["rich_text"]]}
+            props[name] = {"type": "rich_text", "rich_text": [_text(t["text"]["content"]) for t in value["rich_text"]]}
         elif "number" in value:
             props[name] = {"type": "number", "number": value["number"]}
         elif "select" in value:
@@ -108,6 +120,8 @@ def _as_page(page_id, payload):
             props[name] = {"type": "url", "url": value["url"]}
         elif "people" in value:
             props[name] = {"type": "people", "people": [{"object": "user", "id": p["id"]} for p in value["people"]]}
+        elif "checkbox" in value:
+            props[name] = {"type": "checkbox", "checkbox": value["checkbox"]}
     return {"id": page_id, "properties": props}
 
 
@@ -235,3 +249,121 @@ def test_proposals_query_has_a_total_order_for_pagination():
     client = ProposalsClient.__new__(ProposalsClient)
     client.page_limit, client.fields = 250, ["id", "date"]
     assert "order: [{date:desc},{id:desc}]" in client._build_query(offset=250)
+
+
+def test_window_starts_365_days_before_today():
+    assert won_devis_window_start(datetime(2026, 9, 24, 15, 30), 365) == pd.Timestamp("2025-09-24")
+    assert won_devis_window_start(datetime(2027, 1, 5), 365) == pd.Timestamp("2026-01-05")
+
+
+def _processed_row(devis_id, date, amount, **overrides):
+    row = _item(id=devis_id, title=f"Devis {devis_id}", date=pd.Timestamp(date), amount=float(amount),
+                projet_start=pd.Timestamp(date), cf_bu="CONCEPTION", vat=20.0, currency="EUR",
+                client_id="c1", probability=100, last_updated_at=pd.Timestamp(date))
+    row.update(overrides)
+    return row
+
+
+def _addon(parent_id, id_system, date, amount):
+    return {"id": parent_id, "id_system": id_system, "date": date, "amount": amount, "status": 1,
+            "title": f"Avenant {id_system}", "probability": 100, "signature_date": None, "discount": 0,
+            "project_id": None, "created_at": date, "updated_at": date,
+            "cf_typologie_de_devis": None, "cf_typologie_myrium": None, "cf_bu": None}
+
+
+def test_previous_year_avenants_are_counted_once():
+    """Window 24/09/2025 to 24/09/2026. The pipeline already applied the 2026 rules."""
+    df = pd.DataFrame([
+        _processed_row("251000", "2025-11-10", 10000),              # 2025 devis in the window
+        _processed_row("240500", "2024-03-01", 20000),              # older devis
+        _processed_row("260100", "2026-02-01", 30000),              # 2026 devis, avenants already merged
+        _processed_row("251000_AV9", "2026-02-15", 3000,            # 2026 avenant row made by the pipeline
+                       title="[Avenant] Avenant 9"),
+    ])
+    addons = pd.DataFrame([
+        _addon("251000", 7, "2025-12-02", 5000),   # same year as its devis: absorbed by 251000
+        _addon("251000", 9, "2026-02-15", 3000),   # 2026: already its own row, must not be added again
+        _addon("240500", 8, "2025-10-05", 2000),   # 2025 avenant on a 2024 devis: its own row
+        _addon("240500", 12, "2025-03-01", 100),   # its own row too, but dated before the window
+        _addon("260100", 10, "2025-12-20", 999),   # devis dated this year: the pipeline took it
+        _addon("999999", 11, "2025-11-11", 777),   # unknown devis (excluded owner or deleted)
+    ])
+
+    source = add_previous_year_avenants(df, addons, "2025-09-24", today=datetime(2026, 9, 24))
+    items, status_by_id = select_won_devis(source, "2025-09-24")
+    amounts = {i["id"]: i["amount"] for i in items}
+
+    assert amounts == {"251000": 15000.0, "260100": 30000.0, "251000_AV9": 3000.0, "240500_AV8": 2000.0}
+    injected = next(i for i in items if i["id"] == "240500_AV8")
+    assert injected["date"] == pd.Timestamp("2025-10-05") and injected["statut_clean"] == "gagnés en cours"
+    assert injected["title"].startswith("[Avenant]") and injected["final_bu"] == "CONCEPTION"
+    assert status_by_id["240500_AV12"] == "Gagnés en cours"   # known, so never counted as an orphan
+    assert df.loc[df["id"] == "251000", "amount"].item() == 10000  # input left untouched
+
+
+def test_previous_year_pass_is_a_no_op_inside_one_year_or_without_avenants():
+    df = pd.DataFrame([_processed_row("260100", "2026-02-01", 30000)])
+    addons = pd.DataFrame([_addon("260100", 10, "2026-03-01", 999)])
+    assert add_previous_year_avenants(df, addons, "2026-01-01", today=datetime(2026, 9, 24)) is df
+    assert add_previous_year_avenants(df, None, "2025-09-24", today=datetime(2026, 9, 24)) is df
+
+
+def test_team_values_are_copied_only_when_a_page_is_created():
+    sync = _sync(FakeClient())
+    existing = _as_page("page-111", sync._build_page_properties(_item(id="111"), schema=SCHEMA))
+    client = FakeClient(pages=[existing])
+    team_values = {
+        "111": {"Commentaire": {"rich_text": [{"text": {"content": "ne pas écraser"}}]}},
+        "222": {"Commentaire": {"rich_text": [{"text": {"content": "Relancé le 12/09"}}]},
+                "Origine Transfo": {"select": {"name": "DV"}}},
+    }
+    stats = _sync(client).sync_won_devis([_item(id="111", amount=9.0), _item(id="222")], {}, team_values=team_values)
+
+    assert stats["created"] == 1 and stats["updated"] == 1 and stats["team_values_copied"] == 1
+    created = client.created[0]["properties"]
+    assert created["Commentaire"]["rich_text"][0]["text"]["content"] == "Relancé le 12/09"
+    assert created["Origine Transfo"] == {"select": {"name": "DV"}}
+    assert client.updated[0]["properties"] == {"Montant HT": {"number": 9.0}}
+
+
+def _followup_page(devis_id, comment=None, origin=None):
+    props = {"Name": {"type": "title", "title": [_text(f"Devis {devis_id}")]},
+             "ID Devis": {"type": "rich_text", "rich_text": [_text(devis_id)]},
+             "Commentaire": {"type": "rich_text", "rich_text": [_text(comment)] if comment else []},
+             "Origine Transfo": {"type": "select", "select": {"name": origin} if origin else None},
+             "Pris en charge": {"type": "checkbox", "checkbox": True}}
+    return {"id": f"fu-{devis_id}", "properties": props}
+
+
+def test_load_followup_team_values_keeps_filled_comment_and_origin():
+    long_comment = "x" * 2500
+    client = FakeClient(pages=[_followup_page("111", comment="Relancé", origin="Paysage"),
+                               _followup_page("222"), _followup_page("333", comment=long_comment)])
+    values = _sync(client).load_followup_team_values("followup-db")
+
+    assert set(values) == {"111", "333"}
+    assert values["111"] == {"Commentaire": {"rich_text": [{"text": {"content": "Relancé"}}]},
+                             "Origine Transfo": {"select": {"name": "Paysage"}}}
+    chunks = values["333"]["Commentaire"]["rich_text"]
+    assert [len(c["text"]["content"]) for c in chunks] == [2000, 500]  # Notion limit per item
+
+
+def test_backfill_fills_only_empty_team_columns():
+    sync = _sync(FakeClient())
+    empty = _as_page("page-111", sync._build_page_properties(_item(id="111"), schema=SCHEMA))
+    typed = sync._build_page_properties(_item(id="222"), schema=SCHEMA)
+    typed["Commentaire"] = {"rich_text": [{"text": {"content": "saisi dans la table des gagnés"}}]}
+    client = FakeClient(pages=[empty, _as_page("page-222", typed)])
+    team_values = {devis_id: {"Commentaire": {"rich_text": [{"text": {"content": "du suivi"}}]}}
+                   for devis_id in ("111", "222")}
+
+    stats = _sync(client).backfill_team_values(team_values)
+
+    assert stats == {"filled": 1, "errors": 0}
+    assert [u["page_id"] for u in client.updated] == ["page-111"]
+
+
+def test_value_helpers_compare_status_and_checkbox():
+    assert value_from_payload({"status": {"name": "brief"}}) == value_from_page({"type": "status", "status": {"name": "brief"}})
+    assert value_from_payload({"checkbox": True}) == value_from_page({"type": "checkbox", "checkbox": True})
+    assert value_from_payload({"status": {"name": "brief"}}) != value_from_page({"type": "status", "status": {"name": "Perdu"}})

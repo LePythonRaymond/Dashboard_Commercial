@@ -7,6 +7,10 @@ of devis that *should* be in the Envoyé / Signé views against what actually la
 the Google Sheets the dashboard reads. On drift it emails a digest (warn-only — it
 never changes the pipeline's exit behaviour) and always writes a JSON report.
 
+It also checks the two Notion sales tables ("Devis à suivre", "Devis gagnés")
+against Furious (src/integrations/notion_sync_check.py). Devis modified in
+Furious today are skipped: the 06:00 sync may predate the change.
+
 Designed to be scheduled a few minutes after scripts/run_pipeline.py so it checks the
 freshly-written sheets. See src/processing/reconciliation.py for the logic + rationale.
 
@@ -14,6 +18,7 @@ Usage:
     python scripts/run_reconciliation.py                 # current year, email on drift
     python scripts/run_reconciliation.py --year 2026
     python scripts/run_reconciliation.py --no-email      # just write the JSON report
+    python scripts/run_reconciliation.py --skip-notion   # sheets only
 """
 
 import sys
@@ -34,6 +39,9 @@ from src.processing.reconciliation import reconcile, build_report_html
 from src.integrations.google_sheets import GoogleSheetsClient
 from src.integrations.email_sender import EmailSender
 from src.integrations.pending_ids_store import get_store_path, write_pending_ids
+from src.integrations.furious_snapshot import build_processed_dataframe
+from src.integrations.notion_sync_check import TableCheck, build_checks_html, check_notion_tables, recently_modified_ids
+from src.integrations.notion_won_devis_sync import add_previous_year_avenants, won_devis_window_start
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -50,6 +58,7 @@ def main() -> int:
     parser.add_argument("--no-email", action="store_true", help="Write report only, never email")
     parser.add_argument("--always-email", action="store_true", help="Email even when no drift")
     parser.add_argument("--output", type=str, default=None, help="JSON report path")
+    parser.add_argument("--skip-notion", action="store_true", help="Do not check the Notion tables")
     args = parser.parse_args()
 
     logger.info("Reconciliation: fetching proposals from Furious (year %s)...", args.year)
@@ -77,6 +86,22 @@ def main() -> int:
         kwargs["min_amount"] = args.min_amount
     report = reconcile(df, sheets_client, args.year, **kwargs)
 
+    # Notion tables vs Furious, on the same data the pipeline syncs (avenants,
+    # overrides, manual projects). Never fatal: a failure is reported as "not checked".
+    notion_checks = []
+    if not args.skip_notion:
+        try:
+            df_processed, df_addons = build_processed_dataframe(PROJECT_ROOT, auth=auth, df_raw=df_raw)
+            won_start = won_devis_window_start()
+            won_source = (add_previous_year_avenants(df_processed, df_addons, won_start)
+                          if df_addons is not None else None)
+            notion_checks = check_notion_tables(df_processed, won_source, won_start,
+                                                skip_ids=recently_modified_ids(df_processed))
+        except Exception as exc:
+            notion_checks = [TableCheck("Notion", error=f"{type(exc).__name__}: {exc}"[:300])]
+    notion_drift = any(c.drift for c in notion_checks)
+    notion_unchecked = any(c.error for c in notion_checks)
+
     # Serialisable payload (drop the in-memory dataclass objects).
     payload = {
         "generated_at": datetime.now().isoformat(),
@@ -87,6 +112,7 @@ def main() -> int:
         "infrastructure_alert": report.get("infrastructure_alert", False),
         "reasons": report["reasons"],
         "views": report["views"],
+        "notion": [c.to_dict() for c in notion_checks],
     }
 
     out_path = Path(args.output) if args.output else (
@@ -109,24 +135,37 @@ def main() -> int:
             rc["sheet_gross"], rc["missing_significant_count"], rc["extra_count"],
         )
 
+    for check in notion_checks:
+        for line in check.lines():
+            (logger.info if check.ok else logger.warning)("  " + line)
+
     infra = report.get("infrastructure_alert", False)
     if report["alert"]:
-        logger.warning("DRIFT DETECTED: %s", " | ".join(report["reasons"]))
+        logger.warning("DRIFT DETECTED (sheets): %s", " | ".join(report["reasons"]))
     elif infra:
-        logger.warning("CHECK INCONCLUSIVE: %s", " | ".join(report["reasons"]))
+        logger.warning("CHECK INCONCLUSIVE (sheets): %s", " | ".join(report["reasons"]))
     else:
-        logger.info("No significant drift.")
+        logger.info("Sheets: no significant drift.")
+    if notion_drift:
+        logger.warning("DRIFT DETECTED (Notion): %s", " | ".join(c.table for c in notion_checks if c.drift))
+    elif notion_unchecked:
+        logger.warning("CHECK INCONCLUSIVE (Notion): %s", " | ".join(c.summary() for c in notion_checks if c.error))
+    elif notion_checks:
+        logger.info("Notion: tables match Furious.")
 
-    should_email = (not args.no_email) and (report["alert"] or infra or args.always_email)
+    alert = report["alert"] or notion_drift
+    inconclusive = infra or notion_unchecked
+    should_email = (not args.no_email) and (alert or inconclusive or args.always_email)
     if should_email:
-        if report["alert"]:
+        if alert:
             tag = "⚠️ Écart"
-        elif infra:
+        elif inconclusive:
             tag = "🔧 Contrôle impossible"
         else:
             tag = "✅ OK"
-        subject = f"{tag} — Réconciliation Dashboard/Furious {args.year}"
-        html = build_report_html(report)
+        scope = "Dashboard/Notion/Furious" if notion_checks else "Dashboard/Furious"
+        subject = f"{tag}: Réconciliation {scope} {args.year}"
+        html = build_report_html(report) + build_checks_html(notion_checks)
         try:
             ok = EmailSender()._send_email(args.to, subject, html)
             logger.info("Alert email to %s: %s", args.to, "sent" if ok else "FAILED")

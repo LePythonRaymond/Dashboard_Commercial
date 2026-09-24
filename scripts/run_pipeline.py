@@ -29,7 +29,7 @@ from typing import Any, Dict, Optional
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from config.settings import get_secret, settings, NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER, STATUS_WON
+from config.settings import get_secret, settings, STATUS_WON
 from src.api.auth import FuriousAuth, AuthenticationError
 from src.api.proposals import ProposalsClient, ProposalsAPIError
 from src.api.proposal_addons import ProposalAddonsClient, merge_addons_into_proposals
@@ -46,7 +46,14 @@ from src.integrations.google_sheets import GoogleSheetsClient
 from src.integrations.email_sender import EmailSender
 from src.integrations.notion_alerts_sync import NotionAlertsSync
 from src.integrations.notion_maintenance_won_sync import NotionMaintenanceWonSync
-from src.integrations.notion_won_devis_sync import NotionWonDevisSync, select_won_devis
+from src.integrations.notion_won_devis_sync import (
+    NotionWonDevisSync,
+    add_previous_year_avenants,
+    furious_status_by_id,
+    select_won_devis,
+    won_devis_window_start,
+)
+from src.integrations.notion_sync_check import check_notion_tables
 from src.processing.manual_and_overrides import (
     apply_input_overrides,
     apply_quarter_overrides,
@@ -211,6 +218,7 @@ class PipelineRunner:
 
             # Step 2b: Fetch Proposal Addons (Avenants) and merge into proposal amounts
             logger.info("\n--- Step 2b: Fetching Proposal Addons (Avenants) ---")
+            df_addons = None  # kept for step 11 (avenants of the previous year); None if the fetch fails
             try:
                 addons_client = ProposalAddonsClient(auth=auth)
                 df_addons = addons_client.fetch_all()
@@ -224,6 +232,7 @@ class PipelineRunner:
                 })
             except Exception as e:
                 logger.warning(f"Addon fetch failed (non-fatal, continuing without addons): {e}")
+                df_addons = None
                 if not df_raw.empty:
                     df_raw['addon_amount'] = 0
                 self._log_step("fetch_addons", "warning", {"error": str(e)})
@@ -332,10 +341,9 @@ class PipelineRunner:
             alerts_generator_email = AlertsGenerator()
             alerts_for_email = alerts_generator_email.generate(df_processed)
 
-            # Generate alerts for Notion (with owner-specific overrides for Vincent/Adélaïde)
-            alerts_generator_notion = AlertsGenerator(
-                followup_days_forward_by_owner=NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER
-            )
+            # Generate alerts for Notion: every WAITING devis, no date window
+            # ("Devis à suivre" holds them all; the team filters in Notion).
+            alerts_generator_notion = AlertsGenerator(followup_window=False)
             alerts_for_notion = alerts_generator_notion.generate(df_processed)
 
             self._log_step("generate_alerts", "success", {
@@ -467,14 +475,16 @@ class PipelineRunner:
             else:
                 try:
                     notion_alerts_sync = NotionAlertsSync()
-                    # Use alerts_for_notion which includes owner-specific forward windows (365 days for Vincent/Adélaïde)
-                    alerts_sync_stats = notion_alerts_sync.sync_all(alerts_for_notion)
+                    # alerts_for_notion holds every waiting devis; status_by_id lets the sync
+                    # relabel the pages whose devis was won or lost since the last run.
+                    alerts_sync_stats = notion_alerts_sync.sync_all(
+                        alerts_for_notion, status_by_id=furious_status_by_id(df_processed)
+                    )
+                    followup_stats = alerts_sync_stats["commercial_followup"]
                     self._log_step("notion_alerts_sync", "success", {
                         "weird_created": alerts_sync_stats["weird_proposals"]["created"],
                         "weird_archived": alerts_sync_stats["weird_proposals"]["archived"],
-                        "followup_created": alerts_sync_stats["commercial_followup"]["created"],
-                        "followup_archived": alerts_sync_stats["commercial_followup"]["archived"],
-                        "followup_marked_taken_charge": alerts_sync_stats["commercial_followup"].get("marked_taken_charge", 0),
+                        **{f"followup_{key}": value for key, value in followup_stats.items()},
                     })
                 except Exception as e:
                     logger.error(f"Notion alerts sync error: {e}")
@@ -514,22 +524,43 @@ class PipelineRunner:
                     import traceback
                     self._log_step("notion_maintenance_won_sync", "error", {"error": str(e), "traceback": traceback.format_exc()})
 
-            # Step 11: Sync ALL won devis (all BUs, since WON_DEVIS_SYNC_START_DATE) to the "Devis gagnés" DB.
-            # Furious-owned fields are refreshed; "Date signature" is typed in Notion and never overwritten.
+            # Step 11: Sync ALL won devis (all BUs, rolling WON_DEVIS_LOOKBACK_DAYS window) to the "Devis gagnés" DB.
+            # Furious-owned fields are refreshed; "Date signature" and the team columns are typed in Notion
+            # and never overwritten. Skipped without avenants: the amounts would be wrong for a day.
             logger.info("\n--- Step 11: Syncing won devis (all BUs) to Notion ---")
-            if not self.sync_notion or not settings.notion_won_devis_database_id:
-                reason = "dry_run" if self.dry_run else "disabled" if not self.sync_notion else "NOTION_WON_DEVIS_DATABASE_ID not set"
+            won_start = won_devis_window_start()
+            won_source = add_previous_year_avenants(df_processed, df_addons, won_start) if df_addons is not None else None
+            if not self.sync_notion or not settings.notion_won_devis_database_id or won_source is None:
+                reason = ("dry_run" if self.dry_run else "disabled" if not self.sync_notion
+                          else "NOTION_WON_DEVIS_DATABASE_ID not set" if not settings.notion_won_devis_database_id
+                          else "avenants unavailable from Furious")
                 self._log_step("notion_won_devis_sync", "skipped", {"reason": reason})
             else:
                 try:
-                    won_items, status_by_id = select_won_devis(df_processed, settings.won_devis_sync_start_date)
-                    logger.info(f"Won devis since {settings.won_devis_sync_start_date}: {len(won_items)} proposal(s)")
-                    won_devis_stats = NotionWonDevisSync().sync_won_devis(won_items, status_by_id)
-                    self._log_step("notion_won_devis_sync", "success", won_devis_stats)
+                    won_items, status_by_id = select_won_devis(won_source, won_start)
+                    logger.info(f"Won devis since {won_start:%Y-%m-%d}: {len(won_items)} row(s)")
+                    won_sync = NotionWonDevisSync()
+                    won_devis_stats = won_sync.sync_won_devis(
+                        won_items, status_by_id, team_values=won_sync.load_followup_team_values()
+                    )
+                    self._log_step("notion_won_devis_sync", "success", {"window_start": f"{won_start:%Y-%m-%d}", **won_devis_stats})
                 except Exception as e:
                     logger.error(f"Notion won devis sync error: {e}")
                     import traceback
                     self._log_step("notion_won_devis_sync", "error", {"error": str(e), "traceback": traceback.format_exc()})
+
+            # Step 12: Check both Notion tables against Furious (log only; the 07:30
+            # reconciliation runs the same check and e-mails on drift).
+            logger.info("\n--- Step 12: Checking Notion tables against Furious ---")
+            if not self.sync_notion:
+                self._log_step("notion_check", "skipped", {"reason": "dry_run" if self.dry_run else "disabled"})
+            else:
+                checks = check_notion_tables(df_processed, won_source, won_start)
+                for check in checks:
+                    for line in check.lines():
+                        (logger.info if check.ok else logger.warning)(line)
+                self._log_step("notion_check", "success" if all(c.ok for c in checks) else "warning",
+                               {c.table: c.summary() for c in checks})
 
             # Pipeline completed
             self.results["status"] = "completed"

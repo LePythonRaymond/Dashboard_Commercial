@@ -155,9 +155,11 @@ class Settings:
     notion_won_devis_database_id: str = field(
         default_factory=lambda: get_secret("NOTION_WON_DEVIS_DATABASE_ID", "")
     )
-    # First devis date (ISO) included in the won devis sync.
-    won_devis_sync_start_date: str = field(
-        default_factory=lambda: get_secret("WON_DEVIS_SYNC_START_DATE", "2026-01-01")
+    # Rolling window of the won devis sync: devis won in the last N days are
+    # created or refreshed. Older pages stay in Notion (history) but are no
+    # longer refreshed, except for their "Statut Furious".
+    won_devis_lookback_days: int = field(
+        default_factory=lambda: int(get_secret("WON_DEVIS_LOOKBACK_DAYS", "365"))
     )
 
     # API Request Settings
@@ -236,12 +238,10 @@ CONCEPTION_THRESHOLD_HIGH = 30000
 # ALERT_AMOUNT_THRESHOLD = 1000  # DEPRECATED: Amount threshold rule removed (no longer used)
 ALERT_FOLLOWUP_DAYS_FORWARD = 60  # Look ahead window
 
-# Notion Follow-up Window Overrides (for specific owners)
-# These owners get extended forward windows in Notion sync (emails still use default 60 days)
-NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER: Dict[str, int] = {
-    'vincent.delavarende': 365,
-    'adelaide.patureau': 365
-}
+# The Notion "Devis à suivre" table holds every WAITING devis, without any date
+# window (AlertsGenerator(followup_window=False)); only the emails use the
+# window above. The former per-owner overrides (365 days for Vincent and
+# Adélaïde) were removed on 2026-09-24 because everyone now sees everything.
 
 # TRAVAUX Projection Configuration
 TRAVAUX_PROJECTION_PROBABILITY_THRESHOLD = 10  # Min probability for Pipe Travaux projection (lowered 25->10 on 2026-06-08 to include 10% "Brief" devis; window kept at 365d)
