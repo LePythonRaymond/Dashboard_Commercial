@@ -197,7 +197,8 @@ def build() -> Path:
             "la même chose pour l'année civile en cours et passe seule à l'année suivante le 1<super>er</super> janvier.",
             "Furious n'enregistre pas les signatures : la Date signature se saisit dans Notion.",
             f"Les graphiques comptent toutes les lignes du périmètre, y compris celles {q('Pris en charge')}.",
-            "Un devis se marque gagné uniquement dans Furious (c'est Furious qui crée alors le projet).",
+            "Le statut d'un devis (en attente, gagné, perdu) se change uniquement dans Furious : "
+            "Notion l'affiche et le met à jour le lendemain matin.",
         ]),
         Paragraph("Je ne vois pas un devis : à vérifier dans l'ordre", H),
         *bullets([
