@@ -6,73 +6,68 @@ Use it for the first load of the database, or to refresh it without running
 the whole pipeline (no Google Sheets write, no email, no alert sync).
 The data preparation mirrors steps 1 to 4.5 of scripts/run_pipeline.py, so
 amounts include avenants and dashboard overrides exactly like the daily run.
+After the sync, the table is compared with Furious (same check as step 12).
 
-    python scripts/run_won_devis_sync.py            # write to Notion
-    python scripts/run_won_devis_sync.py --dry-run  # only print what would be synced
+    python scripts/run_won_devis_sync.py                        # write to Notion, then check
+    python scripts/run_won_devis_sync.py --dry-run              # only print what would be synced
+    python scripts/run_won_devis_sync.py --copy-team-columns    # also fill empty Commentaire /
+                                                                # Origine Transfo from "Devis à suivre"
 """
 
 import argparse
 import sys
-from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.settings import settings
-from src.api.auth import FuriousAuth
-from src.api.proposals import ProposalsClient
-from src.api.proposal_addons import ProposalAddonsClient, merge_addons_into_proposals
-from src.processing.cleaner import DataCleaner
-from src.processing.revenue_engine import RevenueEngine
-from src.processing.manual_and_overrides import (
-    apply_input_overrides,
-    apply_quarter_overrides,
-    get_manual_projects_store,
-    get_overrides_store,
-    inject_manual_projects,
+from src.integrations.furious_snapshot import build_processed_dataframe
+from src.integrations.notion_sync_check import WON_TABLE, check_notion_tables
+from src.integrations.notion_won_devis_sync import (
+    NotionWonDevisSync,
+    add_previous_year_avenants,
+    select_won_devis,
+    won_devis_window_start,
 )
-from src.integrations.notion_won_devis_sync import NotionWonDevisSync, select_won_devis
-
-
-def build_processed_dataframe():
-    """Same data as df_processed in the daily pipeline (steps 1 to 4.5)."""
-    auth = FuriousAuth()
-    df_raw = ProposalsClient(auth=auth).fetch_all()
-    try:
-        df_addons = ProposalAddonsClient(auth=auth).fetch_all()
-        df_raw, _ = merge_addons_into_proposals(df_raw, df_addons, target_year=datetime.now().year)
-    except Exception as exc:  # same non-fatal behaviour as the pipeline
-        print(f"Addon fetch failed, continuing without addons: {exc}")
-        df_raw["addon_amount"] = 0
-    df_cleaned = DataCleaner().clean(df_raw)
-    overrides_store = get_overrides_store(PROJECT_ROOT)
-    df_cleaned = apply_input_overrides(df_cleaned, overrides_store)
-    engine = RevenueEngine()
-    df_processed = engine.process(df_cleaned)
-    df_processed = inject_manual_projects(df_processed, get_manual_projects_store(PROJECT_ROOT), engine)
-    return apply_quarter_overrides(df_processed, overrides_store, engine.years_to_track)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dry-run", action="store_true", help="Select the devis but write nothing to Notion")
+    parser.add_argument("--copy-team-columns", action="store_true",
+                        help="Fill empty Commentaire / Origine Transfo of existing won pages from \"Devis à suivre\"")
     args = parser.parse_args()
 
     if not settings.notion_won_devis_database_id and not args.dry_run:
         print("NOTION_WON_DEVIS_DATABASE_ID is not set; nothing to do.")
         return 1
 
-    df_processed = build_processed_dataframe()
-    items, status_by_id = select_won_devis(df_processed, settings.won_devis_sync_start_date)
+    df_processed, df_addons = build_processed_dataframe(PROJECT_ROOT)
+    if df_addons is None:
+        print("Avenants unavailable from Furious: refusing to sync (amounts would be wrong).")
+        return 1
+    start = won_devis_window_start()
+    won_source = add_previous_year_avenants(df_processed, df_addons, start)
+    items, status_by_id = select_won_devis(won_source, start)
     total = sum(float(i.get("amount") or 0) for i in items)
     avenants = [i for i in items if "_AV" in str(i.get("id"))]
-    print(f"Won devis since {settings.won_devis_sync_start_date}: {len(items)} rows, {total:,.0f} EUR "
+    print(f"Won devis since {start:%Y-%m-%d}: {len(items)} rows, {total:,.0f} EUR "
           f"({len(items) - len(avenants)} devis + {len(avenants)} avenants on older devis)")
     if args.dry_run:
         return 0
-    stats = NotionWonDevisSync().sync_won_devis(items, status_by_id)
-    return 1 if stats["errors"] else 0
+
+    sync = NotionWonDevisSync()
+    team_values = sync.load_followup_team_values()
+    stats = sync.sync_won_devis(items, status_by_id, team_values=team_values)
+    if args.copy_team_columns:
+        stats["errors"] += sync.backfill_team_values(team_values)["errors"]
+
+    drift = False
+    for check in check_notion_tables(df_processed, won_source, start, tables=(WON_TABLE,)):
+        print("\n".join(check.lines()))
+        drift = drift or not check.ok
+    return 1 if stats["errors"] or drift else 0
 
 
 if __name__ == "__main__":

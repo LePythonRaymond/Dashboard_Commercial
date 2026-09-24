@@ -56,15 +56,19 @@ class AlertsGenerator:
 
     Commercial Follow-up:
     - Status must be WAITING
-    - Date window: 1st January (current year) → Today + 60 days (backward = current year only)
+    - Date window (emails): 1st January of the previous year → Today + 60 days
     - Different date reference for CONCEPTION vs TRAVAUX/MAINTENANCE
+    - followup_window=False drops the window: every WAITING devis is kept. The
+      Notion "Devis à suivre" table uses this mode (decided on 2026-09-24: the
+      waiting devis are few, and the team filters them in Notion).
     """
 
     def __init__(
         self,
         reference_date: datetime = None,
         followup_days_forward: int = ALERT_FOLLOWUP_DAYS_FORWARD,
-        followup_days_forward_by_owner: Optional[Dict[str, int]] = None
+        followup_days_forward_by_owner: Optional[Dict[str, int]] = None,
+        followup_window: bool = True,
     ):
         """
         Initialize the alerts generator.
@@ -74,8 +78,11 @@ class AlertsGenerator:
             followup_days_forward: Default forward window in days. Defaults to ALERT_FOLLOWUP_DAYS_FORWARD.
             followup_days_forward_by_owner: Optional dict mapping owner identifiers to custom forward window days.
                 If provided, owners in this dict will use their custom window instead of the default.
+            followup_window: False keeps every WAITING devis in the follow-up alerts,
+                whatever its dates (used for the Notion table; the emails keep the window).
         """
         self.today = reference_date or datetime.now()
+        self.followup_window = followup_window
 
         # Calculate date windows: backward = previous year, forward = today + N days
         self.window_start = self.today.replace(year=self.today.year - 1, month=1, day=1)  # 1st of previous year
@@ -152,10 +159,10 @@ class AlertsGenerator:
 
         The forward window can be owner-specific if configured via followup_days_forward_by_owner.
 
-        When this returns False, the proposal is excluded from the follow-up "current run".
-        In Notion sync, such pages (if they already exist) become "leftovers" and get
-        "Pris en charge" = true. Exclusion reasons:
-        - Backward: proposal date ('date') not in current year (< 1st January).
+        When this returns False, the proposal is excluded from the follow-up "current run"
+        (e-mail alerts only: the Notion table is built with followup_window=False).
+        Exclusion reasons:
+        - Backward: proposal date ('date') before 1st January of the previous year.
         - Forward CONCEPTION: 'date' > window_end.
         - Forward TRAVAUX/MAINTENANCE: both 'date' and 'projet_start' > window_end.
         Note: past projet_start (before today) does NOT exclude here (unlike TRAVAUX projection).
@@ -268,8 +275,11 @@ class AlertsGenerator:
         if df_waiting.empty:
             return {}
 
-        # Apply time window filter
-        mask_followup = df_waiting.apply(self._needs_followup, axis=1)
+        # Apply time window filter (none for the Notion table: every waiting devis)
+        if self.followup_window:
+            mask_followup = df_waiting.apply(self._needs_followup, axis=1)
+        else:
+            mask_followup = pd.Series(True, index=df_waiting.index)
         df_followup = df_waiting[mask_followup].copy()
 
         # Diagnostic: log dropped proposals and reasons

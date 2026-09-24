@@ -34,7 +34,7 @@ from datetime import datetime
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from config.settings import settings, MONTH_MAP, STATUS_WON, NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER
+from config.settings import settings, MONTH_MAP, STATUS_WON
 from src.api.auth import FuriousAuth
 from src.api.proposals import ProposalsClient
 from src.api.proposal_addons import ProposalAddonsClient, merge_addons_into_proposals
@@ -181,14 +181,13 @@ def run_backfill(
             from src.processing.alerts import AlertsGenerator
             from src.integrations.notion_alerts_sync import NotionAlertsSync
             from src.integrations.notion_maintenance_won_sync import NotionMaintenanceWonSync
+            from src.integrations.notion_won_devis_sync import furious_status_by_id
 
-            # Alerts (weird + follow-up)
-            alerts_gen = AlertsGenerator(
-                followup_days_forward_by_owner=NOTION_FOLLOWUP_DAYS_FORWARD_BY_OWNER
-            )
+            # Alerts (weird + follow-up): same rules as the daily pipeline (every waiting devis)
+            alerts_gen = AlertsGenerator(followup_window=False)
             alerts = alerts_gen.generate(df_processed)
             notion_sync = NotionAlertsSync()
-            stats = notion_sync.sync_all(alerts)
+            stats = notion_sync.sync_all(alerts, status_by_id=furious_status_by_id(df_processed))
             logger.info(f"  Alerts sync: {stats}")
 
             # Maintenance won

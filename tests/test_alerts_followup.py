@@ -104,3 +104,32 @@ if __name__ == "__main__":
     test_followup_travaux_or_rule()
     test_followup_maintenance_or_rule()
     print("✓ All follow-up OR rule tests passed!")
+
+
+def test_followup_without_window_keeps_every_waiting_devis():
+    """Notion mode (followup_window=False): every WAITING devis, whatever its dates; emails keep the window."""
+    reference_date = datetime(2026, 9, 24)
+    rows = [
+        # old CONCEPTION devis, before 1 January of the previous year
+        {'id': 'old', 'final_bu': 'CONCEPTION', 'date': pd.Timestamp(2023, 5, 2), 'projet_start': pd.NaT},
+        # TRAVAUX devis whose dates are both far in the future
+        {'id': 'future', 'final_bu': 'TRAVAUX', 'date': pd.Timestamp(2027, 6, 1), 'projet_start': pd.Timestamp(2027, 9, 1)},
+        # devis without any date
+        {'id': 'nodate', 'final_bu': 'MAINTENANCE', 'date': pd.NaT, 'projet_start': pd.NaT},
+        # recent devis, inside every window
+        {'id': 'recent', 'final_bu': 'CONCEPTION', 'date': pd.Timestamp(2026, 9, 1), 'projet_start': pd.NaT},
+        # won devis: never a follow-up
+        {'id': 'won', 'final_bu': 'CONCEPTION', 'date': pd.Timestamp(2026, 9, 1), 'projet_start': pd.NaT,
+         'statut_clean': 'gagnés en cours'},
+    ]
+    df = pd.DataFrame([{**{'statut_clean': 'brief', 'statut': 'Brief', 'title': r['id'], 'alert_owner': 'clemence',
+                           'amount': 1000}, **r} for r in rows])
+
+    def ids(alerts):
+        return sorted(item['id'] for items in alerts.values() for item in items)
+
+    notion = AlertsGenerator(reference_date=reference_date, followup_window=False).generate_followup_alerts(df)
+    email = AlertsGenerator(reference_date=reference_date).generate_followup_alerts(df)
+
+    assert ids(notion) == ['future', 'nodate', 'old', 'recent']
+    assert ids(email) == ['recent']
