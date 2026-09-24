@@ -1,18 +1,22 @@
 """
-"Pris en charge" and the pages that leave a Notion table.
+"Pris en charge" and the pages that leave a Notion table (rule of notion_scope).
 
-- "Devis à suivre" (follow-up): since 2026-09-24 the sync never writes
-  "Pris en charge" (like "Commentaire"); a page whose devis is no longer waiting
-  gets its "Statut" set to the current Furious status instead, and only the
-  properties that changed are sent.
-- "Prévisions Travaux" (TRAVAUX projection, "Pipe travaux"): same rule since
-  2026-09-24. The sync never writes "Pris en charge"; the sync-owned checkbox
-  "Dans la projection" is ticked on current devis and unticked on leftovers.
+- A tick made by a person is never removed by the sync.
+- A page whose devis leaves the table's scope is archived by the sync:
+  "Dans le périmètre" unticked, "Pris en charge" ticked, "Archivé par la
+  synchro" ticked, archive date set; in "Devis à suivre" its "Statut" also shows
+  the current Furious status.
+- If it comes back into scope, only a tick made by the sync is removed.
+- Only the properties that changed are sent.
 """
 
 import pytest
 
+from datetime import date
+
 from src.integrations.notion_alerts_sync import NotionAlertsSync
+
+TODAY = date(2026, 9, 25)
 
 STATUS_OPTIONS = ["Perdu", "Unknown", "brief", "en cours", "envoyée(s) attente réponse",
                   "gagnés en cours", "gagnés et finis"]
@@ -26,7 +30,12 @@ FOLLOWUP_SCHEMA = {
     "Date": {"type": "date"},
     "Pris en charge": {"type": "checkbox"},
     "Commentaire": {"type": "rich_text"},
+    "Dans le périmètre": {"type": "checkbox"},
+    "Archivé par la synchro": {"type": "checkbox"},
+    "Date archivage": {"type": "date"},
 }
+ARCHIVED_TODAY = {"Dans le périmètre": {"checkbox": False}, "Pris en charge": {"checkbox": True},
+                  "Archivé par la synchro": {"checkbox": True}, "Date archivage": {"date": {"start": "2026-09-25"}}}
 
 
 class FakeMapper:
@@ -70,10 +79,14 @@ def _as_page(page_id, payload, **team):
             props[name] = {"type": "people", "people": value["people"]}
         elif "multi_select" in value:
             props[name] = {"type": "multi_select", "multi_select": value["multi_select"]}
-    if "pris_en_charge" in team:
-        props["Pris en charge"] = {"type": "checkbox", "checkbox": team["pris_en_charge"]}
+    checkboxes = {"pris_en_charge": "Pris en charge", "scope": "Dans le périmètre", "auto": "Archivé par la synchro"}
+    for key, name in checkboxes.items():
+        if key in team:
+            props[name] = {"type": "checkbox", "checkbox": team[key]}
     if "commentaire" in team:
         props["Commentaire"] = {"type": "rich_text", "rich_text": [_text(team["commentaire"])]}
+    if "archived_on" in team:
+        props["Date archivage"] = {"type": "date", "date": {"start": team["archived_on"]}}
     return {"id": page_id, "properties": props}
 
 
@@ -95,23 +108,24 @@ def _stored(item):
     return sync._build_followup_page_properties(item, schema=FOLLOWUP_SCHEMA)
 
 
-def test_followup_sync_never_writes_pris_en_charge():
-    """A tick typed by someone survives: neither updates nor creations carry "Pris en charge"."""
-    page = _as_page("page-123", _stored(_item()), pris_en_charge=True, commentaire="Relancé le 12/09")
+def test_followup_sync_never_unticks_a_person_s_tick():
+    """A tick typed by someone survives; creations are in scope and not archived."""
+    page = _as_page("page-123", _stored(_item()), pris_en_charge=True, scope=True, commentaire="Relancé le 12/09")
     sync, created, updated = _followup_sync([page])
 
-    stats = sync.sync_followup_alerts({"owner1": [_item(amount=6500), _item("999")]}, status_by_id={})
+    stats = sync.sync_followup_alerts({"owner1": [_item(amount=6500), _item("999")]}, status_by_id={}, today=TODAY)
 
     assert stats["updated"] == 1 and stats["created"] == 1 and stats["errors"] == 0
     assert updated == [("page-123", {"Montant": {"number": 6500.0}})]  # only the changed Furious field
+    assert created[0]["Dans le périmètre"] == {"checkbox": True}
     assert "Pris en charge" not in created[0] and "Commentaire" not in created[0]
 
 
 def test_followup_sync_skips_unchanged_pages():
-    page = _as_page("page-123", _stored(_item()), pris_en_charge=False)
+    page = _as_page("page-123", _stored(_item()), pris_en_charge=False, scope=True)
     sync, created, updated = _followup_sync([page])
 
-    stats = sync.sync_followup_alerts({"owner1": [_item()]}, status_by_id={})
+    stats = sync.sync_followup_alerts({"owner1": [_item()]}, status_by_id={}, today=TODAY)
 
     assert stats["unchanged"] == 1 and stats["updated"] == 0
     assert updated == [] and created == []
@@ -125,49 +139,78 @@ def test_followup_status_uses_the_existing_option_whatever_the_case():
 
 def test_followup_unknown_status_is_not_sent_but_the_rest_is():
     """Notion cannot create a status option; sending one would reject the whole update."""
-    page = _as_page("page-123", _stored(_item()))
+    page = _as_page("page-123", _stored(_item()), scope=True)
     sync, _, updated = _followup_sync([page])
 
-    stats = sync.sync_followup_alerts({"owner1": [_item(statut="Archivé", amount=7000)]}, status_by_id={})
+    stats = sync.sync_followup_alerts({"owner1": [_item(statut="Archivé", amount=7000)]}, status_by_id={}, today=TODAY)
 
     assert stats["unmapped_status"] == 1 and stats["errors"] == 0
     assert updated == [("page-123", {"Montant": {"number": 7000.0}})]
 
 
-def test_devis_that_left_the_list_gets_its_furious_status_and_keeps_team_values():
-    lost = _as_page("page-456", _stored(_item("456")), pris_en_charge=False, commentaire="Client parti")
-    won = _as_page("page-789", _stored(_item("789")), pris_en_charge=True)
-    already = _as_page("page-321", _stored(_item("321", statut="Perdu")))
-    orphan = _as_page("page-654", _stored(_item("654")))
-    sync, _, updated = _followup_sync([lost, won, already, orphan])
+def test_devis_that_left_the_list_is_relabelled_and_archived():
+    current = _as_page("page-123", _stored(_item()), scope=True)
+    lost = _as_page("page-456", _stored(_item("456")), pris_en_charge=False, scope=True, commentaire="Client parti")
+    won_ticked = _as_page("page-789", _stored(_item("789")), pris_en_charge=True, scope=True)  # ticked by a person
+    done = _as_page("page-321", _stored(_item("321", statut="Perdu")), pris_en_charge=True, scope=False, auto=True,
+                    archived_on="2026-09-01")
+    orphan = _as_page("page-654", _stored(_item("654")), scope=True)
+    sync, _, updated = _followup_sync([current, lost, won_ticked, done, orphan])
 
     stats = sync.sync_followup_alerts(
-        {"owner1": []},
-        status_by_id={"456": "Perdu", "789": "Gagnés en cours", "321": "Perdu"},
+        {"owner1": [_item()]},
+        status_by_id={"456": "Perdu", "789": "Gagnés en cours", "321": "Perdu"}, today=TODAY,
     )
 
-    assert stats["relabelled"] == 2 and stats["orphans"] == 1 and stats["errors"] == 0
-    assert sorted(updated) == [
-        ("page-456", {"Statut": {"status": {"name": "Perdu"}}}),
-        ("page-789", {"Statut": {"status": {"name": "gagnés en cours"}}}),
-    ]
+    assert stats["relabelled"] == 2 and stats["orphans"] == 1 and stats["left_scope"] == 2 and stats["errors"] == 0
+    assert dict(updated) == {
+        "page-456": {"Statut": {"status": {"name": "Perdu"}}, **ARCHIVED_TODAY},
+        "page-789": {"Statut": {"status": {"name": "gagnés en cours"}}, "Dans le périmètre": {"checkbox": False}},
+        "page-654": ARCHIVED_TODAY,
+    }
 
 
-def test_leftovers_are_left_alone_without_furious_statuses():
-    page = _as_page("page-456", _stored(_item("456")))
+def test_devis_back_in_scope_loses_only_the_sync_s_tick():
+    by_sync = _as_page("page-1", _stored(_item("1")), pris_en_charge=True, scope=False, auto=True, archived_on="2026-09-01")
+    by_person = _as_page("page-2", _stored(_item("2")), pris_en_charge=True, scope=False, archived_on="2026-09-01")
+    sync, _, updated = _followup_sync([by_sync, by_person])
+
+    stats = sync.sync_followup_alerts({"owner1": [_item("1"), _item("2")]}, status_by_id={}, today=TODAY)
+
+    assert stats["back_in_scope"] == 1
+    assert dict(updated) == {
+        "page-1": {"Dans le périmètre": {"checkbox": True}, "Archivé par la synchro": {"checkbox": False},
+                   "Pris en charge": {"checkbox": False}, "Date archivage": {"date": None}},
+        "page-2": {"Dans le périmètre": {"checkbox": True}},
+    }
+
+
+def test_leftover_without_furious_statuses_is_archived_but_not_relabelled():
+    current = _as_page("page-123", _stored(_item()), scope=True)
+    gone = _as_page("page-456", _stored(_item("456")), scope=True)
+    sync, _, updated = _followup_sync([current, gone])
+
+    stats = sync.sync_followup_alerts({"owner1": [_item()]}, today=TODAY)
+
+    assert stats["relabelled"] == 0 and updated == [("page-456", ARCHIVED_TODAY)]
+
+
+def test_empty_run_archives_nothing():
+    """An empty Furious answer must not archive the whole table."""
+    page = _as_page("page-456", _stored(_item("456")), scope=True)
     sync, _, updated = _followup_sync([page])
 
-    stats = sync.sync_followup_alerts({"owner1": []})
+    stats = sync.sync_followup_alerts({"owner1": []}, status_by_id={}, today=TODAY)
 
-    assert stats["relabelled"] == 0 and updated == []
+    assert stats["left_scope"] == 0 and updated == []
 
 
 def test_duplicate_pages_are_counted_and_only_the_first_is_updated():
-    first = _as_page("page-a", _stored(_item()))
-    second = _as_page("page-b", _stored(_item()))
+    first = _as_page("page-a", _stored(_item()), scope=True)
+    second = _as_page("page-b", _stored(_item()), scope=True)
     sync, _, updated = _followup_sync([first, second])
 
-    stats = sync.sync_followup_alerts({"owner1": [_item(amount=1234)]}, status_by_id={})
+    stats = sync.sync_followup_alerts({"owner1": [_item(amount=1234)]}, status_by_id={}, today=TODAY)
 
     assert stats["duplicates_in_notion"] == 1
     assert [page_id for page_id, _ in updated] == ["page-a"]
@@ -179,7 +222,9 @@ TRAVAUX_SCHEMA = {
     "Client": {"type": "rich_text"},
     "Montant": {"type": "number"},
     "Pris en charge": {"type": "checkbox"},
-    "Dans la projection": {"type": "checkbox"},
+    "Dans le périmètre": {"type": "checkbox"},
+    "Archivé par la synchro": {"type": "checkbox"},
+    "Date archive": {"type": "date"},
 }
 
 
@@ -206,46 +251,51 @@ def _travaux_sync(pages):
     return sync, created, updated
 
 
-_CHECKBOXES = {"pris_en_charge": "Pris en charge", "in_projection": "Dans la projection"}
+_CHECKBOXES = {"pris_en_charge": "Pris en charge", "scope": "Dans le périmètre", "auto": "Archivé par la synchro"}
 
 
-def _travaux_page(page_id, proposal, **checkboxes):
-    """The page as the sync wrote it for `proposal`, plus checkbox values (pris_en_charge, in_projection)."""
+def _travaux_page(page_id, proposal, archived_on=None, **checkboxes):
+    """The page as the sync wrote it for `proposal`, plus checkbox values (pris_en_charge, scope, auto)."""
     sync, _, _ = _travaux_sync([])
     page = _as_page(page_id, sync._build_page_properties(proposal, TRAVAUX_SCHEMA))
     for key, value in checkboxes.items():
         page["properties"][_CHECKBOXES[key]] = {"type": "checkbox", "checkbox": value}
+    if archived_on:
+        page["properties"]["Date archive"] = {"type": "date", "date": {"start": archived_on}}
     return page
 
 
-def test_travaux_sync_never_writes_pris_en_charge():
-    """A tick on a devis still in the projection survives; the page is flagged "Dans la projection"."""
+def test_travaux_sync_never_unticks_a_person_s_tick():
+    """A tick on a devis still in the projection survives; new pages are in scope."""
     page = _travaux_page("page-123", _travaux(), pris_en_charge=True)
     sync, created, updated = _travaux_sync([("123", page)])
 
-    stats = sync.sync_proposals([_travaux(), _travaux("999")])
+    stats = sync.sync_proposals([_travaux(), _travaux("999")], today=TODAY)
 
     assert stats["updated"] == 1 and stats["created"] == 1 and stats["errors"] == 0
-    assert updated == [("page-123", {"Dans la projection": {"checkbox": True}})]
-    assert created[0]["Dans la projection"] == {"checkbox": True} and "Pris en charge" not in created[0]
+    assert updated == [("page-123", {"Dans le périmètre": {"checkbox": True}})]
+    assert created[0]["Dans le périmètre"] == {"checkbox": True} and "Pris en charge" not in created[0]
 
 
 def test_travaux_unchanged_page_is_not_written():
-    page = _travaux_page("page-123", _travaux(), in_projection=True)
+    page = _travaux_page("page-123", _travaux(), scope=True)
     sync, _, updated = _travaux_sync([("123", page)])
 
-    stats = sync.sync_proposals([_travaux()])
+    stats = sync.sync_proposals([_travaux()], today=TODAY)
 
     assert stats["unchanged"] == 1 and updated == []
 
 
-def test_travaux_devis_that_left_the_projection_is_unticked_once():
-    still = _travaux_page("page-123", _travaux(), in_projection=True)
-    gone = _travaux_page("page-456", _travaux("456"), pris_en_charge=False, in_projection=True)
-    gone_before = _travaux_page("page-789", _travaux("789"), in_projection=False)
+def test_travaux_devis_that_left_the_projection_is_archived_once():
+    still = _travaux_page("page-123", _travaux(), scope=True)
+    gone = _travaux_page("page-456", _travaux("456"), pris_en_charge=False, scope=True)
+    gone_before = _travaux_page("page-789", _travaux("789"), pris_en_charge=True, scope=False, auto=True,
+                                archived_on="2026-09-24")
     sync, _, updated = _travaux_sync([("123", still), ("456", gone), ("789", gone_before)])
 
-    stats = sync.sync_proposals([_travaux()])
+    stats = sync.sync_proposals([_travaux()], today=TODAY)
 
-    assert stats["left_projection"] == 1 and stats["unchanged"] == 1
-    assert updated == [("page-456", {"Dans la projection": {"checkbox": False}})]
+    assert stats["left_scope"] == 1 and stats["unchanged"] == 1
+    assert updated == [("page-456", {"Dans le périmètre": {"checkbox": False}, "Pris en charge": {"checkbox": True},
+                                     "Archivé par la synchro": {"checkbox": True},
+                                     "Date archive": {"date": {"start": "2026-09-25"}}})]

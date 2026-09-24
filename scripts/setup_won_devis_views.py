@@ -26,10 +26,14 @@ Views, every table grouped by month with the most recent month first:
 Pris en charge, Date archivage, Origine Transfo) to the database when they are
 missing, then shows them in every existing table view.
 
---subitems creates the structure of the avenant sub-items when it is missing
-(relation "Devis parent" / "Avenants", select "Type", formula "Gagné cette
-année") and makes every existing table view nest the avenants under their devis
-and show "Type".
+--subitems sets up the avenant sub-items: it renames Notion's own sub-item
+relation ("Parent item" / "Sub-item", created when "Sub-items" is turned on in
+the database menu, which the API cannot do) to "Devis parent" / "Avenants",
+adds the select "Type" and the formula "Gagné cette année" when missing, and
+makes every existing table view nest the avenants under their devis and show
+"Type". A relation created through the API is not used for sub-items by Notion
+(met on 2026-09-24: the avenants did not nest until they were moved to
+"Parent item").
 
 Both safe modes change nothing else in the views (filters, sorts, grouping,
 widths, views created by hand), so they can run on a database the team has
@@ -66,6 +70,8 @@ def _month_group(property_id: str) -> Dict[str, Any]:
 
 def _subtasks(pid: Dict[str, str]) -> Dict[str, Any]:
     """Avenants shown under their devis, with the expand toggle on the title column."""
+    if PARENT_PROP not in pid:
+        return {"display_mode": "disabled"}
     return {"property_id": unquote(pid[PARENT_PROP]), "display_mode": "show",
             "filter_scope": "parents_and_subitems", "toggle_column_id": "title"}
 
@@ -131,13 +137,14 @@ def ensure_team_columns(data_source_id: str, properties: Dict[str, Any]) -> Dict
 
 
 def ensure_subitem_structure(data_source_id: str, properties: Dict[str, Any]) -> Dict[str, Any]:
-    """Create "Devis parent" / "Avenants" (self relation), "Type" and "Gagné cette année" when missing."""
+    """Name Notion's sub-item relation "Devis parent" / "Avenants"; add "Type" and "Gagné cette année"."""
     if PARENT_PROP not in properties:
-        created = notion_call("PATCH", f"data_sources/{data_source_id}", {"properties": {PARENT_PROP: {"relation": {
-            "data_source_id": data_source_id, "type": "dual_property", "dual_property": {}}}}})["properties"]
-        synced = created[PARENT_PROP]["relation"]["dual_property"]["synced_property_name"]
-        notion_call("PATCH", f"data_sources/{data_source_id}", {"properties": {synced: {"name": CHILDREN_PROP}}})
-        print(f'created  relation "{PARENT_PROP}" / "{CHILDREN_PROP}"')
+        if "Parent item" not in properties:
+            print('Turn on "Sub-items" in the database menu first (Notion creates "Parent item" / "Sub-item").')
+        else:
+            notion_call("PATCH", f"data_sources/{data_source_id}", {"properties": {
+                "Parent item": {"name": PARENT_PROP}, "Sub-item": {"name": CHILDREN_PROP}}})
+            print(f'renamed  "Parent item" / "Sub-item" to "{PARENT_PROP}" / "{CHILDREN_PROP}"')
     extra = {}
     if TYPE_PROP not in properties:
         extra[TYPE_PROP] = {"select": {"options": [{"name": "Devis", "color": "blue"},

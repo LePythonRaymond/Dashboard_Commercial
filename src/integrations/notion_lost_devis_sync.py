@@ -19,8 +19,10 @@ Who owns which property
   and Commercial / Chef de projet once LOST_DEVIS_WRITE_PEOPLE is on.
 - The team owns Commentaire and Origine Transfo. When the page is created they
   are copied from the devis' row in "Devis à suivre", then never written again.
-- A page whose devis is no longer lost (reopened, then won for example) gets its
-  "Statut Furious" corrected, and the views only show "Perdu".
+- The rows of select_lost_devis are the table's scope (see notion_scope): a
+  page that leaves it (older than the window, reopened, tagged as a duplicate)
+  gets its "Statut Furious" corrected and is archived, so it leaves the views;
+  the monthly job moves it to the trash six months later.
 
 People and notifications
 ------------------------
@@ -36,12 +38,14 @@ perte, and the comment typed on it in "Devis à suivre".
 """
 
 import time
+from datetime import date
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
 from config.settings import settings
-from .notion_values import page_value, value_from_page, value_from_payload
+from .notion_scope import ARCHIVED_PROP, scope_changes, scope_on_create
+from .notion_values import value_from_page, value_from_payload
 from .notion_won_devis_sync import (
     COPIED_FROM_FOLLOWUP,
     ID_PROP,
@@ -170,11 +174,14 @@ class NotionLostDevisSync(NotionWonDevisSync):
         items: List[Dict[str, Any]],
         status_by_id: Optional[Dict[str, str]] = None,
         team_values: Optional[Dict[str, Dict[str, Any]]] = None,
+        today: Optional[date] = None,
     ) -> Dict[str, int]:
         """Upsert the lost devis; counters: created, updated, unchanged, relabelled, orphans,
-        team_values_copied, duplicates_in_notion, errors, people_written (0 or 1)."""
+        team_values_copied, duplicates_in_notion, left_scope, back_in_scope, errors,
+        people_written (0 or 1)."""
         stats = {key: 0 for key in ("created", "updated", "unchanged", "relabelled", "orphans",
-                                    "team_values_copied", "duplicates_in_notion", "errors")}
+                                    "team_values_copied", "duplicates_in_notion", "left_scope",
+                                    "back_in_scope", "errors")}
         stats["items"] = len(items)
         stats["people_written"] = int(bool(self.write_people))
         if not self.database_id:
@@ -203,6 +210,7 @@ class NotionLostDevisSync(NotionWonDevisSync):
                 copied = {name: value for name, value in (team_values or {}).get(devis_id, {}).items()
                           if name in COPIED_FROM_FOLLOWUP and name in schema}
                 props.update(copied)
+                props.update(scope_on_create(schema))
                 if self._create(props) is None:
                     stats["errors"] += 1
                     continue
@@ -213,6 +221,9 @@ class NotionLostDevisSync(NotionWonDevisSync):
             current = page.get("properties") or {}
             changed = {name: value for name, value in props.items()
                        if value_from_payload(value) != value_from_page(current.get(name, {}))}
+            back = scope_changes(page, True, schema, today)
+            stats["back_in_scope"] += int(ARCHIVED_PROP in back)
+            changed.update(back)
             if not changed:
                 stats["unchanged"] += 1
             elif self._update(page["id"], changed):
@@ -220,16 +231,8 @@ class NotionLostDevisSync(NotionWonDevisSync):
             else:
                 stats["errors"] += 1
 
-        for devis_id, page in existing.items():
-            if devis_id in seen:
-                continue
-            status = (status_by_id or {}).get(devis_id)
-            if status is None:
-                stats["orphans"] += 1
-                continue
-            if STATUS_PROP in schema and status and page_value(page, STATUS_PROP) != status:
-                ok = self._update(page["id"], {STATUS_PROP: {"select": {"name": status[:100]}}})
-                stats["relabelled" if ok else "errors"] += 1
+        for key, count in self._leave_scope(existing, seen, status_by_id, schema, today).items():
+            stats[key] += count
 
         print(
             "    Done: {created} created, {updated} updated, {unchanged} unchanged, {relabelled} relabelled, "

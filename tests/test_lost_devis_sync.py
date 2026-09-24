@@ -3,6 +3,8 @@ Tests for the "Devis perdus" sync: selection of the lost devis, loss reasons,
 People columns held back until notifications are off, team columns copied once.
 """
 
+from datetime import date
+
 import pandas as pd
 
 from src.integrations.notion_lost_devis_sync import NotionLostDevisSync, loss_reasons, select_lost_devis
@@ -13,6 +15,8 @@ SCHEMA = {name: {"type": kind} for name, kind in {
     "Montant HT": "number", "Motif de perte": "multi_select", "Statut Furious": "select", "Date perdu": "date",
     "Créé le": "date", "Commercial": "people", "Chef de projet": "people", "Lien Furious": "url",
     "Commentaire": "rich_text", "Origine Transfo": "select",
+    "Pris en charge": "checkbox", "Date archivage": "date", "Dans le périmètre": "checkbox",
+    "Archivé par la synchro": "checkbox",
 }.items()}
 
 
@@ -88,7 +92,17 @@ def _as_page(page_id, payload):
             props[name] = {"type": "url", "url": value["url"]}
         elif "people" in value:
             props[name] = {"type": "people", "people": value["people"]}
+        elif "checkbox" in value:
+            props[name] = {"type": "checkbox", "checkbox": value["checkbox"]}
     return {"id": page_id, "properties": props}
+
+
+def _stored(item, **extra):
+    """The page the sync wrote for `item` (in scope), plus extra property payloads."""
+    payload = _sync(FakeClient())._build_page_properties(item, schema=SCHEMA)
+    payload["Dans le périmètre"] = {"checkbox": True}
+    payload.update(extra)
+    return payload
 
 
 def test_loss_reasons_are_split_and_deduplicated():
@@ -133,7 +147,7 @@ def test_new_lost_devis_page_without_people_until_notifications_are_off():
 
 def test_people_are_filled_once_allowed_and_only_changes_are_sent():
     item = dict(_devis("1"), lost_reasons=["Autre"])
-    page = _as_page("page-1", _sync(FakeClient())._build_page_properties(item, schema=SCHEMA))
+    page = _as_page("page-1", _stored(item))
     client = FakeClient(pages=[page])
 
     stats = _sync(client, write_people=True).sync_lost_devis([item], {})
@@ -145,16 +159,20 @@ def test_people_are_filled_once_allowed_and_only_changes_are_sent():
     })]
 
 
-def test_reopened_devis_is_relabelled_and_orphans_left_alone():
-    sync = _sync(FakeClient())
-    reopened = _as_page("page-1", sync._build_page_properties(dict(_devis("1"), lost_reasons=[]), schema=SCHEMA))
-    orphan = _as_page("page-2", sync._build_page_properties(dict(_devis("2"), lost_reasons=[]), schema=SCHEMA))
-    client = FakeClient(pages=[reopened, orphan])
+def test_reopened_devis_and_orphans_leave_the_scope():
+    current = dict(_devis("0"), lost_reasons=[])
+    pages = [_as_page(f"page-{i}", _stored(dict(_devis(i), lost_reasons=[]))) for i in ("0", "1", "2")]
+    client = FakeClient(pages=pages)
 
-    stats = _sync(client).sync_lost_devis([], {"1": "Envoyée(s) attente réponse"})
+    stats = _sync(client).sync_lost_devis([current], {"1": "Envoyée(s) attente réponse"}, today=date(2026, 9, 25))
 
-    assert stats["relabelled"] == 1 and stats["orphans"] == 1
-    assert client.updated == [("page-1", {"Statut Furious": {"select": {"name": "Envoyée(s) attente réponse"}}})]
+    archived = {"Dans le périmètre": {"checkbox": False}, "Pris en charge": {"checkbox": True},
+                "Archivé par la synchro": {"checkbox": True}, "Date archivage": {"date": {"start": "2026-09-25"}}}
+    assert stats["relabelled"] == 1 and stats["orphans"] == 1 and stats["left_scope"] == 2 and stats["unchanged"] == 1
+    assert client.updated == [
+        ("page-1", {"Statut Furious": {"select": {"name": "Envoyée(s) attente réponse"}}, **archived}),
+        ("page-2", archived),
+    ]
 
 
 def test_an_empty_database_id_never_falls_back_to_another_table(monkeypatch):

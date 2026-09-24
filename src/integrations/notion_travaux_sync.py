@@ -4,26 +4,25 @@ Notion TRAVAUX Projection Sync Module
 Syncs TRAVAUX projection proposals to a dedicated Notion database ("Pipe travaux").
 Creates pages with proposal information for the "Projection Travaux prochains 12 mois" dashboard.
 
-Since 2026-09-24 the team owns "Pris en charge" (like "Notes Mathilde" and
-"Next Steps Commercial"): the sync never writes it. Before, every run (06:15
-daily, Sunday 22:00) unticked it on every devis still in the projection and
-ticked it on the others, so the box never kept what a person had set.
-Whether a devis is still in the projection is now the sync-owned checkbox
-"Dans la projection": ticked while the devis meets the projection criteria,
+The scope rule of every sales table applies (see notion_scope): "Dans le
+périmètre" is ticked while the devis meets the projection criteria and
 unticked when it leaves them (won, lost, probability below 10 %, dates out of
-the 365-day window). The views filter on it.
+the 365-day window); a devis that leaves is archived ("Pris en charge" ticked,
+"Date archive" set) and the views hide it. The sync never unticks a "Pris en
+charge" ticked by a person. (Until 2026-09-24 every run, 06:15 daily and Sunday
+22:00, unticked it on every devis still in the projection, so a person's tick
+never survived.)
 """
 
+from datetime import date
 from typing import List, Dict, Any, Optional, Set, Tuple
 from urllib.parse import urlparse, parse_qs
 from notion_client import Client
 
 from config.settings import settings, VIP_COMMERCIALS
 from .notion_users import get_user_mapper, NotionUserMapper
-from .notion_values import page_value, value_from_page, value_from_payload
-
-# Sync-owned checkbox: is the devis in the current TRAVAUX projection?
-IN_PROJECTION_PROP = "Dans la projection"
+from .notion_values import value_from_page, value_from_payload
+from .notion_scope import ARCHIVED_PROP, SCOPE_PROP, scope_changes, scope_on_create
 
 
 class NotionTravauxSync:
@@ -529,23 +528,26 @@ class NotionTravauxSync:
             print(f"    Warning: Could not update page {page_id}: {error_msg}")
             return False
 
-    def sync_proposals(self, proposals: List[Dict[str, Any]]) -> Dict[str, int]:
+    def sync_proposals(self, proposals: List[Dict[str, Any]], today: Optional[date] = None) -> Dict[str, int]:
         """
         Sync TRAVAUX projection proposals to Notion database.
 
         Strategy: upsert by ID Devis, writing only the properties that changed. The
         page (and its comments), its Name/title and the team-owned properties
-        ("Pris en charge", "Notes Mathilde", "Next Steps Commercial", "Statut",
-        "Date archive") are never written. "Dans la projection" is ticked on the
-        devis of this run and unticked on the pages whose devis left the projection.
+        ("Notes Mathilde", "Next Steps Commercial", "Statut") are never written.
+        The proposals are the scope: pages of other devis are archived (unticked
+        "Dans le périmètre", ticked "Pris en charge" with "Date archive"), and a
+        tick the sync made is removed if the devis comes back (see notion_scope).
 
         Args:
-            proposals: List of proposal dictionaries
+            proposals: List of proposal dictionaries (the whole current projection)
+            today: archive date written by the sync (defaults to today)
 
         Returns:
             Sync statistics
         """
-        stats = {"created": 0, "updated": 0, "unchanged": 0, "left_projection": 0, "archived": 0, "errors": 0}
+        stats = {"created": 0, "updated": 0, "unchanged": 0, "left_scope": 0, "back_in_scope": 0,
+                 "archived": 0, "errors": 0}
 
         if not self.database_id:
             print("  Skipping TRAVAUX projection sync: NOTION_TRAVAUX_PROJECTION_DATABASE_ID not configured")
@@ -572,16 +574,14 @@ class NotionTravauxSync:
         print(f"    Found {len(pages_by_id)} existing page(s) with ID Devis/Lien Furious.")
 
         projection_ids = {str(p.get("id", "")).strip() for p in proposals if p.get("id")}
-        has_flag = IN_PROJECTION_PROP in schema
 
         print(f"    Upserting {len(proposals)} proposal(s)...")
         for proposal in proposals:
             properties = self._build_page_properties(proposal, schema)
-            if has_flag:
-                properties[IN_PROJECTION_PROP] = {"checkbox": True}
             proposal_id = str(proposal.get("id", "")).strip()
             page = pages_by_id.get(proposal_id)
             if page is None:
+                properties.update(scope_on_create(schema))
                 page_id = self._create_page(properties)
                 if page_id:
                     stats["created"] += 1
@@ -593,6 +593,9 @@ class NotionTravauxSync:
             current = page.get("properties") or {}
             changed = {name: value for name, value in properties.items()
                        if value_from_payload(value) != value_from_page(current.get(name, {}))}
+            back = scope_changes(page, True, schema, today)
+            stats["back_in_scope"] += int(ARCHIVED_PROP in back)
+            changed.update(back)
             if not changed:
                 stats["unchanged"] += 1
             elif self._update_page(page["id"], changed):
@@ -600,21 +603,24 @@ class NotionTravauxSync:
             else:
                 stats["errors"] += 1
 
-        # Pages whose devis left the projection: untick "Dans la projection" (views hide them)
+        # Pages whose devis left the projection: archived, the views hide them
         leftovers = [pid for pid in pages_by_id if pid not in projection_ids]
-        if leftovers and has_flag:
-            for proposal_id in leftovers:
-                page = pages_by_id[proposal_id]
-                if page_value(page, IN_PROJECTION_PROP) is False:
-                    continue
-                if self._update_page(page["id"], {IN_PROJECTION_PROP: {"checkbox": False}}):
-                    stats["left_projection"] += 1
-                else:
-                    stats["errors"] += 1
+        if leftovers and not projection_ids:
+            print("    Warning: empty projection (Furious sent nothing?): pages left untouched today.")
+            leftovers = []
+        for proposal_id in leftovers:
+            changes = scope_changes(pages_by_id[proposal_id], False, schema, today)
+            if not changes:
+                continue
+            if self._update_page(pages_by_id[proposal_id]["id"], changes):
+                stats["left_scope"] += int(ARCHIVED_PROP in changes)
+            else:
+                stats["errors"] += 1
 
         print(
             f"    Done: {stats['created']} created, {stats['updated']} updated, {stats['unchanged']} unchanged, "
-            f"{len(leftovers)} out of the projection ({stats['left_projection']} newly unticked), {stats['errors']} errors"
+            f"{len(leftovers)} out of the projection ({stats['left_scope']} archived today), "
+            f"{stats['back_in_scope']} back, {stats['errors']} errors"
         )
         return stats
 

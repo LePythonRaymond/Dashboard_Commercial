@@ -3,7 +3,7 @@ Tests for NotionWonDevisSync: devis selection, property mapping, and the rule th
 a "Date signature" typed in Notion is never overwritten or cleared by the sync.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 
 import pandas as pd
 import pytest
@@ -211,14 +211,28 @@ def test_unchanged_page_is_not_written_and_title_is_kept():
     assert stats["unchanged"] == 1 and client.updated == [] and client.created == []
 
 
-def test_devis_that_left_won_is_relabelled_and_orphans_are_left_alone():
+def test_pages_that_left_the_scope_are_relabelled_and_archived():
     sync = _sync(FakeClient())
+    current = _as_page("page-0", sync._build_page_properties(_item(id="333"), schema=SCHEMA))
     reverted = _as_page("page-1", sync._build_page_properties(_item(id="111"), schema=SCHEMA))
     orphan = _as_page("page-2", sync._build_page_properties(_item(id="222"), schema=SCHEMA))
-    client = FakeClient(pages=[reverted, orphan])
+    client = FakeClient(pages=[current, reverted, orphan])
+
+    stats = _sync(client).sync_won_devis([_item(id="333")], {"111": "Perdu"}, today=date(2026, 9, 25))
+
+    assert stats["relabelled"] == 1 and stats["orphans"] == 1 and stats["left_scope"] == 2 and stats["unchanged"] == 1
+    archived = {"Pris en charge": {"checkbox": True}, "Date archivage": {"date": {"start": "2026-09-25"}}}
+    assert client.updated == [
+        {"page_id": "page-1", "properties": {"Statut Furious": {"select": {"name": "Perdu"}}, **archived}},
+        {"page_id": "page-2", "properties": archived},
+    ]
+
+
+def test_an_empty_run_archives_nothing():
+    sync = _sync(FakeClient())
+    client = FakeClient(pages=[_as_page("page-1", sync._build_page_properties(_item(id="111"), schema=SCHEMA))])
     stats = _sync(client).sync_won_devis([], {"111": "Perdu"})
-    assert stats["relabelled"] == 1 and stats["orphans"] == 1
-    assert client.updated == [{"page_id": "page-1", "properties": {"Statut Furious": {"select": {"name": "Perdu"}}}}]
+    assert stats["left_scope"] == 0 and stats["relabelled"] == 0 and client.updated == []
 
 
 def test_rate_limited_update_is_retried_with_backoff():
