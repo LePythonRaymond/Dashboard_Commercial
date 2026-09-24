@@ -364,7 +364,7 @@ myrium/
 - **Assignee Visibility**: Shows all assignees in alert tables
 
 ### 7.6 Notion Integration
-- **6 Databases**: Weird Proposals, Follow-up (every waiting devis), TRAVAUX Projection, Recent TRAVAUX Projects, MAINTENANCE Won (current year), Devis gagnés (all BUs, rolling last 365 days, signature date and team columns typed in Notion, §18.16 and §18.17)
+- **7 Databases**: Weird Proposals, Follow-up (every waiting devis), TRAVAUX Projection ("Pipe travaux"), Recent TRAVAUX Projects, MAINTENANCE Won (current year), Devis gagnés (all BUs, rolling last 365 days, avenants as sub-items, signature date and team columns typed in Notion, §18.16 to §18.18), Devis perdus (rolling last 365 days, loss reasons, §18.18)
 - **Commercial/Chef de projet Split**: People properties for clear responsibility
 - **Schema-Aware Sync**: Only sets properties that exist in database schema (prevents 400 errors)
 - **TRAVAUX Projection dates**: Sync maps to both "Date"/"Début projet" and "Date Signature"/"Début Chantier" when present in schema; projection passes `signature_date` for "Date Signature"
@@ -372,8 +372,8 @@ myrium/
 - **Notion API 2025-09-03**: All clients pinned to latest API version with data_sources support
 - **Fail-Closed Behavior**: Refuses to create pages when schema cannot be loaded (prevents blank page spam)
 - **Follow-up table**: every waiting devis (no window). The team owns Commentaire, Pris en charge, Date archivage, Origine Transfo (never written by the sync); a devis that leaves the list gets its real Furious status in "Statut" and the views filter on the waiting statuses (§18.17)
-- **Leftover Marking (TRAVAUX Projection only)**: pages in Notion but not in the current run get "Pris en charge" ticked; current-run pages get it unchecked (§18.8)
-- **Notion ↔ Furious check**: after the syncs (step 12) and at 07:30 (reconciliation e-mail on drift), both sales tables are compared with Furious (§18.17)
+- **TRAVAUX Projection**: "Pris en charge" belongs to the team too since 2026-09-24; the sync-owned checkbox "Dans la projection" says whether the devis is still in the projection and the views filter on it (§18.18)
+- **Notion ↔ Furious check**: after the syncs (step 13) and at 07:30 (reconciliation e-mail on drift), the three sales tables are compared with Furious (§18.17, §18.18)
 
 ### 7.7 BI Dashboard
 - **Production Tabs**: "À produire {Year}" with cross-year aggregation
@@ -406,7 +406,9 @@ NOTION_TRAVAUX_PROJECTION_DATABASE_ID=...
 NOTION_TRAVAUX_RECENT_PROJECTS_DATABASE_ID=...
 NOTION_MAINTENANCE_WON_DATABASE_ID=...
 NOTION_WON_DEVIS_DATABASE_ID=...     # "Devis gagnés" DB, step 11 (§18.16)
-WON_DEVIS_LOOKBACK_DAYS=365          # Optional: rolling window of step 11, in days (§18.17)
+WON_DEVIS_LOOKBACK_DAYS=365          # Optional: rolling window of steps 11 and 12, in days (§18.17)
+NOTION_LOST_DEVIS_DATABASE_ID=...    # "Devis perdus" DB, step 12 (§18.18)
+LOST_DEVIS_WRITE_PEOPLE=0            # 1 once "notify" is off on its People properties (§18.18)
 MAINTENANCE_ENTRETIEN_START_2026=...   # Optional fallback: value for "Maintenance Entretien – Début 2026" (e.g. 1084000)
 NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID=...  # Optional: data source ID (preferred)
 NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATABASE_ID=...   # Optional: legacy database ID if no datasource
@@ -444,8 +446,9 @@ The pipeline supports granular flags to control execution components:
 - Runs full pipeline daily: Auth → Fetch → Clean → Revenue → Views → Sheets + Notion sync
 - **Step 10**: Syncs current year’s MAINTENANCE won proposals to Notion (when `NOTION_MAINTENANCE_WON_DATABASE_ID` is set); POST new by ID Devis, PATCH existing; no archiving
 - **Step 9**: "Devis à suivre" gets every waiting devis; pages whose devis was won or lost get their Furious status; "Pris en charge" is never written (§18.17)
-- **Step 11**: Syncs every won devis of the last `WON_DEVIS_LOOKBACK_DAYS` (365) days (all BUs, avenants included year by year, test devis excluded) to the "Devis gagnés" DB when `NOTION_WON_DEVIS_DATABASE_ID` is set; Furious fields refreshed only when changed, `Date signature` and team columns never overwritten; skipped when the avenants cannot be fetched (§18.16, §18.17)
-- **Step 12**: Compares both Notion sales tables with Furious and logs the result (§18.17)
+- **Step 11**: Syncs every won devis of the last `WON_DEVIS_LOOKBACK_DAYS` (365) days (all BUs, test devis excluded) to the "Devis gagnés" DB when `NOTION_WON_DEVIS_DATABASE_ID` is set: one row per devis with its own amount, one sub-item row per avenant; Furious fields refreshed only when changed, `Date signature` and team columns never overwritten; skipped when the avenants cannot be fetched (§18.16 to §18.18)
+- **Step 12**: Syncs the lost devis of the same window, with their loss reasons, to "Devis perdus" when `NOTION_LOST_DEVIS_DATABASE_ID` is set (§18.18)
+- **Step 13**: Compares the three Notion sales tables with Furious and logs the result (§18.17)
 - Skips all emails (objectives + alerts) to avoid daily email noise
 - Uses stable "État actuel" snapshot (no daily dated sheets)
 - Provides complete data refresh including Notion sync for dashboard
@@ -463,7 +466,7 @@ The pipeline supports granular flags to control execution components:
 ```bash
 30 7 * * * cd /path/to/myrium && /path/to/venv/bin/python3 scripts/run_reconciliation.py >> logs/reconciliation_cron_$(date +\%Y\%m\%d).log 2>&1
 ```
-- Re-fetches Furious and checks the Envoyé / Signé Google Sheets and, since 2026-09-24, the two Notion sales tables ("Devis à suivre", "Devis gagnés"); devis modified in Furious that day are checked the next day
+- Re-fetches Furious and checks the Envoyé / Signé Google Sheets and, since 2026-09-24, the Notion sales tables ("Devis à suivre", "Devis gagnés", "Devis perdus"); devis modified in Furious that day are checked the next day
 - E-mails taddeo.carpinelli@merciraymond.fr on drift or when a check cannot run; always writes `logs/reconciliation_YYYYMMDD.json` (`--skip-notion` for sheets only)
 
 **Weekly TRAVAUX Projection** (every Sunday at 11 PM):
@@ -472,7 +475,7 @@ The pipeline supports granular flags to control execution components:
 ```
 - Filters TRAVAUX proposals with probability ≥ 25% and `date` OR `projet_start` within rolling 365 days
 - Sends projection email to Mathilde with Guillaume and Vincent in CC
-- Syncs to Notion TRAVAUX projection database
+- Syncs to Notion TRAVAUX projection database (also daily at 06:15 with `--skip-emails`); only changed properties are written, "Pris en charge" never (§18.18)
 - **Step 6**: Fetches TRAVAUX projects created in last 7 days and syncs to "Récent projets travaux" Notion database
 
 ### 9.3 Dashboard Deployment
@@ -803,7 +806,7 @@ See original documentation for details on performance, security, error handling,
 
 **Tests**: `tests/test_notion_pris_en_charge_leftover.py` (5 tests) — current-run gets false, leftovers get true, skip when property not in schema (follow-up and TRAVAUX).
 
-**Superseded for the follow-up table on 2026-09-24 (§18.17)**: the follow-up sync no longer writes "Pris en charge" at all; the TRAVAUX projection keeps this behaviour.
+**Superseded on 2026-09-24**: the follow-up sync (§18.17) and the TRAVAUX projection sync (§18.18) no longer write "Pris en charge" at all.
 
 ### 18.9 Objectifs Signé: Production vs Signature (February 2026)
 
@@ -997,20 +1000,43 @@ See original documentation for details on performance, security, error handling,
 
 **Won table ("Devis gagnés")**
 - Window: devis dated on or after `won_devis_window_start()` = today minus `WON_DEVIS_LOOKBACK_DAYS` (default 365). The 243 existing rows gain 87 (from 2025-09-24 on), 330 rows and 5.65 M€ on 2026-09-24. Pages that leave the window stay in the table as history; only their "Statut Furious" keeps being corrected.
-- **Avenants year by year** (`add_previous_year_avenants`). The pipeline merges avenants for the current year only: a devis dated this year absorbs its avenants, and an avenant dated this year on an older devis becomes a row `<devis>_AV<id>`. For each earlier year Y of the window, the same two rules run on the avenants dated Y only, skipping avenants of a devis dated this year (already merged) and of an unknown devis (excluded owner, deleted). Every avenant is counted once and nothing depends on the day of the run. Without this, the Sep–Dec 2025 rows would miss 56 k€, and on 1 January 2027 every 2026 amount would have lost its avenants.
+- **Avenants year by year** (`add_previous_year_avenants`, replaced the same day by sub-items, §18.18). The pipeline merges avenants for the current year only: a devis dated this year absorbs its avenants, and an avenant dated this year on an older devis becomes a row `<devis>_AV<id>`. For each earlier year Y of the window, the same two rules run on the avenants dated Y only, skipping avenants of a devis dated this year (already merged) and of an unknown devis (excluded owner, deleted). Every avenant is counted once and nothing depends on the day of the run. Without this, the Sep–Dec 2025 rows would miss 56 k€, and on 1 January 2027 every 2026 amount would have lost its avenants.
 - Step 11 is **skipped** when the avenants cannot be fetched, so the table never shows wrong amounts for a day.
 - **Team columns** added to the database: Commentaire (text), Pris en charge (checkbox), Date archivage (date), Origine Transfo (select DV / Paysage / ENT / Travaux, same colours). The sync never writes them. Exception: when it *creates* a page, it copies Commentaire and Origine Transfo from the devis' "Devis à suivre" row (`load_followup_team_values`), so the note and the origin tag follow the devis. `run_won_devis_sync.py --copy-team-columns` does the same once for existing pages, filling only empty values. On 2026-09-24 no won devis of the window had such values.
 - `scripts/setup_won_devis_views.py --team-columns`: creates the missing columns and shows them in every table view, leaving filters, grouping, order, widths and hand-made views alone. Two API traps: the views API returns property ids decoded ("<DRB") while data sources return them URL-encoded ("%3CDRB"); `frozen_column_index: -1` is read back but refused on write, so it is omitted.
 
 **Check (`src/integrations/notion_sync_check.py`)**
 - "Shown" means: follow-up page with a waiting "Statut"; won page with a won "Statut Furious" and "Date gagné" inside the window. The check reports **missing** (Furious expects the devis, Notion does not show it), **extra** (Notion shows it, Furious no longer does), **mismatches** (amount, status or devis date differ) and **duplicates** (same ID Devis twice).
-- It runs as step 12 of the pipeline (log only) and in `scripts/run_reconciliation.py` at 07:30. The reconciliation e-mails on drift or when a check cannot run, and its JSON report gains a `notion` key. At 07:30, devis modified in Furious that day (`last_updated_at`) are skipped: the 06:00 sync could not know them, and they are checked the next day.
+- It runs as step 13 of the pipeline (step 12 until §18.18; log only) and in `scripts/run_reconciliation.py` at 07:30. The reconciliation e-mails on drift or when a check cannot run, and its JSON report gains a `notion` key. At 07:30, devis modified in Furious that day (`last_updated_at`) are skipped: the 06:00 sync could not know them, and they are checked the next day.
 - `src/integrations/furious_snapshot.py::build_processed_dataframe` builds steps 1 to 4.5 of the pipeline once for the standalone won sync and the reconciliation, so the check compares Notion with exactly the numbers the sync wrote.
 - Local note: `data/overrides.json` on a developer machine changes the amounts (e.g. 252889: 25 782.02 → 25 782.00 via a quarter override), so compare Notion with a VPS run, not a local one.
 
 **Status changes from Notion (studied, not built)**: in Furious the status *is* the pipe (0 En cours, 1 Perdu, 2 Gagnés et finis, 3 Gagnés en cours, 4 Envoyée(s) attente réponse, 5 Brief). A waiting devis accepts API updates (only won ones are locked). Marking a devis lost from Notion looks feasible: `pipe: 1` plus `lost_reason_id` or `new_lost_reason`. Marking it won through the API may skip what the Furious interface does at a win (project creation, re-dated devis), so it must be tried on a test devis first.
 
 **Tests**: `tests/test_notion_pris_en_charge_leftover.py` (follow-up rewritten: never writes Pris en charge, unchanged pages skipped, status matching, unknown status left out, relabel/orphans, duplicates; TRAVAUX tests unchanged), `tests/test_won_devis_sync.py` (+7: window, avenants counted once, team values copied at creation only, follow-up read, backfill, value helpers), `tests/test_notion_sync_check.py` (6), `tests/test_alerts_followup.py` (+1: no window vs e-mail window). Full suite: 284 passed.
+
+### 18.18 Avenants as sub-items, "Devis perdus", Prévisions Travaux without "Pris en charge", "this year" view (September 2026)
+
+**Avenants as sub-items ("Devis gagnés")**: every row now shows the numbers of one Furious document. A devis row carries the devis amount only (the pipeline's merged avenants are taken out: `amount - addon_amount`); each avenant is its own row `<devis>_AV<id>` (Type "Avenant") with its own amount and date, linked to its devis by the self relation "Devis parent" / "Avenants", which the table views display as sub-items (`subtasks` in the views API: `property_id` = "Devis parent", `display_mode: show`, `filter_scope: parents_and_subitems`). Summing a month gives devis + avenants signed that month, each once, whatever the day of the run. An avenant of the window whose devis is older keeps that devis as parent: the devis row is created with its own old date (`context=True`), so the yearly and 12-month views leave it out. `build_won_rows(df_processed, df_addons, start)` replaces `add_previous_year_avenants` + `select_won_devis`; parents come first so a run creates a parent before its avenants (`_create` now returns the page id). Avenants of a lost or unknown devis are ignored.
+- **Fake signatures removed**: Furious records no signature date on avenants (empty on all 99 on 2026-09-24), but the pipeline's injected avenant rows used the avenant date as a fallback (`signature_date or date`), so 11 avenant pages showed "✅ Signé" without any signature. They were cleared (list in the deployment notes); avenant rows now only get a real signature date.
+- New columns: "Type" (Devis / Avenant, shown), "Devis parent" / "Avenants" (hidden), "Gagné cette année" (formula, hidden).
+
+**"This year" view**: the views API has no "this year" date condition (only fixed dates, `past_year` = 365 days, `this_week`...). The formula `if(empty(prop("Date gagné")), false, year(prop("Date gagné")) == year(now()))` rolls over by itself on 1 January. New view "⏳ Gagnés, pas encore signés (cette année)" = the original filters + this formula; the original view is unchanged.
+
+**"❌ Devis perdus (synchro Furious)"** (db `031c74940ef84f24abc3beb590348fe6`, next to "Devis gagnés" under "Suivi Commercial (Devis)"), step 12, `src/integrations/notion_lost_devis_sync.py`:
+- Rows: status Perdu, devis date (re-stamped by Furious at the loss) in the same rolling window, no test devis, no "MAN-", no devis tagged "Devis en doublon" (a copy, not a lost sale: 27 over the 12 months).
+- Columns: Nom, ID Devis, Client, BU, Typologie, Montant HT, Motif de perte (multi-select, a devis can carry two reasons), Statut Furious, Date perdu, Créé le, Commercial, Chef de projet, Lien Furious, Commentaire and Origine Transfo (team-owned, copied from "Devis à suivre" at creation), Perdu cette année (formula).
+- Loss reasons come from Furious `lost_tags`, fetched apart for the lost devis only (`ProposalsClient.fetch_lost_tags`, filter `pipe: {eq: "1"}`, 891 devis), so the main fetch and the Google Sheets keep their columns.
+- Views (`scripts/setup_lost_devis_table.py`): 📋 Devis perdus (by month), 📅 Perdus cette année, 📊 Montant perdu par mois (stacked by BU), 📊 Motifs de perte (bars, count per reason). The default view Notion adds on creation is removed.
+- **People notifications**: Notion notifies every person added to a People property unless "notify" is off in that property's settings; the API cannot change that setting (`people: {}` accepts no option). Commercial / Chef de projet stay empty until `LOST_DEVIS_WRITE_PEOPLE=1`, to be set once the setting is off in Notion.
+
+**Prévisions Travaux ("Pipe travaux", `notion_travaux_sync.py`)**: every run (06:15 daily, Sunday 22:00) used to untick "Pris en charge" on each devis still in the projection and tick it on the others, so the box never kept what a person set. Now the sync never writes it; the sync-owned checkbox "Dans la projection" is ticked while the devis meets the projection criteria (waiting, probability ≥ 10 %, date or start within 365 days) and unticked when it leaves them, and only changed properties are written. `scripts/setup_travaux_views.py`: `--add-property`, then `--apply` adds "Dans la projection is checked" to the 7 views (refused while no page is ticked, so the views never go empty).
+
+**Tooling**: `src/integrations/notion_views.py` gathers the views API helpers and its traps (encoded vs decoded ids, `property_name` and `frozen_column_index: -1` refused on write, linked views listed by `data_source_id`, two nesting levels at most, no "this year"). The won and lost syncs never fall back to the MAINTENANCE database when their id is empty (the parent class did).
+
+**Status changes from Notion**: no waiting test devis exists in Furious (53 test devis: 42 lost, 11 won), so a test would reuse a lost test devis. Not run without an explicit OK.
+
+**Tests**: 295 passed (new `tests/test_lost_devis_sync.py`; sub-item, parent and signature tests in `tests/test_won_devis_sync.py`; TRAVAUX tests rewritten; avenant-parent and lost-table checks).
 
 ---
 
@@ -1027,7 +1053,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.43
+**Document Version**: 1.44
 **Last Updated**: September 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System

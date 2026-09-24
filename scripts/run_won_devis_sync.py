@@ -24,12 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from config.settings import settings
 from src.integrations.furious_snapshot import build_processed_dataframe
 from src.integrations.notion_sync_check import WON_TABLE, check_notion_tables
-from src.integrations.notion_won_devis_sync import (
-    NotionWonDevisSync,
-    add_previous_year_avenants,
-    select_won_devis,
-    won_devis_window_start,
-)
+from src.integrations.notion_won_devis_sync import NotionWonDevisSync, build_won_rows, won_devis_window_start
 
 
 def main() -> int:
@@ -48,12 +43,13 @@ def main() -> int:
         print("Avenants unavailable from Furious: refusing to sync (amounts would be wrong).")
         return 1
     start = won_devis_window_start()
-    won_source = add_previous_year_avenants(df_processed, df_addons, start)
-    items, status_by_id = select_won_devis(won_source, start)
-    total = sum(float(i.get("amount") or 0) for i in items)
-    avenants = [i for i in items if "_AV" in str(i.get("id"))]
-    print(f"Won devis since {start:%Y-%m-%d}: {len(items)} rows, {total:,.0f} EUR "
-          f"({len(items) - len(avenants)} devis + {len(avenants)} avenants on older devis)")
+    items, status_by_id = build_won_rows(df_processed, df_addons, start)
+    in_window = [i for i in items if not i.get("context")]
+    avenants = [i for i in in_window if i.get("row_type") == "Avenant"]
+    total = sum(float(i.get("amount") or 0) for i in in_window)
+    print(f"Won since {start:%Y-%m-%d}: {len(in_window)} rows, {total:,.0f} EUR "
+          f"({len(in_window) - len(avenants)} devis + {len(avenants)} avenants), plus "
+          f"{len(items) - len(in_window)} older devis kept as parents of recent avenants")
     if args.dry_run:
         return 0
 
@@ -64,7 +60,7 @@ def main() -> int:
         stats["errors"] += sync.backfill_team_values(team_values)["errors"]
 
     drift = False
-    for check in check_notion_tables(df_processed, won_source, start, tables=(WON_TABLE,)):
+    for check in check_notion_tables(df_processed, df_addons, start, tables=(WON_TABLE,)):
         print("\n".join(check.lines()))
         drift = drift or not check.ok
     return 1 if stats["errors"] or drift else 0

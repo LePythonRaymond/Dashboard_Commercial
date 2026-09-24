@@ -8,10 +8,12 @@ import pandas as pd
 
 from src.integrations.notion_sync_check import (
     FOLLOWUP_TABLE,
+    LOST_TABLE,
     WON_TABLE,
     TableCheck,
     build_checks_html,
     check_followup_table,
+    check_lost_table,
     check_notion_tables,
     check_won_table,
     recently_modified_ids,
@@ -32,13 +34,28 @@ def _followup_page(devis_id, status, amount=1000.0, date="2026-09-01", title=Non
     }}
 
 
-def _won_page(devis_id, status="Gagnés en cours", amount=1000.0, date="2026-09-01"):
-    return {"id": f"won-{devis_id}", "properties": {
+def _won_page(devis_id, status="Gagnés en cours", amount=1000.0, date="2026-09-01", parent_page=None):
+    page = {"id": f"won-{devis_id}", "properties": {
         "Nom": {"type": "title", "title": [_text(f"Devis {devis_id}")]},
         "ID Devis": {"type": "rich_text", "rich_text": [_text(devis_id)]},
         "Statut Furious": {"type": "select", "select": {"name": status}},
         "Montant HT": {"type": "number", "number": amount},
         "Date gagné": {"type": "date", "date": {"start": date}},
+    }}
+    if parent_page is not None:
+        page["properties"]["Devis parent"] = {"type": "relation", "relation": [{"id": parent_page}] if parent_page else [],
+                                              "has_more": False}
+    return page
+
+
+def _lost_page(devis_id, reasons=(), amount=1000.0, date="2026-09-01", status="Perdu"):
+    return {"id": f"lost-{devis_id}", "properties": {
+        "Nom": {"type": "title", "title": [_text(f"Devis {devis_id}")]},
+        "ID Devis": {"type": "rich_text", "rich_text": [_text(devis_id)]},
+        "Statut Furious": {"type": "select", "select": {"name": status}},
+        "Montant HT": {"type": "number", "number": amount},
+        "Date perdu": {"type": "date", "date": {"start": date}},
+        "Motif de perte": {"type": "multi_select", "multi_select": [{"name": r} for r in reasons]},
     }}
 
 
@@ -110,24 +127,66 @@ def test_won_table_checks_the_window_only():
     assert [(e["id"], e["furious"]) for e in check.extra] == [("13", "Perdu")]
 
 
-def test_check_notion_tables_never_raises(monkeypatch):
-    df = pd.DataFrame([_devis("1", "Brief"), _devis("2", "Gagnés en cours", date="2026-02-01")])
-    df["title"] = ["Devis 1", "Devis 2"]
+def test_won_check_verifies_the_devis_each_avenant_sits_under():
+    start = pd.Timestamp("2025-09-24")
+    items = [
+        _devis("20", "Gagnés en cours", amount=5000.0, date="2025-11-10"),
+        dict(_devis("7", "Gagnés en cours", amount=9000.0, date="2024-03-01"), context=True),  # old parent
+        dict(_devis("20_AV1", "Gagnés en cours", amount=300.0, date="2025-12-01"), parent_id="20"),
+        dict(_devis("7_AV2", "Gagnés en cours", amount=400.0, date="2026-01-05"), parent_id="7"),
+    ]
+    pages = [
+        _won_page("20", amount=5000.0, date="2025-11-10"),
+        _won_page("7", amount=9000.0, date="2024-03-01"),
+        _won_page("20_AV1", amount=300.0, date="2025-12-01", parent_page="won-20"),
+        _won_page("7_AV2", amount=400.0, date="2026-01-05", parent_page=""),   # not under its devis yet
+    ]
+
+    check = check_won_table(items, {}, pages, start)
+
+    assert (check.expected, check.shown) == (3, 3)   # the old parent exists but is not in the window
+    assert [(m["id"], m["field"], m["notion"], m["furious"]) for m in check.mismatches] == [
+        ("7_AV2", "Devis parent", None, "won7")]
+    assert not check.missing and not check.extra
+
+
+def test_lost_table_check_compares_reasons():
+    start = pd.Timestamp("2025-09-24")
+    items = [dict(_devis("30", "Perdu", date="2026-06-01"), lost_reasons=["Budget trop élevé", "Autre"]),
+             dict(_devis("31", "Perdu", date="2026-06-02"), lost_reasons=[])]
+    pages = [_lost_page("30", reasons=["Autre"], date="2026-06-01"),
+             _lost_page("32", reasons=[], date="2026-06-03")]            # reopened in Furious
+
+    check = check_lost_table(items, {"32": "Brief"}, pages, start)
+
+    assert [m["id"] for m in check.missing] == ["31"]
+    assert [(m["field"], m["notion"], m["furious"]) for m in check.mismatches] == [
+        ("Motif de perte", "Autre", "Autre, Budget trop élevé")]
+    assert [(e["id"], e["furious"]) for e in check.extra] == [("32", "Brief")]
+
+
+def test_check_notion_tables_never_raises():
+    df = pd.DataFrame([_devis("1", "Brief"), _devis("2", "Gagnés en cours", date="2026-02-01"),
+                       _devis("3", "Perdu", date="2026-03-01")])
+    df["title"] = ["Devis 1", "Devis 2", "Devis 3"]
 
     def broken_loader():
         raise RuntimeError("Notion is down")
 
-    checks = check_notion_tables(df, df, pd.Timestamp("2025-09-24"),
+    checks = check_notion_tables(df, pd.DataFrame(), pd.Timestamp("2025-09-24"), lost_tags={"3": "Autre"},
                                  followup_loader=broken_loader,
-                                 won_loader=lambda: [_won_page("2", date="2026-02-01", amount=1000.0)])
+                                 won_loader=lambda: [_won_page("2", date="2026-02-01", amount=1000.0)],
+                                 lost_loader=lambda: [_lost_page("3", reasons=["Autre"], date="2026-03-01")])
 
     by_table = {c.table: c for c in checks}
     assert by_table[FOLLOWUP_TABLE].error.startswith("RuntimeError: Notion is down")
-    assert by_table[WON_TABLE].ok
+    assert by_table[WON_TABLE].ok and by_table[LOST_TABLE].ok
 
-    unchecked = check_notion_tables(df, None, pd.Timestamp("2025-09-24"),
-                                    followup_loader=lambda: [], won_loader=lambda: [], tables=(WON_TABLE,))
-    assert [c.table for c in unchecked] == [WON_TABLE] and "avenants" in unchecked[0].error
+    unchecked = check_notion_tables(df, None, pd.Timestamp("2025-09-24"), lost_tags=None,
+                                    followup_loader=lambda: [], won_loader=lambda: [], lost_loader=lambda: [],
+                                    tables=(WON_TABLE, LOST_TABLE))
+    assert [c.table for c in unchecked] == [WON_TABLE, LOST_TABLE]
+    assert "avenants" in unchecked[0].error and "loss reasons" in unchecked[1].error
 
 
 def test_email_section_lists_problems_in_french():

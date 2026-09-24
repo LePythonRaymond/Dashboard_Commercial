@@ -7,9 +7,9 @@ of devis that *should* be in the Envoyé / Signé views against what actually la
 the Google Sheets the dashboard reads. On drift it emails a digest (warn-only — it
 never changes the pipeline's exit behaviour) and always writes a JSON report.
 
-It also checks the two Notion sales tables ("Devis à suivre", "Devis gagnés")
-against Furious (src/integrations/notion_sync_check.py). Devis modified in
-Furious today are skipped: the 06:00 sync may predate the change.
+It also checks the Notion sales tables ("Devis à suivre", "Devis gagnés",
+"Devis perdus") against Furious (src/integrations/notion_sync_check.py). Devis
+modified in Furious today are skipped: the 06:00 sync may predate the change.
 
 Designed to be scheduled a few minutes after scripts/run_pipeline.py so it checks the
 freshly-written sheets. See src/processing/reconciliation.py for the logic + rationale.
@@ -41,7 +41,8 @@ from src.integrations.email_sender import EmailSender
 from src.integrations.pending_ids_store import get_store_path, write_pending_ids
 from src.integrations.furious_snapshot import build_processed_dataframe
 from src.integrations.notion_sync_check import TableCheck, build_checks_html, check_notion_tables, recently_modified_ids
-from src.integrations.notion_won_devis_sync import add_previous_year_avenants, won_devis_window_start
+from src.integrations.notion_won_devis_sync import won_devis_window_start
+from src.api.proposals import ProposalsAPIError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -92,10 +93,13 @@ def main() -> int:
     if not args.skip_notion:
         try:
             df_processed, df_addons = build_processed_dataframe(PROJECT_ROOT, auth=auth, df_raw=df_raw)
-            won_start = won_devis_window_start()
-            won_source = (add_previous_year_avenants(df_processed, df_addons, won_start)
-                          if df_addons is not None else None)
-            notion_checks = check_notion_tables(df_processed, won_source, won_start,
+            try:
+                lost_tags = ProposalsClient(auth=auth).fetch_lost_tags()
+            except ProposalsAPIError as exc:
+                logger.warning("Loss reasons unavailable from Furious: %s", exc)
+                lost_tags = None
+            notion_checks = check_notion_tables(df_processed, df_addons, won_devis_window_start(),
+                                                lost_tags=lost_tags,
                                                 skip_ids=recently_modified_ids(df_processed))
         except Exception as exc:
             notion_checks = [TableCheck("Notion", error=f"{type(exc).__name__}: {exc}"[:300])]

@@ -188,6 +188,43 @@ class ProposalsClient:
             df = df.loc[~duplicated].reset_index(drop=True)
         return df
 
+    def fetch_lost_tags(self) -> Dict[str, str]:
+        """Loss reasons of every lost devis (pipe 1), by devis id.
+
+        Furious keeps them in "lost_tags", comma separated (a devis can carry two).
+        They are fetched apart, for the lost devis only, so that the main fetch and
+        the Google Sheets built from it keep their columns.
+        """
+        tags: Dict[str, str] = {}
+        offset = 0
+        while True:
+            query = f"""{{
+  Proposal(
+    limit: {self.page_limit},
+    offset: {offset},
+    order: [{{date:desc}},{{id:desc}}],
+    filter: {{pipe: {{eq: "1"}}}}
+  ){{
+    id, lost_tags
+  }}
+}}"""
+            url = f"{self.endpoint}?query={requests.utils.quote(query)}"
+            try:
+                response = requests.get(url, headers=self.auth.get_headers(), timeout=settings.api_timeout)
+                response.raise_for_status()
+                payload = response.json()
+            except requests.RequestException as e:
+                raise ProposalsAPIError(f"Failed to fetch lost reasons at offset {offset}: {e}")
+            if not payload.get("success", False):
+                raise ProposalsAPIError(f"API returned error: {payload.get('errors', payload.get('message'))}")
+            rows = payload.get("data", {}).get("Proposal", []) or []
+            for row in rows:
+                value = row.get("lost_tags")
+                tags[str(row.get("id", "")).strip()] = value if isinstance(value, str) else ""
+            if len(rows) < self.page_limit:
+                return tags
+            offset += self.page_limit
+
     def fetch_filtered(
         self,
         filters: Optional[Dict[str, Any]] = None,

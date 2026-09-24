@@ -33,18 +33,23 @@ A devis is created or refreshed while its devis date is inside the window
 (today minus WON_DEVIS_LOOKBACK_DAYS). A page whose date leaves the window
 stays in Notion as history; only its "Statut Furious" keeps being corrected.
 
-Avenants
---------
-The daily pipeline merges avenants for the current year only (step 2b): a devis
-dated this year absorbs its avenants, and an avenant dated this year on an older
-devis becomes its own row "<devis>_AV<id>". The window reaches into the previous
-year, so add_previous_year_avenants() applies the same two rules to each earlier
-year of the window, with one restriction that counts every avenant exactly once:
-a devis only absorbs the avenants dated in its own year. An avenant dated in a
-later year is already its own row. Example: devis 251000 of 10/11/2025 with an
-avenant of 5 000 EUR on 02/12/2025 and one of 3 000 EUR on 15/02/2026 gives the
-row 251000 (base + 5 000) and the row 251000_AV.. (3 000, dated 15/02/2026).
-Nothing depends on the day the sync runs, so amounts do not jump on 1 January.
+Avenants: sub-items with their own numbers
+------------------------------------------
+Every row shows the numbers of one Furious document. A devis row carries the
+devis amount only; each avenant is its own row "<devis>_AV<id>" (Type
+"Avenant"), with its own amount and date, placed under its devis through the
+"Devis parent" relation, which the table views display as sub-items. Adding the
+rows of a month therefore gives devis + avenants signed that month, each counted
+once, and nothing depends on the day the sync runs.
+
+Example: devis 251000 of 10/11/2025 (10 000 EUR) with an avenant of 5 000 EUR on
+02/12/2025 gives the row 251000 (10 000 EUR, Nov 2025) and, under it, the row
+251000_AV7 (5 000 EUR, Dec 2025). An avenant dated inside the window whose devis
+is older than the window still gets its devis as parent: that devis row is kept
+with its own old date, so the yearly and 12-month views leave it out.
+
+Furious records no signature date on avenants (checked on 2026-09-24: empty on
+all 99), so an avenant row gets a "Date signature" only when someone types it.
 
 Example: devis 263464 is won on 16/09. The sync creates its page with
 Date gagné = 16/09 and an empty Date signature, so the formula shows
@@ -60,7 +65,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import pandas as pd
 
 from config.settings import settings, STATUS_WON
-from src.api.proposal_addons import merge_addons_into_proposals
 from src.processing.cleaner import DataCleaner
 from .notion_maintenance_won_sync import NotionMaintenanceWonSync
 from .notion_values import page_value, value_from_page as _value_from_page, value_from_payload as _value_from_payload
@@ -69,6 +73,8 @@ TITLE_PROP = "Nom"
 ID_PROP = "ID Devis"
 STATUS_PROP = "Statut Furious"
 SIGNATURE_PROP = "Date signature"
+TYPE_PROP = "Type"            # "Devis" or "Avenant"
+PARENT_PROP = "Devis parent"  # relation of an avenant row to its devis row (sub-items)
 KNOWN_BUS = ("CONCEPTION", "TRAVAUX", "MAINTENANCE")
 
 # Columns owned by the team, identical in "Devis à suivre" and "Devis gagnés".
@@ -108,74 +114,92 @@ def furious_status_by_id(df: pd.DataFrame) -> Dict[str, str]:
     return dict(zip(ids, raw_status.astype(str)))
 
 
-def add_previous_year_avenants(
-    df: pd.DataFrame,
-    df_addons: Optional[pd.DataFrame],
-    start_date: Any,
-    today: Optional[datetime] = None,
-) -> pd.DataFrame:
-    """Apply the avenant rules of the pipeline to the years of the window before this one.
+def _real_won_devis(df: pd.DataFrame) -> pd.DataFrame:
+    """Won devis of Furious with their own amount, one row per devis.
 
-    df is df_processed (avenants already applied for the current year). For each
-    earlier year Y of the window, the avenants dated Y are merged with
-    merge_addons_into_proposals(target_year=Y): devis dated Y absorb them, older
-    devis get "<devis>_AV<id>" rows, which are then cleaned like any Furious row.
-    Only avenants dated Y are given to the pass for Y, so a devis never absorbs
-    an avenant of a later year (that one is already a row of its own year).
-
-    Two kinds of avenants are left out: those of a devis dated this year (the
-    pipeline already added all of them to that devis, whatever their date) and
-    those whose devis is not in df (devis of an excluded owner, or deleted).
-
-    The returned frame feeds the won table only; df is not modified.
+    Left out: the avenant rows the pipeline injects ("<devis>_AV<id>", rebuilt here
+    from the avenants themselves), dashboard-only "MAN-" projects and test devis.
+    The pipeline adds this year's avenants to the amount of their devis
+    (addon_amount); they are taken out again, since each avenant gets its own row.
     """
-    if df is None or df.empty or df_addons is None or df_addons.empty:
-        return df
-    this_year = pd.Timestamp(today or datetime.now()).year
-    devis_dates = pd.Series(pd.to_datetime(df["date"], errors="coerce").values,
-                            index=df["id"].astype(str).str.strip())
-    devis_dates = devis_dates[~devis_dates.index.duplicated()]
-    parent_ids = df_addons["id"].astype(str).str.strip()
-    parent_years = pd.to_datetime(parent_ids.map(devis_dates), errors="coerce").dt.year
-    eligible = parent_ids.isin(devis_dates.index) & (parent_years != this_year)
-    addon_years = pd.to_datetime(df_addons["date"], errors="coerce").dt.year
-    out = df
-    for year in range(pd.Timestamp(start_date).year, this_year):
-        addons = df_addons[eligible & (addon_years == year)]
-        if addons.empty:
-            continue
-        kept = len(out)
-        merged, _ = merge_addons_into_proposals(out, addons, target_year=year)
-        injected = merged.iloc[kept:]
-        if not injected.empty:
-            injected = DataCleaner().clean(injected.reset_index(drop=True))
-        out = pd.concat([merged.iloc[:kept], injected], ignore_index=True)
-    for col in DataCleaner.DATE_COLS:
-        if col in out.columns:
-            out[col] = pd.to_datetime(out[col], errors="coerce")
-    return out
-
-
-def select_won_devis(df: pd.DataFrame, start_date: Any) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
-    """Pick the devis to sync, and record the current Furious status of every devis.
-
-    A devis is synced when its status is a won status, its devis date is on or
-    after start_date, it is a real Furious devis (dashboard-only "MAN-" projects
-    are excluded, like in the MAINTENANCE sync) and it is not a test record.
-
-    status_by_id covers every row, so the sync can relabel a Notion page whose
-    devis left the won statuses (for example won by mistake, then set back).
-    """
-    if df is None or df.empty:
-        return [], {}
-    ids = df["id"].astype(str)
-    mask = (
+    ids = df["id"].astype(str).str.strip()
+    keep = (
         df["statut_clean"].isin(STATUS_WON)
-        & (pd.to_datetime(df["date"], errors="coerce") >= pd.Timestamp(start_date))
+        & ~ids.str.contains("_AV", regex=False)
         & ~ids.str.startswith("MAN-")
         & ~df["title"].apply(is_test_devis)
     )
-    return df.loc[mask].to_dict("records"), furious_status_by_id(df)
+    devis = df.loc[keep].copy()
+    devis["id"] = ids[keep]
+    merged = (pd.to_numeric(devis["addon_amount"], errors="coerce").fillna(0)
+              if "addon_amount" in devis.columns else 0.0)
+    devis["amount"] = pd.to_numeric(devis["amount"], errors="coerce").fillna(0) - merged
+    devis["row_type"] = "Devis"
+    return devis
+
+
+def _avenant_row(addon: Dict[str, Any], parent: Dict[str, Any], date: pd.Timestamp) -> Dict[str, Any]:
+    """One avenant as a row of its own, attached to its (won) devis."""
+    title = f"[Avenant] {_clean_text(addon.get('title')) or parent['id']}"
+    cf_bu = _clean_text(addon.get("cf_bu")) or _clean_text(parent.get("cf_bu"))
+    signature = pd.to_datetime(addon.get("signature_date"), errors="coerce")
+    return {
+        "id": f"{parent['id']}_AV{addon.get('id_system', '')}",
+        "title": title,
+        "date": date,
+        "amount": _to_number(addon.get("amount")) or 0.0,
+        "statut": parent.get("statut"),
+        "statut_clean": parent.get("statut_clean"),
+        "company_name": parent.get("company_name"),
+        "assigned_to": parent.get("assigned_to"),
+        "cf_typologie_de_devis": _clean_text(addon.get("cf_typologie_de_devis")) or parent.get("cf_typologie_de_devis"),
+        "final_bu": DataCleaner.assign_bu({"title": title, "cf_bu": cf_bu}),
+        "projet_start": parent.get("projet_start"),
+        "projet_stop": parent.get("projet_stop"),
+        "signature_date": signature,  # a real signature only, never the avenant date
+        "row_type": "Avenant",
+        "parent_id": parent["id"],
+    }
+
+
+def build_won_rows(
+    df: pd.DataFrame,
+    df_addons: Optional[pd.DataFrame],
+    start_date: Any,
+) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+    """Rows of the "Devis gagnés" table, and the current Furious status of every devis.
+
+    - a devis row for each won devis dated on or after start_date, with its own amount;
+    - an avenant row for each avenant dated on or after start_date whose devis is won,
+      with its own amount and date, and parent_id = its devis;
+    - a devis row, marked context=True, for the devis of such an avenant when that
+      devis is older than start_date, so the avenant always has its parent.
+    Devis rows come first, so a run creates a parent before its avenants.
+    status_by_id covers every row of df, for the relabelling of pages that left the
+    won statuses.
+    """
+    if df is None or df.empty:
+        return [], {}
+    status_by_id = furious_status_by_id(df)
+    start = pd.Timestamp(start_date)
+    devis = _real_won_devis(df)
+    records = devis.to_dict("records")
+    by_id = {row["id"]: row for row in records}
+    rows = [row for row in records if pd.notna(pd.to_datetime(row.get("date"), errors="coerce"))
+            and pd.to_datetime(row.get("date")) >= start]
+    listed = {row["id"] for row in rows}
+    avenants: List[Dict[str, Any]] = []
+    if df_addons is not None and not df_addons.empty:
+        for addon in df_addons.to_dict("records"):
+            parent = by_id.get(str(addon.get("id", "")).strip())
+            date = pd.to_datetime(addon.get("date"), errors="coerce")
+            if parent is None or pd.isna(date) or date < start:
+                continue
+            avenants.append(_avenant_row(addon, parent, date))
+            if parent["id"] not in listed:
+                rows.append(dict(parent, context=True))
+                listed.add(parent["id"])
+    return rows + avenants, status_by_id
 
 
 def team_values_from_pages(pages: List[Dict[str, Any]], extract_id: Callable[[Dict[str, Any]], str]) -> Dict[str, Dict[str, Any]]:
@@ -232,6 +256,8 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
     """
 
     RETRYABLE_STATUS = {409, 429, 500, 502, 503, 504}
+    # Settings attribute holding the database id of this sync.
+    DATABASE_SETTING = "notion_won_devis_database_id"
 
     def __init__(
         self,
@@ -241,11 +267,10 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
         sleep: Callable[[float], None] = time.sleep,
         max_attempts: int = 5,
     ):
-        super().__init__(
-            api_key=api_key,
-            database_id=database_id or settings.notion_won_devis_database_id,
-            user_mapper=user_mapper,
-        )
+        super().__init__(api_key=api_key, database_id=database_id, user_mapper=user_mapper)
+        # The parent class falls back to the MAINTENANCE database when no id is
+        # given; this sync must never write there, so an empty id stays empty.
+        self.database_id = self._format_database_id(database_id or getattr(settings, self.DATABASE_SETTING))
         self._sleep = sleep
         self._max_attempts = max_attempts
 
@@ -262,13 +287,15 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
         return list(dict.fromkeys(n for n in names if _clean_text(n)))
 
     def _build_page_properties(self, item: Dict[str, Any], schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Furious-owned properties for one devis. Date signature and the team columns are not built here."""
+        """Furious-owned properties for one row. Date signature, Devis parent and the team columns are not built here."""
         schema = schema or {}
         allow = schema.__contains__
         devis_id = str(item.get("id", "")).strip()
         props: Dict[str, Any] = {}
         if allow(TITLE_PROP):
             props[TITLE_PROP] = {"title": [{"text": {"content": (_clean_text(item.get("title")) or "Sans titre")[:200]}}]}
+        if allow(TYPE_PROP):
+            props[TYPE_PROP] = {"select": {"name": item.get("row_type") or "Devis"}}
         if allow(ID_PROP) and devis_id:
             props[ID_PROP] = {"rich_text": [{"text": {"content": devis_id}}]}
         if allow("Client"):
@@ -311,18 +338,19 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
                 self._sleep(delay)
                 delay *= 2
 
-    def _create(self, properties: Dict[str, Any]) -> bool:
+    def _create(self, properties: Dict[str, Any]) -> Optional[str]:
+        """Create one page; return its id, or None when Notion refused it."""
         try:
             ds_id = self._get_data_source_id_for_database()
             parent: Dict[str, Any] = {"data_source_id": ds_id}
         except Exception:
             parent = {"database_id": self.database_id}
         try:
-            self._with_retry(lambda: self.client.pages.create(parent=parent, properties=properties))
-            return True
+            page = self._with_retry(lambda: self.client.pages.create(parent=parent, properties=properties))
+            return (page or {}).get("id") or ""
         except Exception as exc:
             print(f"    Warning: could not create page for devis: {exc}")
-            return False
+            return None
 
     def _update(self, page_id: str, properties: Dict[str, Any]) -> bool:
         try:
@@ -390,6 +418,8 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
     ) -> Dict[str, int]:
         """Upsert the won devis and return counters for the pipeline log.
 
+        items come from build_won_rows: devis rows first, then avenant rows, each
+        avenant linked to its devis page through "Devis parent" (sub-items).
         team_values (from load_followup_team_values) is only used for pages created
         by this run; existing pages keep whatever the team typed.
 
@@ -398,11 +428,13 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
         devis is no longer in Furious, left untouched), signatures_from_furious,
         signed_in_notion (pages carrying a Date signature), duplicates_in_notion,
         team_values_copied (new pages that received the Commentaire or Origine
-        Transfo of their "Devis à suivre" row).
+        Transfo of their "Devis à suivre" row), parent_missing (avenant whose devis
+        page could not be found or created, left without parent).
         """
         stats = {key: 0 for key in (
             "created", "updated", "unchanged", "errors", "relabelled", "orphans",
             "signatures_from_furious", "signed_in_notion", "duplicates_in_notion", "team_values_copied",
+            "parent_missing",
         )}
         stats["items"] = len(items)
         if not self.database_id:
@@ -420,6 +452,7 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
         stats["signed_in_notion"] = sum(1 for page in existing.values() if page_signature_date(page))
         print(f"    {len(existing)} page(s) already in Notion, {stats['signed_in_notion']} with a Date signature.")
 
+        page_ids = {devis_id: page["id"] for devis_id, page in existing.items()}
         seen = set()
         for item in items:
             devis_id = str(item.get("id", "")).strip()
@@ -427,6 +460,12 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
                 continue
             seen.add(devis_id)
             props = self._build_page_properties(item, schema=schema)
+            parent_id = str(item.get("parent_id") or "").strip()
+            if parent_id and PARENT_PROP in schema:
+                if page_ids.get(parent_id):
+                    props[PARENT_PROP] = {"relation": [{"id": page_ids[parent_id]}]}
+                else:
+                    stats["parent_missing"] += 1
             furious_signature = self._format_date(item.get("signature_date"))
             page = existing.get(devis_id)
 
@@ -437,9 +476,14 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
                 copied = {name: value for name, value in (team_values or {}).get(devis_id, {}).items()
                           if name in COPIED_FROM_FOLLOWUP and name in schema}
                 props.update(copied)
-                ok = self._create(props)
-                stats["created" if ok else "errors"] += 1
-                stats["team_values_copied"] += int(ok and bool(copied))
+                new_page_id = self._create(props)
+                if new_page_id is None:
+                    stats["errors"] += 1
+                    continue
+                stats["created"] += 1
+                stats["team_values_copied"] += int(bool(copied))
+                if new_page_id:
+                    page_ids[devis_id] = new_page_id
                 continue
 
             props.pop(TITLE_PROP, None)  # keep renames made in Notion
@@ -468,7 +512,8 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
 
         print(
             "    Done: {created} created, {updated} updated, {unchanged} unchanged, {relabelled} relabelled, "
-            "{orphans} orphan(s), {team_values_copied} with team columns copied, {errors} error(s).".format(**stats)
+            "{orphans} orphan(s), {team_values_copied} with team columns copied, {parent_missing} avenant(s) "
+            "without parent, {errors} error(s).".format(**stats)
         )
         return stats
 

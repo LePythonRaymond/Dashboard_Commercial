@@ -11,10 +11,9 @@ import pytest
 from src.integrations.notion_values import value_from_page, value_from_payload
 from src.integrations.notion_won_devis_sync import (
     NotionWonDevisSync,
-    add_previous_year_avenants,
+    build_won_rows,
     is_test_devis,
     page_signature_date,
-    select_won_devis,
     won_devis_window_start,
 )
 
@@ -25,6 +24,8 @@ SCHEMA = {name: {"type": kind} for name, kind in {
     "Début projet": "date", "Fin projet": "date", "Lien Furious": "url",
     # team columns, owned by people
     "Commentaire": "rich_text", "Pris en charge": "checkbox", "Date archivage": "date", "Origine Transfo": "select",
+    # sub-items: an avenant row points to its devis row
+    "Type": "select", "Devis parent": "relation", "Avenants": "relation",
 }.items()}
 
 
@@ -122,6 +123,8 @@ def _as_page(page_id, payload):
             props[name] = {"type": "people", "people": [{"object": "user", "id": p["id"]} for p in value["people"]]}
         elif "checkbox" in value:
             props[name] = {"type": "checkbox", "checkbox": value["checkbox"]}
+        elif "relation" in value:
+            props[name] = {"type": "relation", "relation": [{"id": r["id"]} for r in value["relation"]], "has_more": False}
     return {"id": page_id, "properties": props}
 
 
@@ -135,7 +138,7 @@ def test_is_test_devis():
     assert not is_test_devis(None)
 
 
-def test_select_won_devis_keeps_real_won_devis_since_start_date():
+def test_build_won_rows_keeps_real_won_devis_since_start_date():
     df = pd.DataFrame([
         _item(id="1"),
         _item(id="2", statut="Gagnés et finis", statut_clean="gagnés et finis"),
@@ -144,8 +147,8 @@ def test_select_won_devis_keeps_real_won_devis_since_start_date():
         _item(id="MAN-2026-0001"),
         _item(id="6", title="TEST - NOUVEAU PROJET"),
     ])
-    items, status_by_id = select_won_devis(df, "2026-01-01")
-    assert [i["id"] for i in items] == ["1", "2"]
+    items, status_by_id = build_won_rows(df, None, "2026-01-01")
+    assert [i["id"] for i in items] == ["1", "2"] and {i["row_type"] for i in items} == {"Devis"}
     assert status_by_id["4"] == "Perdu" and set(status_by_id) == {"1", "2", "3", "4", "MAN-2026-0001", "6"}
 
 
@@ -271,41 +274,96 @@ def _addon(parent_id, id_system, date, amount):
             "cf_typologie_de_devis": None, "cf_typologie_myrium": None, "cf_bu": None}
 
 
-def test_previous_year_avenants_are_counted_once():
-    """Window 24/09/2025 to 24/09/2026. The pipeline already applied the 2026 rules."""
+def test_devis_and_avenants_become_separate_rows_with_their_own_numbers():
+    """Window 24/09/2025 to 24/09/2026; df_processed already holds the 2026 avenant rules of the pipeline."""
     df = pd.DataFrame([
-        _processed_row("251000", "2025-11-10", 10000),              # 2025 devis in the window
-        _processed_row("240500", "2024-03-01", 20000),              # older devis
-        _processed_row("260100", "2026-02-01", 30000),              # 2026 devis, avenants already merged
-        _processed_row("251000_AV9", "2026-02-15", 3000,            # 2026 avenant row made by the pipeline
-                       title="[Avenant] Avenant 9"),
+        _processed_row("251000", "2025-11-10", 10000),                      # devis in the window
+        _processed_row("240500", "2024-03-01", 20000),                      # old devis, avenant in the window
+        _processed_row("260100", "2026-02-01", 30999, addon_amount=999.0),  # pipeline added its avenant
+        _processed_row("251000_AV9", "2026-02-15", 3000, title="[Avenant] Avenant 9"),  # pipeline row, ignored
+        _processed_row("250777", "2025-10-01", 8000, statut="Perdu", statut_clean="perdu"),
     ])
     addons = pd.DataFrame([
-        _addon("251000", 7, "2025-12-02", 5000),   # same year as its devis: absorbed by 251000
-        _addon("251000", 9, "2026-02-15", 3000),   # 2026: already its own row, must not be added again
-        _addon("240500", 8, "2025-10-05", 2000),   # 2025 avenant on a 2024 devis: its own row
-        _addon("240500", 12, "2025-03-01", 100),   # its own row too, but dated before the window
-        _addon("260100", 10, "2025-12-20", 999),   # devis dated this year: the pipeline took it
+        _addon("251000", 7, "2025-12-02", 5000),
+        _addon("251000", 9, "2026-02-15", 3000),
+        _addon("240500", 8, "2025-10-05", 2000),
+        _addon("240500", 12, "2025-03-01", 100),   # before the window: no row
+        _addon("260100", 10, "2026-03-01", 999),
+        _addon("250777", 13, "2025-11-01", 400),   # devis lost: not won revenue
         _addon("999999", 11, "2025-11-11", 777),   # unknown devis (excluded owner or deleted)
     ])
 
-    source = add_previous_year_avenants(df, addons, "2025-09-24", today=datetime(2026, 9, 24))
-    items, status_by_id = select_won_devis(source, "2025-09-24")
-    amounts = {i["id"]: i["amount"] for i in items}
+    items, _ = build_won_rows(df, addons, "2025-09-24")
+    rows = {i["id"]: i for i in items}
 
-    assert amounts == {"251000": 15000.0, "260100": 30000.0, "251000_AV9": 3000.0, "240500_AV8": 2000.0}
-    injected = next(i for i in items if i["id"] == "240500_AV8")
-    assert injected["date"] == pd.Timestamp("2025-10-05") and injected["statut_clean"] == "gagnés en cours"
-    assert injected["title"].startswith("[Avenant]") and injected["final_bu"] == "CONCEPTION"
-    assert status_by_id["240500_AV12"] == "Gagnés en cours"   # known, so never counted as an orphan
-    assert df.loc[df["id"] == "251000", "amount"].item() == 10000  # input left untouched
+    assert {k: (v["row_type"], v["amount"]) for k, v in rows.items()} == {
+        "251000": ("Devis", 10000.0), "260100": ("Devis", 30000.0), "240500": ("Devis", 20000.0),
+        "251000_AV7": ("Avenant", 5000.0), "251000_AV9": ("Avenant", 3000.0),
+        "240500_AV8": ("Avenant", 2000.0), "260100_AV10": ("Avenant", 999.0),
+    }
+    assert rows["240500"].get("context") is True and not rows["251000"].get("context")
+    assert rows["240500_AV8"]["parent_id"] == "240500" and rows["240500_AV8"]["date"] == pd.Timestamp("2025-10-05")
+    assert rows["251000_AV7"]["statut"] == "Gagnés en cours" and rows["251000_AV7"]["final_bu"] == "CONCEPTION"
+    assert pd.isna(rows["251000_AV7"]["signature_date"])   # never the avenant date
+    assert [i["row_type"] for i in items].index("Avenant") == 3   # parents before avenants
 
 
-def test_previous_year_pass_is_a_no_op_inside_one_year_or_without_avenants():
-    df = pd.DataFrame([_processed_row("260100", "2026-02-01", 30000)])
-    addons = pd.DataFrame([_addon("260100", 10, "2026-03-01", 999)])
-    assert add_previous_year_avenants(df, addons, "2026-01-01", today=datetime(2026, 9, 24)) is df
-    assert add_previous_year_avenants(df, None, "2025-09-24", today=datetime(2026, 9, 24)) is df
+def _page_with_id(page_id, item):
+    sync = _sync(FakeClient())
+    return _as_page(page_id, sync._build_page_properties(item, schema=SCHEMA))
+
+
+def test_avenant_is_created_under_its_parent():
+    parent = _item(id="251000", row_type="Devis")
+    avenant = _item(id="251000_AV7", title="[Avenant] Extension", amount=5000.0, row_type="Avenant", parent_id="251000")
+    client = FakeClient()
+
+    stats = _sync(client).sync_won_devis([parent, avenant], {})
+
+    assert stats["created"] == 2 and stats["parent_missing"] == 0
+    created_parent, created_avenant = (c["properties"] for c in client.created)
+    assert created_parent["Type"] == {"select": {"name": "Devis"}} and "Devis parent" not in created_parent
+    assert created_avenant["Type"] == {"select": {"name": "Avenant"}}
+    assert created_avenant["Devis parent"] == {"relation": [{"id": "new-1"}]}
+
+
+def test_existing_avenant_is_moved_under_its_parent_once():
+    parent = _item(id="252445", row_type="Devis")
+    avenant = _item(id="252445_AV77", title="[Avenant] Extension", row_type="Avenant", parent_id="252445")
+    old_avenant_page = _page_with_id("page-av", dict(avenant, row_type=None))   # before sub-items: no parent
+    client = FakeClient(pages=[_page_with_id("page-parent", parent), old_avenant_page])
+
+    stats = _sync(client).sync_won_devis([parent, avenant], {})
+
+    assert stats["updated"] == 1 and stats["unchanged"] == 1
+    assert client.updated == [{"page_id": "page-av", "properties": {
+        "Type": {"select": {"name": "Avenant"}}, "Devis parent": {"relation": [{"id": "page-parent"}]}}}]
+
+    linked = _as_page("page-av", {**client.updated[0]["properties"],
+                                  **_sync(FakeClient())._build_page_properties(avenant, schema=SCHEMA)})
+    client2 = FakeClient(pages=[_page_with_id("page-parent", parent), linked])
+    assert _sync(client2).sync_won_devis([parent, avenant], {})["unchanged"] == 2 and client2.updated == []
+
+
+def test_avenant_whose_parent_cannot_be_created_is_counted():
+    class RefusingClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            create = self.pages.create
+
+            def refuse_parent(parent, properties):
+                if properties["ID Devis"]["rich_text"][0]["text"]["content"] == "251000":
+                    raise FakeAPIError(400)
+                return create(parent, properties)
+            self.pages.create = refuse_parent
+
+    client = RefusingClient()
+    stats = _sync(client).sync_won_devis(
+        [_item(id="251000", row_type="Devis"),
+         _item(id="251000_AV7", row_type="Avenant", parent_id="251000")], {})
+
+    assert stats["errors"] == 1 and stats["created"] == 1 and stats["parent_missing"] == 1
+    assert "Devis parent" not in client.created[0]["properties"]
 
 
 def test_team_values_are_copied_only_when_a_page_is_created():
