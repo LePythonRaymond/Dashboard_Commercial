@@ -58,9 +58,16 @@ from src.integrations.notion_views import (
 def ensure_properties(label: str, data_source_id: str, props: Dict[str, Any], apply: bool) -> Dict[str, Any]:
     changes: Dict[str, Any] = {}
     legacy = next((name for name in LEGACY_SCOPE_NAMES if name in props), None)
-    if SCOPE_PROP not in props:
-        changes[legacy or SCOPE_PROP] = ({"name": SCOPE_PROP, "description": SCOPE_DESCRIPTION} if legacy
-                                         else {"checkbox": {}, "description": SCOPE_DESCRIPTION})
+    if SCOPE_PROP not in props and legacy:
+        # A rename must travel alone: the API refuses it together with other settings.
+        print(f"{label}: {'renaming' if apply else 'would rename'} \"{legacy}\" to \"{SCOPE_PROP}\"")
+        if apply:
+            props = notion_call("PATCH", f"data_sources/{data_source_id}",
+                                {"properties": {legacy: {"name": SCOPE_PROP}}})["properties"]
+            notion_call("PATCH", f"data_sources/{data_source_id}",
+                        {"properties": {SCOPE_PROP: {"checkbox": {}, "description": SCOPE_DESCRIPTION}}})
+    if SCOPE_PROP not in props and not (legacy and not apply):
+        changes[SCOPE_PROP] = {"checkbox": {}, "description": SCOPE_DESCRIPTION}
     if AUTO_PROP not in props:
         changes[AUTO_PROP] = {"checkbox": {}, "description": AUTO_DESCRIPTION}
     if ARCHIVED_PROP not in props:
