@@ -1066,6 +1066,10 @@ See original documentation for details on performance, security, error handling,
 - Marking lost with `lost_reason_id` (e.g. 20 = Autre) works, but the devis date is not re-stamped as in the interface: a loss made through the API would keep its old date in "Devis perdus".
 - The test devis ended lost, with reason "Autre" and its BU / typologies filled; no project was created.
 
+**Recap for the team**: `docs/Regles_tables_Notion.pdf` (2 pages, French: the rule, the life of a row, the scope of each table, who fills which column, what to check when a devis does not show), built by `scripts/build_notion_rules_pdf.py` (needs reportlab, not a pipeline dependency). Rebuild it whenever one of these rules changes.
+
+**Rollout on 2026-09-24**: properties created in the 5 tables, 23 views checked (16 updated, 7 already right, quick filters kept); first scoped run: 41 fixed pages archived in "Devis à normaliser", flags set everywhere, checks 314/314, 376/376, 170/170; archive job dry run: nothing due before March 2027; cron added (1st of the month, 05:00).
+
 **People notifications**: turned off by the user on the People properties of "Devis perdus"; `LOST_DEVIS_WRITE_PEOPLE=1` set on the VPS and the salespeople filled.
 
 **Tests**: 308 passed (new `tests/test_notion_scope.py`; leftover, TRAVAUX, won and lost tests rewritten for the rule).
