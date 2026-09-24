@@ -1,20 +1,22 @@
 """
 Check that the two sales tables in Notion match Furious.
 
-"Devis à suivre" must show every WAITING devis, and "Devis gagnés" every devis
-won in the rolling window (see notion_won_devis_sync). The check runs right
-after the syncs (pipeline step 12, log only) and again at 07:30 in
+"Devis à suivre" must show every WAITING devis, "Devis gagnés" every devis and
+avenant won in the rolling window (see notion_won_devis_sync) and "Devis
+perdus" every devis lost in that window (see notion_lost_devis_sync). The check
+runs right after the syncs (pipeline step 13, log only) and again at 07:30 in
 scripts/run_reconciliation.py, which e-mails when something is off.
 
 What "shown" means: a follow-up page counts when its "Statut" is a waiting
-status (the views hide the others); a won page counts when its "Statut Furious"
-is a won status and its "Date gagné" is inside the window.
+status (the views hide the others); a won page when its "Statut Furious" is a
+won status and its "Date gagné" is inside the window; a lost page when its
+"Statut Furious" is "Perdu" and its "Date perdu" is inside the window.
 
 Four kinds of problem are reported:
 - missing:    Furious says the devis belongs in the table, Notion does not show it;
 - extra:      Notion shows the devis, Furious says it does not belong there any more;
 - mismatches: the devis is on both sides but the amount, the status or the devis
-              date differ;
+              date differ (and, for an avenant, the devis it sits under);
 - duplicates: two Notion pages carry the same ID Devis.
 
 Example: devis 263464 is marked "Perdu" in Furious at 10:00. Until the next
@@ -34,10 +36,12 @@ import pandas as pd
 from config.settings import settings, STATUS_WAITING, STATUS_WON
 from .notion_alerts_sync import NotionAlertsSync
 from .notion_values import page_value
-from .notion_won_devis_sync import NotionWonDevisSync, furious_status_by_id, select_won_devis
+from .notion_lost_devis_sync import LOST_DATE_PROP, REASON_PROP, NotionLostDevisSync, select_lost_devis
+from .notion_won_devis_sync import PARENT_PROP, NotionWonDevisSync, build_won_rows, furious_status_by_id
 
 FOLLOWUP_TABLE = "Devis à suivre"
 WON_TABLE = "Devis gagnés"
+LOST_TABLE = "Devis perdus"
 AMOUNT_TOLERANCE_EUR = 0.01
 LISTED_PER_KIND = 25  # problems listed per kind in the log and the e-mail
 
@@ -184,7 +188,11 @@ def check_followup_table(df: pd.DataFrame, pages: Iterable[Dict[str, Any]],
 def check_won_table(items: List[Dict[str, Any]], status_by_id: Dict[str, str],
                     pages: Iterable[Dict[str, Any]], start: Any,
                     skip_ids: Iterable[str] = ()) -> TableCheck:
-    """Every devis selected by select_won_devis must have its page, and no other page shows as won in the window."""
+    """Every row of build_won_rows must have its page, and no other page shows as won in the window.
+
+    Context rows (the old devis of a recent avenant) must exist but are not "shown":
+    their own date is before the window. An avenant page must sit under its devis page.
+    """
     skip = set(skip_ids)
     result = TableCheck(WON_TABLE)
     expected = {str(item["id"]).strip(): item for item in items}
@@ -193,6 +201,53 @@ def check_won_table(items: List[Dict[str, Any]], status_by_id: Dict[str, str],
     shown = {pid: page for pid, page in by_id.items()
              if _status(page_value(page, "Statut Furious")) in STATUS_WON
              and (page_value(page, "Date gagné") or "") >= start_day}
+    result.expected = sum(1 for item in items if not item.get("context"))
+    result.shown = len(shown)
+
+    for devis_id, item in expected.items():
+        if devis_id in skip:
+            result.skipped_recent += 1
+            continue
+        page = by_id.get(devis_id)
+        if page is None:
+            result.missing.append({"id": devis_id, "title": str(item.get("title", ""))[:60],
+                                   "furious": item.get("statut"), "notion": "absent"})
+            continue
+        fields = [
+            ("Montant HT", page_value(page, "Montant HT"), _amount(item.get("amount"))),
+            ("Statut Furious", _status(page_value(page, "Statut Furious")), _status(item.get("statut"))),
+            ("Date gagné", page_value(page, "Date gagné"), _day(item.get("date"))),
+        ]
+        parent_id = str(item.get("parent_id") or "").strip()
+        if parent_id:
+            parent_page = by_id.get(parent_id)
+            fields.append((PARENT_PROP, ",".join(page_value(page, PARENT_PROP) or []) or None,
+                           parent_page["id"].replace("-", "") if parent_page else None))
+        result.mismatches += _compare(devis_id, page, fields)
+
+    for devis_id, page in shown.items():
+        if devis_id in expected:
+            continue
+        if devis_id in skip:
+            result.skipped_recent += 1
+            continue
+        result.extra.append({"id": devis_id, "title": _title(page), "notion": page_value(page, "Statut Furious"),
+                             "furious": status_by_id.get(devis_id, "absent de Furious")})
+    return result
+
+
+def check_lost_table(items: List[Dict[str, Any]], status_by_id: Dict[str, str],
+                     pages: Iterable[Dict[str, Any]], start: Any,
+                     skip_ids: Iterable[str] = ()) -> TableCheck:
+    """Every devis of select_lost_devis must be shown in "Devis perdus", and nothing else."""
+    skip = set(skip_ids)
+    result = TableCheck(LOST_TABLE)
+    expected = {str(item["id"]).strip(): item for item in items}
+    by_id, result.duplicates = _index_pages(pages)
+    start_day = _day(start)
+    shown = {pid: page for pid, page in by_id.items()
+             if _status(page_value(page, "Statut Furious")) == "perdu"
+             and (page_value(page, LOST_DATE_PROP) or "") >= start_day}
     result.expected, result.shown = len(expected), len(shown)
 
     for devis_id, item in expected.items():
@@ -207,7 +262,8 @@ def check_won_table(items: List[Dict[str, Any]], status_by_id: Dict[str, str],
         result.mismatches += _compare(devis_id, page, [
             ("Montant HT", page_value(page, "Montant HT"), _amount(item.get("amount"))),
             ("Statut Furious", _status(page_value(page, "Statut Furious")), _status(item.get("statut"))),
-            ("Date gagné", page_value(page, "Date gagné"), _day(item.get("date"))),
+            (LOST_DATE_PROP, page_value(page, LOST_DATE_PROP), _day(item.get("date"))),
+            (REASON_PROP, ", ".join(page_value(page, REASON_PROP) or []), ", ".join(sorted(item.get("lost_reasons") or []))),
         ])
 
     for devis_id, page in shown.items():
@@ -232,45 +288,62 @@ def recently_modified_ids(df: pd.DataFrame, today: Optional[datetime] = None) ->
 
 def check_notion_tables(
     df_processed: pd.DataFrame,
-    won_source: Optional[pd.DataFrame],
-    won_start: Any,
+    df_addons: Optional[pd.DataFrame],
+    window_start: Any,
+    lost_tags: Optional[Dict[str, str]] = None,
     skip_ids: Iterable[str] = (),
     followup_loader: Optional[Callable[[], List[Dict[str, Any]]]] = None,
     won_loader: Optional[Callable[[], List[Dict[str, Any]]]] = None,
-    tables: Iterable[str] = (FOLLOWUP_TABLE, WON_TABLE),
+    lost_loader: Optional[Callable[[], List[Dict[str, Any]]]] = None,
+    tables: Iterable[str] = (FOLLOWUP_TABLE, WON_TABLE, LOST_TABLE),
 ) -> List[TableCheck]:
-    """Read both tables from Notion and compare them with Furious. Never raises.
+    """Read the tables from Notion and compare them with Furious. Never raises.
 
-    won_source is df_processed with the avenants of the earlier years of the
-    window (add_previous_year_avenants); None when the avenants could not be
-    fetched, in which case the won table is reported as not checked.
+    df_addons: the avenants (None when Furious could not send them: the won table
+    is then reported as not checked). lost_tags: the loss reasons from
+    ProposalsClient.fetch_lost_tags() (None: the lost table is not checked).
     The loaders exist for tests; by default the pages are read from Notion.
-    tables limits the check to some of the two tables.
+    tables limits the check to some of the tables. A table whose database is not
+    configured is skipped.
     """
     skip = set(skip_ids)
     tables = set(tables)
     checks: List[TableCheck] = []
 
-    if FOLLOWUP_TABLE in tables and (settings.notion_followup_database_id or followup_loader):
+    def run(table: str, compare: Callable[[], TableCheck]) -> None:
         try:
-            if followup_loader is None:
-                sync = NotionAlertsSync()
-                followup_loader = lambda: sync.list_pages(sync.followup_database_id)  # noqa: E731
-            checks.append(check_followup_table(df_processed, followup_loader(), skip))
+            checks.append(compare())
         except Exception as exc:
-            checks.append(TableCheck(FOLLOWUP_TABLE, error=f"{type(exc).__name__}: {exc}"[:300]))
+            checks.append(TableCheck(table, error=f"{type(exc).__name__}: {exc}"[:300]))
+
+    if FOLLOWUP_TABLE in tables and (settings.notion_followup_database_id or followup_loader):
+        def followup() -> TableCheck:
+            loader = followup_loader
+            if loader is None:
+                sync = NotionAlertsSync()
+                loader = lambda: sync.list_pages(sync.followup_database_id)  # noqa: E731
+            return check_followup_table(df_processed, loader(), skip)
+        run(FOLLOWUP_TABLE, followup)
 
     if WON_TABLE in tables and (settings.notion_won_devis_database_id or won_loader):
-        if won_source is None:
+        if df_addons is None:
             checks.append(TableCheck(WON_TABLE, error="avenants unavailable from Furious"))
         else:
-            try:
-                if won_loader is None:
-                    won_loader = NotionWonDevisSync().list_all_pages
-                items, status_by_id = select_won_devis(won_source, won_start)
-                checks.append(check_won_table(items, status_by_id, won_loader(), won_start, skip))
-            except Exception as exc:
-                checks.append(TableCheck(WON_TABLE, error=f"{type(exc).__name__}: {exc}"[:300]))
+            def won() -> TableCheck:
+                items, status_by_id = build_won_rows(df_processed, df_addons, window_start)
+                pages = (won_loader or NotionWonDevisSync().list_all_pages)()
+                return check_won_table(items, status_by_id, pages, window_start, skip)
+            run(WON_TABLE, won)
+
+    if LOST_TABLE in tables and (settings.notion_lost_devis_database_id or lost_loader):
+        if lost_tags is None:
+            checks.append(TableCheck(LOST_TABLE, error="loss reasons unavailable from Furious"))
+        else:
+            def lost() -> TableCheck:
+                items, status_by_id = select_lost_devis(df_processed, window_start, lost_tags)
+                pages = (lost_loader or NotionLostDevisSync().list_all_pages)()
+                return check_lost_table(items, status_by_id, pages, window_start, skip)
+            run(LOST_TABLE, lost)
     return checks
 
 

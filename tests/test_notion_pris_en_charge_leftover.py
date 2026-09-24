@@ -5,8 +5,9 @@
   "Pris en charge" (like "Commentaire"); a page whose devis is no longer waiting
   gets its "Statut" set to the current Furious status instead, and only the
   properties that changed are sent.
-- "Prévisions Travaux" (TRAVAUX projection): unchanged, the sync still sets
-  "Pris en charge" = false on current-run pages and true on leftovers.
+- "Prévisions Travaux" (TRAVAUX projection, "Pipe travaux"): same rule since
+  2026-09-24. The sync never writes "Pris en charge"; the sync-owned checkbox
+  "Dans la projection" is ticked on current devis and unticked on leftovers.
 """
 
 import pytest
@@ -172,98 +173,79 @@ def test_duplicate_pages_are_counted_and_only_the_first_is_updated():
     assert [page_id for page_id, _ in updated] == ["page-a"]
 
 
-def test_travaux_sync_sets_pris_en_charge_false_for_current_run_pages():
-    """TRAVAUX projection sync sets Pris en charge = false for pages in the current run."""
+TRAVAUX_SCHEMA = {
+    "Name": {"type": "title"},
+    "ID Devis": {"type": "rich_text"},
+    "Client": {"type": "rich_text"},
+    "Montant": {"type": "number"},
+    "Pris en charge": {"type": "checkbox"},
+    "Dans la projection": {"type": "checkbox"},
+}
+
+
+def _travaux(devis_id="123", **overrides):
+    proposal = {
+        "id": devis_id, "title": f"TRAVAUX {devis_id}", "company_name": "Client", "amount": 10000,
+        "probability": 50, "date": "2026-02-01", "projet_start": "2026-03-01", "projet_stop": "2026-06-01",
+        "assigned_to": "user", "final_bu": "TRAVAUX", "cf_typologie_de_devis": "Travaux DV",
+    }
+    proposal.update(overrides)
+    return proposal
+
+
+def _travaux_sync(pages):
     from src.integrations.notion_travaux_sync import NotionTravauxSync
 
-    sync = NotionTravauxSync(api_key="x", database_id="db-1")
-    schema = {
-        "Name": {"type": "title"},
-        "ID Devis": {"type": "rich_text"},
-        "Pris en charge": {"type": "checkbox"},
-    }
-    updated_pages = []
-
-    def fake_update_page(page_id, properties):
-        updated_pages.append((page_id, properties))
-        return True
-
-    sync._get_database_schema = lambda: schema
-    sync._get_existing_pages_by_id = lambda: {"123": "page-123"}
-    sync._create_page = lambda props: None
-    sync._update_page = fake_update_page
+    sync = NotionTravauxSync(api_key="x", database_id="db-1", user_mapper=FakeMapper())
+    created, updated = [], []
+    sync._get_database_schema = lambda: TRAVAUX_SCHEMA
+    sync._get_existing_page_objects_by_id = lambda: {pid: page for pid, page in pages}
+    sync._create_page = lambda props: created.append(props) or "new-id"
+    sync._update_page = lambda page_id, props: updated.append((page_id, props)) or True
     sync._client = None
-
-    proposals = [
-        {
-            "id": "123",
-            "title": "TRAVAUX 123",
-            "company_name": "Client",
-            "amount": 10000,
-            "probability": 50,
-            "date": "2026-02-01",
-            "projet_start": "2026-03-01",
-            "projet_stop": "2026-06-01",
-            "assigned_to": "user",
-            "final_bu": "TRAVAUX",
-            "cf_typologie_de_devis": "Travaux DV",
-        }
-    ]
-
-    stats = sync.sync_proposals(proposals)
-
-    assert stats["updated"] == 1
-    assert stats.get("marked_taken_charge", 0) == 0
-    assert len(updated_pages) == 1
-    _, props = updated_pages[0]
-    assert props.get("Pris en charge") == {"checkbox": False}
+    return sync, created, updated
 
 
-def test_travaux_sync_marks_leftover_pages_pris_en_charge_true():
-    """TRAVAUX projection sync marks leftover pages with Pris en charge = true."""
-    from src.integrations.notion_travaux_sync import NotionTravauxSync
+_CHECKBOXES = {"pris_en_charge": "Pris en charge", "in_projection": "Dans la projection"}
 
-    sync = NotionTravauxSync(api_key="x", database_id="db-1")
-    schema = {
-        "Name": {"type": "title"},
-        "ID Devis": {"type": "rich_text"},
-        "Pris en charge": {"type": "checkbox"},
-    }
-    updated_pages = []
 
-    def fake_update_page(page_id, properties):
-        updated_pages.append((page_id, properties))
-        return True
+def _travaux_page(page_id, proposal, **checkboxes):
+    """The page as the sync wrote it for `proposal`, plus checkbox values (pris_en_charge, in_projection)."""
+    sync, _, _ = _travaux_sync([])
+    page = _as_page(page_id, sync._build_page_properties(proposal, TRAVAUX_SCHEMA))
+    for key, value in checkboxes.items():
+        page["properties"][_CHECKBOXES[key]] = {"type": "checkbox", "checkbox": value}
+    return page
 
-    sync._get_database_schema = lambda: schema
-    sync._get_existing_pages_by_id = lambda: {"123": "page-123", "456": "page-456"}
-    sync._create_page = lambda props: "new-id"
-    sync._update_page = fake_update_page
-    sync._client = None
 
-    # Current run only has 123; 456 is leftover
-    proposals = [
-        {
-            "id": "123",
-            "title": "TRAVAUX 123",
-            "company_name": "Client",
-            "amount": 10000,
-            "probability": 50,
-            "date": "2026-02-01",
-            "projet_start": "2026-03-01",
-            "projet_stop": "2026-06-01",
-            "assigned_to": "user",
-            "final_bu": "TRAVAUX",
-            "cf_typologie_de_devis": "Travaux DV",
-        }
-    ]
+def test_travaux_sync_never_writes_pris_en_charge():
+    """A tick on a devis still in the projection survives; the page is flagged "Dans la projection"."""
+    page = _travaux_page("page-123", _travaux(), pris_en_charge=True)
+    sync, created, updated = _travaux_sync([("123", page)])
 
-    stats = sync.sync_proposals(proposals)
+    stats = sync.sync_proposals([_travaux(), _travaux("999")])
 
-    assert stats["updated"] == 1
-    assert stats.get("marked_taken_charge", 0) == 1
-    updates_by_page = {page_id: props for page_id, props in updated_pages}
-    assert "page-123" in updates_by_page
-    assert updates_by_page["page-123"].get("Pris en charge") == {"checkbox": False}
-    assert "page-456" in updates_by_page
-    assert updates_by_page["page-456"] == {"Pris en charge": {"checkbox": True}}
+    assert stats["updated"] == 1 and stats["created"] == 1 and stats["errors"] == 0
+    assert updated == [("page-123", {"Dans la projection": {"checkbox": True}})]
+    assert created[0]["Dans la projection"] == {"checkbox": True} and "Pris en charge" not in created[0]
+
+
+def test_travaux_unchanged_page_is_not_written():
+    page = _travaux_page("page-123", _travaux(), in_projection=True)
+    sync, _, updated = _travaux_sync([("123", page)])
+
+    stats = sync.sync_proposals([_travaux()])
+
+    assert stats["unchanged"] == 1 and updated == []
+
+
+def test_travaux_devis_that_left_the_projection_is_unticked_once():
+    still = _travaux_page("page-123", _travaux(), in_projection=True)
+    gone = _travaux_page("page-456", _travaux("456"), pris_en_charge=False, in_projection=True)
+    gone_before = _travaux_page("page-789", _travaux("789"), in_projection=False)
+    sync, _, updated = _travaux_sync([("123", still), ("456", gone), ("789", gone_before)])
+
+    stats = sync.sync_proposals([_travaux()])
+
+    assert stats["left_projection"] == 1 and stats["unchanged"] == 1
+    assert updated == [("page-456", {"Dans la projection": {"checkbox": False}})]

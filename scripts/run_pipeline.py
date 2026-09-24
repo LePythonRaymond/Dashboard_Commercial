@@ -48,11 +48,11 @@ from src.integrations.notion_alerts_sync import NotionAlertsSync
 from src.integrations.notion_maintenance_won_sync import NotionMaintenanceWonSync
 from src.integrations.notion_won_devis_sync import (
     NotionWonDevisSync,
-    add_previous_year_avenants,
+    build_won_rows,
     furious_status_by_id,
-    select_won_devis,
     won_devis_window_start,
 )
+from src.integrations.notion_lost_devis_sync import NotionLostDevisSync, select_lost_devis
 from src.integrations.notion_sync_check import check_notion_tables
 from src.processing.manual_and_overrides import (
     apply_input_overrides,
@@ -525,37 +525,65 @@ class PipelineRunner:
                     self._log_step("notion_maintenance_won_sync", "error", {"error": str(e), "traceback": traceback.format_exc()})
 
             # Step 11: Sync ALL won devis (all BUs, rolling WON_DEVIS_LOOKBACK_DAYS window) to the "Devis gagnés" DB.
+            # Each devis row carries its own amount, each avenant is a sub-item row under its devis.
             # Furious-owned fields are refreshed; "Date signature" and the team columns are typed in Notion
-            # and never overwritten. Skipped without avenants: the amounts would be wrong for a day.
+            # and never overwritten. Skipped without avenants: the rows would be wrong for a day.
             logger.info("\n--- Step 11: Syncing won devis (all BUs) to Notion ---")
-            won_start = won_devis_window_start()
-            won_source = add_previous_year_avenants(df_processed, df_addons, won_start) if df_addons is not None else None
-            if not self.sync_notion or not settings.notion_won_devis_database_id or won_source is None:
+            window_start = won_devis_window_start()
+            if not self.sync_notion or not settings.notion_won_devis_database_id or df_addons is None:
                 reason = ("dry_run" if self.dry_run else "disabled" if not self.sync_notion
                           else "NOTION_WON_DEVIS_DATABASE_ID not set" if not settings.notion_won_devis_database_id
                           else "avenants unavailable from Furious")
                 self._log_step("notion_won_devis_sync", "skipped", {"reason": reason})
             else:
                 try:
-                    won_items, status_by_id = select_won_devis(won_source, won_start)
-                    logger.info(f"Won devis since {won_start:%Y-%m-%d}: {len(won_items)} row(s)")
+                    won_items, status_by_id = build_won_rows(df_processed, df_addons, window_start)
+                    avenant_count = sum(1 for item in won_items if item.get("row_type") == "Avenant")
+                    logger.info(f"Won since {window_start:%Y-%m-%d}: {len(won_items)} row(s), {avenant_count} avenant(s)")
                     won_sync = NotionWonDevisSync()
                     won_devis_stats = won_sync.sync_won_devis(
                         won_items, status_by_id, team_values=won_sync.load_followup_team_values()
                     )
-                    self._log_step("notion_won_devis_sync", "success", {"window_start": f"{won_start:%Y-%m-%d}", **won_devis_stats})
+                    self._log_step("notion_won_devis_sync", "success", {"window_start": f"{window_start:%Y-%m-%d}", **won_devis_stats})
                 except Exception as e:
                     logger.error(f"Notion won devis sync error: {e}")
                     import traceback
                     self._log_step("notion_won_devis_sync", "error", {"error": str(e), "traceback": traceback.format_exc()})
 
-            # Step 12: Check both Notion tables against Furious (log only; the 07:30
+            # Step 12: Sync the lost devis of the same window, with their loss reasons, to "Devis perdus".
+            logger.info("\n--- Step 12: Syncing lost devis to Notion ---")
+            lost_tags = None
+            if self.sync_notion and settings.notion_lost_devis_database_id:
+                try:
+                    lost_tags = ProposalsClient(auth=auth).fetch_lost_tags()
+                except Exception as e:
+                    logger.warning(f"Loss reasons unavailable from Furious: {e}")
+            if not self.sync_notion or not settings.notion_lost_devis_database_id or lost_tags is None:
+                reason = ("dry_run" if self.dry_run else "disabled" if not self.sync_notion
+                          else "NOTION_LOST_DEVIS_DATABASE_ID not set" if not settings.notion_lost_devis_database_id
+                          else "loss reasons unavailable from Furious")
+                self._log_step("notion_lost_devis_sync", "skipped", {"reason": reason})
+            else:
+                try:
+                    lost_items, lost_status_by_id = select_lost_devis(df_processed, window_start, lost_tags)
+                    logger.info(f"Lost since {window_start:%Y-%m-%d}: {len(lost_items)} devis")
+                    lost_sync = NotionLostDevisSync()
+                    lost_stats = lost_sync.sync_lost_devis(
+                        lost_items, lost_status_by_id, team_values=lost_sync.load_followup_team_values()
+                    )
+                    self._log_step("notion_lost_devis_sync", "success", {"window_start": f"{window_start:%Y-%m-%d}", **lost_stats})
+                except Exception as e:
+                    logger.error(f"Notion lost devis sync error: {e}")
+                    import traceback
+                    self._log_step("notion_lost_devis_sync", "error", {"error": str(e), "traceback": traceback.format_exc()})
+
+            # Step 13: Check the Notion tables against Furious (log only; the 07:30
             # reconciliation runs the same check and e-mails on drift).
-            logger.info("\n--- Step 12: Checking Notion tables against Furious ---")
+            logger.info("\n--- Step 13: Checking Notion tables against Furious ---")
             if not self.sync_notion:
                 self._log_step("notion_check", "skipped", {"reason": "dry_run" if self.dry_run else "disabled"})
             else:
-                checks = check_notion_tables(df_processed, won_source, won_start)
+                checks = check_notion_tables(df_processed, df_addons, window_start, lost_tags=lost_tags)
                 for check in checks:
                     for line in check.lines():
                         (logger.info if check.ok else logger.warning)(line)

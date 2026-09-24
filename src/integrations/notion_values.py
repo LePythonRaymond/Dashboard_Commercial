@@ -7,8 +7,9 @@ Two shapes exist for the same property:
 - the value Notion returns:   {"type": "number", "number": 4250.0}, {"type": "status", ...}
 
 Both reduce to the same comparable value (4250.0, "brief"). Lists (people,
-multi_select) are sorted so their order never counts as a change, numbers are
-rounded to the cent and dates keep only YYYY-MM-DD.
+multi_select, relation) are sorted so their order never counts as a change,
+numbers are rounded to the cent, dates keep only YYYY-MM-DD and page ids lose
+their dashes (Notion accepts both spellings and returns the dashed one).
 """
 
 from typing import Any, Dict, List
@@ -20,6 +21,10 @@ def _plain_from_payload(parts: List[Dict[str, Any]]) -> str:
 
 def _plain_from_page(parts: List[Dict[str, Any]]) -> str:
     return "".join(p.get("plain_text") or (p.get("text") or {}).get("content", "") for p in parts or [])
+
+
+def _page_ids(items: List[Dict[str, Any]]) -> List[str]:
+    return sorted(str(i.get("id", "")).replace("-", "") for i in items or [])
 
 
 def value_from_payload(prop: Dict[str, Any]) -> Any:
@@ -44,6 +49,8 @@ def value_from_payload(prop: Dict[str, Any]) -> Any:
         return sorted(u["id"] for u in prop["people"] or [])
     if "checkbox" in prop:
         return bool(prop["checkbox"])
+    if "relation" in prop:
+        return _page_ids(prop["relation"])
     return None
 
 
@@ -71,6 +78,8 @@ def value_from_page(prop: Dict[str, Any]) -> Any:
         return sorted(u["id"] for u in prop["people"] or [])
     if kind == "checkbox":
         return bool(prop["checkbox"])
+    if kind == "relation":
+        return _page_ids(prop["relation"])
     return None
 
 

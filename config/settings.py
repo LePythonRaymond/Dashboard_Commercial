@@ -161,6 +161,16 @@ class Settings:
     won_devis_lookback_days: int = field(
         default_factory=lambda: int(get_secret("WON_DEVIS_LOOKBACK_DAYS", "365"))
     )
+    # Notion "Devis perdus" (lost devis of the same rolling window, with loss reasons). Step 12.
+    notion_lost_devis_database_id: str = field(
+        default_factory=lambda: get_secret("NOTION_LOST_DEVIS_DATABASE_ID", "")
+    )
+    # Fill the People columns (Commercial, Chef de projet) of "Devis perdus". Off until
+    # someone turns off "notify" in those two properties in Notion: the API cannot,
+    # and every person added to a People property is otherwise notified.
+    lost_devis_write_people: bool = field(
+        default_factory=lambda: get_secret("LOST_DEVIS_WRITE_PEOPLE", "0").strip().lower() in ("1", "true", "yes")
+    )
 
     # API Request Settings
     api_timeout: int = 30

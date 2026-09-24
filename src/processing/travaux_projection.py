@@ -89,7 +89,7 @@ class TravauxProjectionGenerator:
 
         # Filter 4: date OR projet_start must be within rolling 365-day window
         # Window is [today, today+365]. Past projet_start (before today) => excluded =>
-        # proposal is not in "current run" and in Notion sync gets "Pris en charge" = true (leftover).
+        # proposal is not in "current run" and the Notion sync unticks its "Dans la projection" (leftover).
         date_val = row.get('date')
         start_date_val = row.get('projet_start')
 

@@ -1,16 +1,29 @@
 """
 Notion TRAVAUX Projection Sync Module
 
-Syncs TRAVAUX projection proposals to a dedicated Notion database.
+Syncs TRAVAUX projection proposals to a dedicated Notion database ("Pipe travaux").
 Creates pages with proposal information for the "Projection Travaux prochains 12 mois" dashboard.
+
+Since 2026-09-24 the team owns "Pris en charge" (like "Notes Mathilde" and
+"Next Steps Commercial"): the sync never writes it. Before, every run (06:15
+daily, Sunday 22:00) unticked it on every devis still in the projection and
+ticked it on the others, so the box never kept what a person had set.
+Whether a devis is still in the projection is now the sync-owned checkbox
+"Dans la projection": ticked while the devis meets the projection criteria,
+unticked when it leaves them (won, lost, probability below 10 %, dates out of
+the 365-day window). The views filter on it.
 """
 
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Tuple
 from urllib.parse import urlparse, parse_qs
 from notion_client import Client
 
 from config.settings import settings, VIP_COMMERCIALS
 from .notion_users import get_user_mapper, NotionUserMapper
+from .notion_values import page_value, value_from_page, value_from_payload
+
+# Sync-owned checkbox: is the devis in the current TRAVAUX projection?
+IN_PROJECTION_PROP = "Dans la projection"
 
 
 class NotionTravauxSync:
@@ -427,19 +440,18 @@ class NotionTravauxSync:
 
         return ""
 
-    def _get_existing_pages_by_id(self) -> Dict[str, str]:
+    def _get_existing_page_objects_by_id(self) -> Dict[str, Dict[str, Any]]:
         """
-        Build a mapping: proposal_id -> notion_page_id for the database.
+        Build a mapping: proposal_id -> Notion page (with its properties).
 
-        Returns:
-            Dict mapping proposal IDs to Notion page IDs
+        If duplicates exist, keep the first and ignore the rest to avoid oscillation.
         """
-        mapping: Dict[str, str] = {}
+        pages: Dict[str, Dict[str, Any]] = {}
         has_more = True
         start_cursor = None
 
         if not self.database_id:
-            return mapping
+            return pages
 
         while has_more:
             response = self._query_pages(start_cursor=start_cursor)
@@ -447,12 +459,21 @@ class NotionTravauxSync:
                 proposal_id = self._extract_id_devis_from_page(page)
                 if not proposal_id:
                     continue
-                mapping.setdefault(proposal_id, page["id"])
+                pages.setdefault(proposal_id, page)
 
             has_more = response.get("has_more", False)
             start_cursor = response.get("next_cursor")
 
-        return mapping
+        return pages
+
+    def _get_existing_pages_by_id(self) -> Dict[str, str]:
+        """
+        Build a mapping: proposal_id -> notion_page_id for the database.
+
+        Returns:
+            Dict mapping proposal IDs to Notion page IDs
+        """
+        return {pid: page["id"] for pid, page in self._get_existing_page_objects_by_id().items()}
 
     def _create_page(self, properties: Dict[str, Any]) -> Optional[str]:
         """
@@ -512,9 +533,11 @@ class NotionTravauxSync:
         """
         Sync TRAVAUX projection proposals to Notion database.
 
-        Strategy: Upsert by ID Devis. If proposal already exists, update properties
-        but keep the page (and its comments), keep the Name/title unchanged, and preserve
-        Notion-only comment properties ("Commentaire Mathilde", "Next Steps Commercial").
+        Strategy: upsert by ID Devis, writing only the properties that changed. The
+        page (and its comments), its Name/title and the team-owned properties
+        ("Pris en charge", "Notes Mathilde", "Next Steps Commercial", "Statut",
+        "Date archive") are never written. "Dans la projection" is ticked on the
+        devis of this run and unticked on the pages whose devis left the projection.
 
         Args:
             proposals: List of proposal dictionaries
@@ -522,7 +545,7 @@ class NotionTravauxSync:
         Returns:
             Sync statistics
         """
-        stats = {"created": 0, "updated": 0, "archived": 0, "errors": 0, "marked_taken_charge": 0}
+        stats = {"created": 0, "updated": 0, "unchanged": 0, "left_projection": 0, "archived": 0, "errors": 0}
 
         if not self.database_id:
             print("  Skipping TRAVAUX projection sync: NOTION_TRAVAUX_PROJECTION_DATABASE_ID not configured")
@@ -545,52 +568,53 @@ class NotionTravauxSync:
         # Debug: show commercials set for troubleshooting
         print(f"    Commercials set (for classification): {sorted(self.commercials_set)}")
 
-        existing_by_id = self._get_existing_pages_by_id()
-        print(f"    Found {len(existing_by_id)} existing page(s) with ID Devis/Lien Furious.")
+        pages_by_id = self._get_existing_page_objects_by_id()
+        print(f"    Found {len(pages_by_id)} existing page(s) with ID Devis/Lien Furious.")
 
         projection_ids = {str(p.get("id", "")).strip() for p in proposals if p.get("id")}
-        existing_not_in_projection = set(existing_by_id.keys()) - projection_ids
-        if existing_not_in_projection:
-            print(f"    {len(existing_not_in_projection)} existing page(s) not in current projection (no update this run).")
+        has_flag = IN_PROJECTION_PROP in schema
 
         print(f"    Upserting {len(proposals)} proposal(s)...")
         for proposal in proposals:
             properties = self._build_page_properties(proposal, schema)
-            # Current-run pages: keep visible by setting "Pris en charge" = false when schema allows
-            if "Pris en charge" in schema:
-                properties["Pris en charge"] = {"checkbox": False}
+            if has_flag:
+                properties[IN_PROJECTION_PROP] = {"checkbox": True}
             proposal_id = str(proposal.get("id", "")).strip()
-            existing_page_id = existing_by_id.get(proposal_id)
-            if existing_page_id:
-                # Keep Name/title and comment properties for comment continuity
-                # These are Notion-only properties that contain meeting notes and next steps
-                properties.pop("Name", None)
-                properties.pop("Commentaire Mathilde", None)
-                properties.pop("Next Steps Commercial", None)
-                if self._update_page(existing_page_id, properties):
-                    stats["updated"] += 1
-                else:
-                    stats["errors"] += 1
-            else:
+            page = pages_by_id.get(proposal_id)
+            if page is None:
                 page_id = self._create_page(properties)
                 if page_id:
                     stats["created"] += 1
                 else:
                     stats["errors"] += 1
+                continue
+            # Keep Name/title for comment continuity; send only what changed
+            properties.pop("Name", None)
+            current = page.get("properties") or {}
+            changed = {name: value for name, value in properties.items()
+                       if value_from_payload(value) != value_from_page(current.get(name, {}))}
+            if not changed:
+                stats["unchanged"] += 1
+            elif self._update_page(page["id"], changed):
+                stats["updated"] += 1
+            else:
+                stats["errors"] += 1
 
-        # Leftover pages (in Notion but not in current projection): tick "Pris en charge" so they are filtered out
-        if existing_not_in_projection and "Pris en charge" in schema:
-            print(f"    Marking {len(existing_not_in_projection)} leftover page(s) as Pris en charge (filtered out in Notion)...")
-            for proposal_id in existing_not_in_projection:
-                page_id = existing_by_id[proposal_id]
-                if self._update_page(page_id, {"Pris en charge": {"checkbox": True}}):
-                    stats["marked_taken_charge"] += 1
+        # Pages whose devis left the projection: untick "Dans la projection" (views hide them)
+        leftovers = [pid for pid in pages_by_id if pid not in projection_ids]
+        if leftovers and has_flag:
+            for proposal_id in leftovers:
+                page = pages_by_id[proposal_id]
+                if page_value(page, IN_PROJECTION_PROP) is False:
+                    continue
+                if self._update_page(page["id"], {IN_PROJECTION_PROP: {"checkbox": False}}):
+                    stats["left_projection"] += 1
                 else:
                     stats["errors"] += 1
 
         print(
-            f"    Done: {stats['created']} created, {stats['updated']} updated, "
-            f"{stats['archived']} archived, {stats['marked_taken_charge']} marked Pris en charge, {stats['errors']} errors"
+            f"    Done: {stats['created']} created, {stats['updated']} updated, {stats['unchanged']} unchanged, "
+            f"{len(leftovers)} out of the projection ({stats['left_projection']} newly unticked), {stats['errors']} errors"
         )
         return stats
 
