@@ -7,10 +7,11 @@ perdus" every devis lost in that window (see notion_lost_devis_sync). The check
 runs right after the syncs (pipeline step 13, log only) and again at 07:30 in
 scripts/run_reconciliation.py, which e-mails when something is off.
 
-What "shown" means: a follow-up page counts when its "Statut" is a waiting
-status (the views hide the others); a won page when its "Statut Furious" is a
-won status and its "Date gagné" is inside the window; a lost page when its
-"Statut Furious" is "Perdu" and its "Date perdu" is inside the window.
+What "shown" means: a page whose "Dans le périmètre" is ticked, the checkbox
+every view filters on (see notion_scope). For a table without that checkbox:
+a follow-up page with a waiting "Statut"; a won page with a won "Statut
+Furious" and "Date gagné" inside the window; a lost page with "Statut Furious"
+"Perdu" and "Date perdu" inside the window.
 
 Four kinds of problem are reported:
 - missing:    Furious says the devis belongs in the table, Notion does not show it;
@@ -37,6 +38,7 @@ from config.settings import settings, STATUS_WAITING, STATUS_WON
 from .notion_alerts_sync import NotionAlertsSync
 from .notion_values import page_value
 from .notion_lost_devis_sync import LOST_DATE_PROP, REASON_PROP, NotionLostDevisSync, select_lost_devis
+from .notion_scope import SCOPE_PROP
 from .notion_won_devis_sync import PARENT_PROP, NotionWonDevisSync, build_won_rows, furious_status_by_id
 
 FOLLOWUP_TABLE = "Devis à suivre"
@@ -110,6 +112,26 @@ def _index_pages(pages: Iterable[Dict[str, Any]]) -> Tuple[Dict[str, Dict[str, A
     return by_id, sorted(duplicates)
 
 
+def _uses_scope(pages: Dict[str, Dict[str, Any]]) -> bool:
+    return any(SCOPE_PROP in (page.get("properties") or {}) for page in pages.values())
+
+
+def _shown_pages(by_id: Dict[str, Dict[str, Any]], fallback: Callable[[Dict[str, Any]], bool]) -> Dict[str, Dict[str, Any]]:
+    """Pages the views show: "Dans le périmètre" ticked, or the fallback rule for a table without it."""
+    if _uses_scope(by_id):
+        return {pid: page for pid, page in by_id.items() if page_value(page, SCOPE_PROP)}
+    return {pid: page for pid, page in by_id.items() if fallback(page)}
+
+
+def _hidden_state(page: Optional[Dict[str, Any]], prop: str) -> Any:
+    """What Notion shows for a devis missing from the views: absent, out of scope, or its status."""
+    if page is None:
+        return "absent"
+    if SCOPE_PROP in (page.get("properties") or {}):
+        return "hors périmètre"
+    return page_value(page, prop)
+
+
 def _status(value: Any) -> str:
     return str(value or "").strip().lower()
 
@@ -154,7 +176,7 @@ def check_followup_table(df: pd.DataFrame, pages: Iterable[Dict[str, Any]],
     expected = {str(row["id"]).strip(): row for row in waiting.to_dict("records")}
     status_by_id = furious_status_by_id(df)
     by_id, result.duplicates = _index_pages(pages)
-    shown = {pid: page for pid, page in by_id.items() if _status(page_value(page, "Statut")) in STATUS_WAITING}
+    shown = _shown_pages(by_id, lambda page: _status(page_value(page, "Statut")) in STATUS_WAITING)
     result.expected, result.shown = len(expected), len(shown)
 
     for devis_id, row in expected.items():
@@ -163,10 +185,9 @@ def check_followup_table(df: pd.DataFrame, pages: Iterable[Dict[str, Any]],
             continue
         page = shown.get(devis_id)
         if page is None:
-            hidden = by_id.get(devis_id)
             result.missing.append({"id": devis_id, "title": str(row.get("title", ""))[:60],
                                    "furious": row.get("statut"),
-                                   "notion": page_value(hidden, "Statut") if hidden else "absent"})
+                                   "notion": _hidden_state(by_id.get(devis_id), "Statut")})
             continue
         result.mismatches += _compare(devis_id, page, [
             ("Montant", page_value(page, "Montant"), _amount(row.get("amount"))),
@@ -190,28 +211,30 @@ def check_won_table(items: List[Dict[str, Any]], status_by_id: Dict[str, str],
                     skip_ids: Iterable[str] = ()) -> TableCheck:
     """Every row of build_won_rows must have its page, and no other page shows as won in the window.
 
-    Context rows (the old devis of a recent avenant) must exist but are not "shown":
-    their own date is before the window. An avenant page must sit under its devis page.
+    Context rows (the old devis of a recent avenant) are in scope; in a table
+    without "Dans le périmètre" they must exist but are not "shown" (their own
+    date is before the window). An avenant page must sit under its devis page.
     """
     skip = set(skip_ids)
     result = TableCheck(WON_TABLE)
     expected = {str(item["id"]).strip(): item for item in items}
     by_id, result.duplicates = _index_pages(pages)
     start_day = _day(start)
-    shown = {pid: page for pid, page in by_id.items()
-             if _status(page_value(page, "Statut Furious")) in STATUS_WON
-             and (page_value(page, "Date gagné") or "") >= start_day}
-    result.expected = sum(1 for item in items if not item.get("context"))
+    scoped = _uses_scope(by_id)
+    shown = _shown_pages(by_id, lambda page: _status(page_value(page, "Statut Furious")) in STATUS_WON
+                         and (page_value(page, "Date gagné") or "") >= start_day)
+    result.expected = len(items) if scoped else sum(1 for item in items if not item.get("context"))
     result.shown = len(shown)
 
     for devis_id, item in expected.items():
         if devis_id in skip:
             result.skipped_recent += 1
             continue
-        page = by_id.get(devis_id)
+        page = shown.get(devis_id) if scoped else by_id.get(devis_id)
         if page is None:
             result.missing.append({"id": devis_id, "title": str(item.get("title", ""))[:60],
-                                   "furious": item.get("statut"), "notion": "absent"})
+                                   "furious": item.get("statut"),
+                                   "notion": _hidden_state(by_id.get(devis_id), "Statut Furious")})
             continue
         fields = [
             ("Montant HT", page_value(page, "Montant HT"), _amount(item.get("amount"))),
@@ -245,19 +268,20 @@ def check_lost_table(items: List[Dict[str, Any]], status_by_id: Dict[str, str],
     expected = {str(item["id"]).strip(): item for item in items}
     by_id, result.duplicates = _index_pages(pages)
     start_day = _day(start)
-    shown = {pid: page for pid, page in by_id.items()
-             if _status(page_value(page, "Statut Furious")) == "perdu"
-             and (page_value(page, LOST_DATE_PROP) or "") >= start_day}
+    scoped = _uses_scope(by_id)
+    shown = _shown_pages(by_id, lambda page: _status(page_value(page, "Statut Furious")) == "perdu"
+                         and (page_value(page, LOST_DATE_PROP) or "") >= start_day)
     result.expected, result.shown = len(expected), len(shown)
 
     for devis_id, item in expected.items():
         if devis_id in skip:
             result.skipped_recent += 1
             continue
-        page = by_id.get(devis_id)
+        page = shown.get(devis_id) if scoped else by_id.get(devis_id)
         if page is None:
             result.missing.append({"id": devis_id, "title": str(item.get("title", ""))[:60],
-                                   "furious": item.get("statut"), "notion": "absent"})
+                                   "furious": item.get("statut"),
+                                   "notion": _hidden_state(by_id.get(devis_id), "Statut Furious")})
             continue
         result.mismatches += _compare(devis_id, page, [
             ("Montant HT", page_value(page, "Montant HT"), _amount(item.get("amount"))),

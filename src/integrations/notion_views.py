@@ -11,7 +11,10 @@ The API has a few traps, all met on 2026-09-24:
   pages, `?database_id=` only the database's own views;
 - a filter may nest two levels at most ({"and": [{"or": [...]}, ...]});
 - there is no "this year" date condition, only fixed dates or past_year
-  (365 days), hence the "... cette année" formula properties.
+  (365 days), hence the "... cette année" formula properties;
+- a PATCH of "configuration" merges the keys sent with the ones already there
+  (sending {"type": "table", "subtasks": ...} keeps grouping and columns),
+  while "filter" and "quick_filters" are replaced as a whole.
 """
 
 import json
@@ -79,3 +82,16 @@ def with_condition(view_filter: Optional[Dict[str, Any]], condition: Dict[str, A
     if list(view_filter) == ["and"]:
         return {"and": list(view_filter["and"]) + [condition]}
     return {"and": [view_filter, condition]}
+
+
+def without_property(view_filter: Optional[Dict[str, Any]], property_id: str) -> Optional[Dict[str, Any]]:
+    """The filter minus its conditions on this property (and the groups left empty); None if nothing remains."""
+    if not view_filter:
+        return None
+    for key in ("and", "or"):
+        if key in view_filter:
+            kept = [f for f in (without_property(sub, property_id) for sub in view_filter[key]) if f]
+            if not kept:
+                return None
+            return kept[0] if len(kept) == 1 else {key: kept}
+    return None if same_property(view_filter.get("property", ""), property_id) else view_filter

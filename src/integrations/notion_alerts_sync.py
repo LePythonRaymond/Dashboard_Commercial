@@ -5,8 +5,8 @@ Syncs commercial alerts (Weird Proposals and Follow-ups) to Notion databases.
 Creates pages in dedicated databases with person property mapping.
 """
 
-from typing import Dict, List, Any, Optional, Set, Tuple
-from datetime import datetime
+from typing import Callable, Dict, List, Any, Optional, Set, Tuple
+from datetime import date, datetime
 from urllib.parse import urlparse, parse_qs
 from notion_client import Client
 
@@ -14,6 +14,7 @@ from config.settings import settings, VIP_COMMERCIALS
 from src.processing.alerts import AlertsOutput
 from .notion_users import get_user_mapper, NotionUserMapper
 from .notion_values import page_value, value_from_page, value_from_payload
+from .notion_scope import ARCHIVED_PROP, scope_changes, scope_on_create
 
 
 # Furious URL template
@@ -391,7 +392,9 @@ class NotionAlertsSync:
         if self._schema_allows(schema, "Montant"):
             properties["Montant"] = {"number": float(item.get('amount', 0))}
         if self._schema_allows(schema, "Statut"):
-            properties["Statut"] = {"status": {"name": str(item.get('statut', 'Unknown'))[:100]}}
+            status_payload = self._status_payload(item.get('statut', 'Unknown'), schema)
+            if status_payload:
+                properties["Statut"] = status_payload
         if self._schema_allows(schema, "Probabilite"):
             properties["Probabilite"] = {"number": float(item.get('probability', 0))}
         if self._schema_allows(schema, "Probleme"):
@@ -666,159 +669,66 @@ class NotionAlertsSync:
             print(f"    Warning: Could not create page: {e}")
             return None
 
-    def sync_weird_proposals(self, weird_alerts: Dict[str, List[Dict[str, Any]]]) -> Dict[str, int]:
-        """
-        Sync weird proposal alerts to Notion database.
-
-        Strategy: Upsert by ID Devis. If proposal already exists, update properties
-        but keep the page (and its comments), keep the Name/title unchanged, and preserve
-        Notion-only properties ("Pris en charge" tickbox).
-
-        Args:
-            weird_alerts: Dictionary mapping owner to list of alert items
-
-        Returns:
-            Sync statistics
-        """
-        stats = {"created": 0, "updated": 0, "archived": 0, "errors": 0}
-
-        if not self.weird_database_id:
-            print("  Skipping weird proposals sync: NOTION_WEIRD_DATABASE_ID not configured")
-            return stats
-
-        print(f"\n  Syncing weird proposals to Notion...")
-        print(f"    Database: {self.weird_database_id[:8]}...")
-
-        schema = self._get_database_schema(self.weird_database_id)
-        if schema:
-            print(f"    Schema loaded ({len(schema)} properties).")
-        else:
-            print("    Warning: Could not fetch schema - will attempt all properties")
-
-        existing_by_id = self._get_existing_pages_by_id(self.weird_database_id)
-        print(f"    Found {len(existing_by_id)} existing page(s) with ID Devis/Lien Furious.")
-
-        # Flatten all items from all owners
-        all_items = []
-        for owner, items in weird_alerts.items():
-            for item in items:
-                # Ensure owner is in item
+    @staticmethod
+    def _flatten(alerts_by_owner: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """All alert items of all owners, each carrying its owner."""
+        items = []
+        for owner, owner_items in alerts_by_owner.items():
+            for item in owner_items:
                 item_copy = item.copy()
-                if 'alert_owner' not in item_copy:
-                    item_copy['alert_owner'] = owner
-                all_items.append(item_copy)
+                item_copy.setdefault("alert_owner", owner)
+                items.append(item_copy)
+        return items
 
-        print(f"    Upserting {len(all_items)} alert(s)...")
-        for item in all_items:
-            properties = self._build_weird_page_properties(item, schema=schema)
-            proposal_id = str(item.get("id", "")).strip()
-            existing_page_id = existing_by_id.get(proposal_id)
-            if existing_page_id:
-                # Keep Name/title and "Pris en charge" tickbox for comment continuity
-                # "Pris en charge" is a Notion-only property used for meeting tracking
-                properties.pop("Name", None)
-                properties.pop("Pris en charge", None)
-                if self._update_page(existing_page_id, properties):
-                    stats["updated"] += 1
-                else:
-                    stats["errors"] += 1
-            else:
-                page_id = self._create_page(self.weird_database_id, properties)
-                if page_id:
-                    stats["created"] += 1
-                else:
-                    stats["errors"] += 1
-
-        print(
-            f"    Done: {stats['created']} created, {stats['updated']} updated, "
-            f"{stats['archived']} archived, {stats['errors']} errors"
-        )
-        return stats
-
-    def sync_followup_alerts(
+    def _sync_scoped_table(
         self,
-        followup_alerts: Dict[str, List[Dict[str, Any]]],
-        status_by_id: Optional[Dict[str, str]] = None,
+        database_id: str,
+        items: List[Dict[str, Any]],
+        build: Callable[..., Dict[str, Any]],
+        status_by_id: Optional[Dict[str, str]],
+        today: Optional[date],
     ) -> Dict[str, int]:
+        """Upsert the items of one table and apply the scope rule (see notion_scope).
+
+        The items are the table's scope. Existing pages are updated with the
+        properties that changed only (the Name/title is never rewritten). A page
+        whose devis is not among the items left the scope: its "Statut" shows the
+        current Furious status and it is archived (unticked "Dans le périmètre",
+        ticked "Pris en charge" with its date) unless a person already did.
         """
-        Sync the follow-up alerts (every WAITING devis) to the "Devis à suivre" database.
-
-        Strategy: upsert by ID Devis. Only the properties Furious owns are written,
-        and only when their value changed: Client, Montant, Statut, Probabilite,
-        Date, Début projet, Fin projet, Typologie devis, Commercial, Chef de projet,
-        Lien Furious (Name on creation only, so the title and the comments stay).
-
-        The team owns "Commentaire", "Pris en charge", "Date archivage" and
-        "Origine Transfo": the sync never writes them. (Until 2026-09-24 it reset
-        "Pris en charge" to unticked every morning and ticked it on devis that had
-        left the list; a tick typed by someone did not survive the night.)
-
-        A page whose devis is no longer waiting (won, lost) gets its "Statut" set to
-        the current Furious status, so the views filtered on the waiting statuses
-        hide it while the page and its comment stay. A page whose devis is no
-        longer in Furious at all is left untouched and counted as an orphan.
-
-        Example: devis 263464 was "envoyée(s) attente réponse" and is marked
-        "Perdu" in Furious. Next morning its page reads "Perdu" and drops out of
-        "Vue Globale"; its "Pris en charge" and "Commentaire" are unchanged.
-
-        Args:
-            followup_alerts: Dictionary mapping owner to list of alert items
-            status_by_id: Furious status of every devis (any status), by id. Needed
-                to relabel pages that left the list; None leaves them untouched.
-
-        Returns:
-            Sync statistics
-        """
-        stats = {"created": 0, "updated": 0, "unchanged": 0, "relabelled": 0, "orphans": 0,
-                 "unmapped_status": 0, "duplicates_in_notion": 0, "archived": 0, "errors": 0}
-
-        if not self.followup_database_id:
-            print("  Skipping follow-up sync: NOTION_FOLLOWUP_DATABASE_ID not configured")
-            return stats
-
-        print(f"\n  Syncing follow-up alerts to Notion...")
-        print(f"    Database: {self.followup_database_id[:8]}...")
-
-        schema = self._get_database_schema(self.followup_database_id)
+        stats = {"created": 0, "updated": 0, "unchanged": 0, "left_scope": 0, "back_in_scope": 0,
+                 "relabelled": 0, "orphans": 0, "unmapped_status": 0, "duplicates_in_notion": 0,
+                 "archived": 0, "errors": 0}
+        schema = self._get_database_schema(database_id)
         if schema:
             print(f"    Schema loaded ({len(schema)} properties).")
         else:
             print("    Warning: Could not fetch schema - will attempt all properties")
-
-        pages_by_id, stats["duplicates_in_notion"] = self._get_existing_page_objects_by_id(self.followup_database_id)
+        pages_by_id, stats["duplicates_in_notion"] = self._get_existing_page_objects_by_id(database_id)
         print(f"    Found {len(pages_by_id)} existing page(s) with ID Devis/Lien Furious.")
         self._unmapped_statuses = set()
 
-        # Flatten all items from all owners
-        all_items = []
-        for owner, items in followup_alerts.items():
-            for item in items:
-                # Ensure owner is in item
-                item_copy = item.copy()
-                if 'alert_owner' not in item_copy:
-                    item_copy['alert_owner'] = owner
-                all_items.append(item_copy)
-
-        current_run_ids = {str(item.get("id", "")).strip() for item in all_items if item.get("id")}
-
-        print(f"    Upserting {len(all_items)} alert(s)...")
-        for item in all_items:
-            properties = self._build_followup_page_properties(item, schema=schema)
+        run_ids: Set[str] = set()
+        print(f"    Upserting {len(items)} item(s)...")
+        for item in items:
+            properties = build(item, schema=schema)
             proposal_id = str(item.get("id", "")).strip()
+            run_ids.add(proposal_id)
             page = pages_by_id.get(proposal_id)
             if page is None:
-                page_id = self._create_page(self.followup_database_id, properties)
-                if page_id:
+                properties.update(scope_on_create(schema))
+                if self._create_page(database_id, properties):
                     stats["created"] += 1
                 else:
                     stats["errors"] += 1
                 continue
-            # Keep Name/title for comment continuity; send only what changed
-            properties.pop("Name", None)
+            properties.pop("Name", None)   # keep the title (and its comments) as they are
             current = page.get("properties") or {}
             changed = {name: value for name, value in properties.items()
                        if value_from_payload(value) != value_from_page(current.get(name, {}))}
+            back = scope_changes(page, True, schema, today)
+            stats["back_in_scope"] += int(ARCHIVED_PROP in back)
+            changed.update(back)
             if not changed:
                 stats["unchanged"] += 1
             elif self._update_page(page["id"], changed):
@@ -826,22 +736,30 @@ class NotionAlertsSync:
             else:
                 stats["errors"] += 1
 
-        # Leftover pages (in Notion but not waiting any more): show their real Furious status
-        leftover_ids = [pid for pid in pages_by_id if pid not in current_run_ids]
-        if leftover_ids and status_by_id is not None and self._schema_allows(schema, "Statut"):
-            for proposal_id in leftover_ids:
-                page = pages_by_id[proposal_id]
+        leftover_ids = [pid for pid in pages_by_id if pid not in run_ids]
+        if leftover_ids and not run_ids:
+            print("    Warning: empty run (Furious sent nothing?): pages left untouched today.")
+            leftover_ids = []
+        for proposal_id in leftover_ids:
+            page = pages_by_id[proposal_id]
+            changes: Dict[str, Any] = {}
+            if status_by_id is not None and self._schema_allows(schema, "Statut"):
                 furious_status = status_by_id.get(proposal_id)
                 if furious_status is None:
                     stats["orphans"] += 1
-                    continue
-                payload = self._status_payload(furious_status, schema)
-                if payload is None or value_from_payload(payload) == page_value(page, "Statut"):
-                    continue
-                if self._update_page(page["id"], {"Statut": payload}):
-                    stats["relabelled"] += 1
                 else:
-                    stats["errors"] += 1
+                    payload = self._status_payload(furious_status, schema)
+                    if payload is not None and value_from_payload(payload) != page_value(page, "Statut"):
+                        changes["Statut"] = payload
+            leaving = scope_changes(page, False, schema, today)
+            stats["left_scope"] += int(ARCHIVED_PROP in leaving)
+            changes.update(leaving)
+            if not changes:
+                continue
+            if self._update_page(page["id"], changes):
+                stats["relabelled"] += int("Statut" in changes)
+            else:
+                stats["errors"] += 1
 
         stats["unmapped_status"] = len(self._unmapped_statuses)
         if self._unmapped_statuses:
@@ -849,15 +767,92 @@ class NotionAlertsSync:
                   f"{sorted(self._unmapped_statuses)} (add the option in Notion to fix)")
         print(
             f"    Done: {stats['created']} created, {stats['updated']} updated, {stats['unchanged']} unchanged, "
-            f"{len(leftover_ids)} no longer waiting ({stats['relabelled']} relabelled, {stats['orphans']} orphan(s)), "
-            f"{stats['errors']} errors"
+            f"{len(leftover_ids)} out of scope ({stats['left_scope']} archived today, {stats['relabelled']} relabelled, "
+            f"{stats['orphans']} gone from Furious), {stats['back_in_scope']} back in scope, {stats['errors']} errors"
         )
         return stats
+
+    def sync_weird_proposals(
+        self,
+        weird_alerts: Dict[str, List[Dict[str, Any]]],
+        status_by_id: Optional[Dict[str, str]] = None,
+        today: Optional[date] = None,
+    ) -> Dict[str, int]:
+        """
+        Sync the weird proposals (devis with a data problem) to "Devis à normaliser".
+
+        Scope: the devis that have a problem today. A devis whose problem was fixed
+        leaves the scope: it is archived (see notion_scope) and leaves the views.
+        Only changed properties are written; the team owns "Pris en charge" (the
+        sync only ticks it when a devis leaves) and "Date archivage".
+
+        Args:
+            weird_alerts: Dictionary mapping owner to list of alert items
+            status_by_id: Furious status of every devis, by id (relabels the pages that left)
+            today: archive date written by the sync (defaults to today)
+
+        Returns:
+            Sync statistics
+        """
+        if not self.weird_database_id:
+            print("  Skipping weird proposals sync: NOTION_WEIRD_DATABASE_ID not configured")
+            return {"created": 0, "updated": 0, "archived": 0, "errors": 0}
+        print(f"\n  Syncing weird proposals to Notion...")
+        print(f"    Database: {self.weird_database_id[:8]}...")
+        return self._sync_scoped_table(self.weird_database_id, self._flatten(weird_alerts),
+                                       self._build_weird_page_properties, status_by_id, today)
+
+    def sync_followup_alerts(
+        self,
+        followup_alerts: Dict[str, List[Dict[str, Any]]],
+        status_by_id: Optional[Dict[str, str]] = None,
+        today: Optional[date] = None,
+    ) -> Dict[str, int]:
+        """
+        Sync the follow-up alerts (every WAITING devis) to "Devis à suivre".
+
+        Scope: every waiting devis. Only the properties Furious owns are written,
+        and only when their value changed: Client, Montant, Statut, Probabilite,
+        Date, Début projet, Fin projet, Typologie devis, Commercial, Chef de projet,
+        Lien Furious (Name on creation only, so the title and the comments stay).
+
+        The team owns "Commentaire", "Origine Transfo", "Pris en charge" and
+        "Date archivage". The sync never unticks a "Pris en charge" ticked by a
+        person (until 2026-09-24 it unticked every current devis each morning).
+
+        A devis that is no longer waiting (won, lost) leaves the scope: its
+        "Statut" shows the current Furious status and it is archived ("Dans le
+        périmètre" unticked, "Pris en charge" ticked with its date, see
+        notion_scope), so it leaves the views; six months later the monthly job
+        moves it to the trash. A page whose devis is gone from Furious is archived
+        the same way and counted as an orphan.
+
+        Example: devis 263464 was "envoyée(s) attente réponse" and is marked
+        "Perdu" in Furious. Next morning its page reads "Perdu", is archived and
+        drops out of "Vue Globale"; its "Commentaire" is unchanged.
+
+        Args:
+            followup_alerts: Dictionary mapping owner to list of alert items
+            status_by_id: Furious status of every devis (any status), by id. Needed
+                to relabel pages that left the list; None leaves "Statut" as it is.
+            today: archive date written by the sync (defaults to today)
+
+        Returns:
+            Sync statistics
+        """
+        if not self.followup_database_id:
+            print("  Skipping follow-up sync: NOTION_FOLLOWUP_DATABASE_ID not configured")
+            return {"created": 0, "updated": 0, "archived": 0, "errors": 0}
+        print(f"\n  Syncing follow-up alerts to Notion...")
+        print(f"    Database: {self.followup_database_id[:8]}...")
+        return self._sync_scoped_table(self.followup_database_id, self._flatten(followup_alerts),
+                                       self._build_followup_page_properties, status_by_id, today)
 
     def sync_all(
         self,
         alerts_output: AlertsOutput,
         status_by_id: Optional[Dict[str, str]] = None,
+        today: Optional[date] = None,
     ) -> Dict[str, Dict[str, int]]:
         """
         Sync all alerts to Notion databases.
@@ -865,6 +860,7 @@ class NotionAlertsSync:
         Args:
             alerts_output: AlertsOutput containing all alerts
             status_by_id: Furious status of every devis, by id (see sync_followup_alerts)
+            today: archive date written by the sync (defaults to today)
 
         Returns:
             Combined sync statistics for both databases
@@ -874,21 +870,21 @@ class NotionAlertsSync:
         print("=" * 50)
 
         results = {
-            "weird_proposals": self.sync_weird_proposals(alerts_output.weird_proposals),
-            "commercial_followup": self.sync_followup_alerts(alerts_output.commercial_followup, status_by_id)
+            "weird_proposals": self.sync_weird_proposals(alerts_output.weird_proposals, status_by_id, today),
+            "commercial_followup": self.sync_followup_alerts(alerts_output.commercial_followup, status_by_id, today)
         }
 
         # Print summary
         total_created = results["weird_proposals"]["created"] + results["commercial_followup"]["created"]
         total_archived = results["weird_proposals"]["archived"] + results["commercial_followup"]["archived"]
         total_errors = results["weird_proposals"]["errors"] + results["commercial_followup"]["errors"]
-        total_relabelled = results["commercial_followup"].get("relabelled", 0)
+        total_left = results["weird_proposals"].get("left_scope", 0) + results["commercial_followup"].get("left_scope", 0)
 
         print("\n" + "=" * 50)
         print("Notion Alerts Sync Complete")
         print(f"  Total created: {total_created}")
         print(f"  Total archived: {total_archived}")
-        print(f"  Follow-up pages no longer waiting, relabelled: {total_relabelled}")
+        print(f"  Pages that left their table's scope today (archived): {total_left}")
         print(f"  Total errors: {total_errors}")
         print("=" * 50)
 

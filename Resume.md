@@ -372,7 +372,7 @@ myrium/
 - **Notion API 2025-09-03**: All clients pinned to latest API version with data_sources support
 - **Fail-Closed Behavior**: Refuses to create pages when schema cannot be loaded (prevents blank page spam)
 - **Follow-up table**: every waiting devis (no window). The team owns Commentaire, Pris en charge, Date archivage, Origine Transfo (never written by the sync); a devis that leaves the list gets its real Furious status in "Statut" and the views filter on the waiting statuses (§18.17)
-- **TRAVAUX Projection**: "Pris en charge" belongs to the team too since 2026-09-24; the sync-owned checkbox "Dans la projection" says whether the devis is still in the projection and the views filter on it (§18.18)
+- **Scope rule (5 sales tables)**: "Dans le périmètre" (sync) says whether a row is in its table's scope and every view filters on it; a row that leaves is archived by the sync ("Pris en charge" ticked + archive date); the sync never unticks a person's tick; archived rows out of scope go to the trash after 6 months (monthly job). See §18.19
 - **Notion ↔ Furious check**: after the syncs (step 13) and at 07:30 (reconciliation e-mail on drift), the three sales tables are compared with Furious (§18.17, §18.18)
 
 ### 7.7 BI Dashboard
@@ -408,7 +408,7 @@ NOTION_MAINTENANCE_WON_DATABASE_ID=...
 NOTION_WON_DEVIS_DATABASE_ID=...     # "Devis gagnés" DB, step 11 (§18.16)
 WON_DEVIS_LOOKBACK_DAYS=365          # Optional: rolling window of steps 11 and 12, in days (§18.17)
 NOTION_LOST_DEVIS_DATABASE_ID=...    # "Devis perdus" DB, step 12 (§18.18)
-LOST_DEVIS_WRITE_PEOPLE=0            # 1 once "notify" is off on its People properties (§18.18)
+LOST_DEVIS_WRITE_PEOPLE=1            # set on 2026-09-24 once "notify" was turned off on its People properties (§18.18)
 MAINTENANCE_ENTRETIEN_START_2026=...   # Optional fallback: value for "Maintenance Entretien – Début 2026" (e.g. 1084000)
 NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATASOURCE_ID=...  # Optional: data source ID (preferred)
 NOTION_MAINTENANCE_ENTRETIEN_OBJECTIF_DATABASE_ID=...   # Optional: legacy database ID if no datasource
@@ -468,6 +468,12 @@ The pipeline supports granular flags to control execution components:
 ```
 - Re-fetches Furious and checks the Envoyé / Signé Google Sheets and, since 2026-09-24, the Notion sales tables ("Devis à suivre", "Devis gagnés", "Devis perdus"); devis modified in Furious that day are checked the next day
 - E-mails taddeo.carpinelli@merciraymond.fr on drift or when a check cannot run; always writes `logs/reconciliation_YYYYMMDD.json` (`--skip-notion` for sheets only)
+
+**Monthly archive clean-up** (1st of the month, 05:00):
+```bash
+0 5 1 * * cd /path/to/myrium && /path/to/venv/bin/python3 scripts/archive_old_pages.py --apply >> logs/archive_old_pages_cron.log 2>&1
+```
+- Moves to the Notion trash the pages of the 5 scoped tables that are archived ("Pris en charge"), out of scope ("Dans le périmètre" unticked) and whose archive date is 6 months old or more; refuses more than 25 % of a table at once; report in `logs/archive_old_pages_YYYYMMDD.json` (§18.19)
 
 **Weekly TRAVAUX Projection** (every Sunday at 11 PM):
 ```bash
@@ -1038,6 +1044,32 @@ See original documentation for details on performance, security, error handling,
 
 **Tests**: 295 passed (new `tests/test_lost_devis_sync.py`; sub-item, parent and signature tests in `tests/test_won_devis_sync.py`; TRAVAUX tests rewritten; avenant-parent and lost-table checks).
 
+### 18.19 One scope rule for the sales tables, monthly archive clean-up, sub-items fixed, Furious status test (September 2026)
+
+**Scope rule** (`src/integrations/notion_scope.py`, tables in `SCOPED_TABLES`): "Devis à normaliser", "Devis à suivre", "Pipe travaux", "Devis gagnés", "Devis perdus". Each sync knows its scope (the rows it is responsible for today) and writes:
+- "Dans le périmètre" (sync-owned checkbox): ticked while the row is in scope. Every view of the 5 tables filters on it (`scripts/setup_scope_views.py --apply-views`, linked views included; in "Devis à suivre" it replaces the "Statut is a waiting status" condition; in "Pipe travaux" it is the former "Dans la projection", renamed).
+- When a row leaves the scope, the sync archives it: "Pris en charge" ticked, "Archivé par la synchro" ticked (hidden), archive date ("Date archivage", or "Date archive" in Pipe travaux) set to that day. A Notion automation stamps the same date when a person ticks.
+- The sync never unticks a person's tick. If a row it archived comes back into scope, it removes only its own tick (and the date).
+- An empty Furious answer never archives anything (guard in every sync).
+- Scopes: normaliser = waiting devis and devis won this month with a data problem; suivre = every waiting devis; Pipe travaux = TRAVAUX projection criteria; gagnés = devis and avenants won in the last 365 days plus the devis of those avenants; perdus = lost in the last 365 days, duplicates excluded. "Suivi signatures" (MAINTENANCE) and "Récent projets travaux" are yearly logs and keep their previous behaviour.
+- Table views also get the quick filter "Pris en charge = non" where they had none on that box; charts only get the scope condition, so a devis handled by someone still counts in the amounts.
+- Devis à normaliser now writes only changed properties and maps its Statut to existing options, like Devis à suivre.
+
+**Monthly clean-up** (`scripts/archive_old_pages.py`, cron 1st of the month 05:00 on the VPS): pages archived, out of scope and whose archive date is 6 months old or more go to the Notion trash (`PATCH pages/{id} {"in_trash": true}`, restorable for 30 days). Out-of-scope is required: a devis still in scope would only be recreated by the next sync. More than 25 % of a table at once is refused.
+
+**Sub-items fixed**: the avenant relation created through the API ("Devis parent" / "Avenants") is not what Notion uses for sub-items. Turning "Sub-items" on in the database menu created "Parent item" / "Sub-item": the 41 avenant links were copied to it, the API relation deleted, and Notion's pair renamed "Devis parent" / "Avenants" (the sync writes it by name). `setup_won_devis_views.py --subitems` now renames Notion's pair instead of creating a relation. A views API PATCH of `configuration` merges keys (grouping and columns kept).
+
+**Furious status test** (devis 263219 "TEST(TAD)", the user's own, on 2026-09-24):
+- `POST /proposal/ {"action": "update", "data": {"id", "pipe", ...}}` accepts only the pipes Brief (5), En cours (0), Envoyée(s) attente réponse (4) and Perdu (1): "Pipe invalide" for the won pipes. **A devis cannot be marked won through the API**; that stays in the Furious interface (which creates the project).
+- Every update must re-send the required custom fields (`custom_fields: [{"name": "bu", "value": "MAINTENANCE"}, {"name": "typologie_de_devis", "value": [...]}, {"name": "typologie_myrium", "value": "PA <= 15 000€"}]`), even when the devis has them; otherwise "BU est requis" etc.
+- Read back, `cf_typologie_myrium` loses its "<= 15 000€" part ("PA "): an automation must map it back to the full label before re-sending.
+- Marking lost with `lost_reason_id` (e.g. 20 = Autre) works, but the devis date is not re-stamped as in the interface: a loss made through the API would keep its old date in "Devis perdus".
+- The test devis ended lost, with reason "Autre" and its BU / typologies filled; no project was created.
+
+**People notifications**: turned off by the user on the People properties of "Devis perdus"; `LOST_DEVIS_WRITE_PEOPLE=1` set on the VPS and the salespeople filled.
+
+**Tests**: 308 passed (new `tests/test_notion_scope.py`; leftover, TRAVAUX, won and lost tests rewritten for the rule).
+
 ---
 
 ## 17. Conclusion
@@ -1053,7 +1085,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.44
+**Document Version**: 1.45
 **Last Updated**: September 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System

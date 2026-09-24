@@ -27,11 +27,13 @@ Who owns which Notion property
   row in "Devis à suivre", its Commentaire and Origine Transfo are copied, so
   the note and the origin tag typed while chasing the devis follow it.
 
-Window
-------
+Window and scope
+----------------
 A devis is created or refreshed while its devis date is inside the window
-(today minus WON_DEVIS_LOOKBACK_DAYS). A page whose date leaves the window
-stays in Notion as history; only its "Statut Furious" keeps being corrected.
+(today minus WON_DEVIS_LOOKBACK_DAYS). The rows of build_won_rows are the
+table's scope (see notion_scope): a page that leaves it (older than the window,
+or no longer won) is archived and leaves the views; the monthly job moves it
+to the trash six months later. Its "Statut Furious" keeps being corrected.
 
 Avenants: sub-items with their own numbers
 ------------------------------------------
@@ -59,7 +61,7 @@ to "✅ Signé" and every later run leaves that date alone.
 
 import re
 import time
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -67,6 +69,7 @@ import pandas as pd
 from config.settings import settings, STATUS_WON
 from src.processing.cleaner import DataCleaner
 from .notion_maintenance_won_sync import NotionMaintenanceWonSync
+from .notion_scope import ARCHIVED_PROP, scope_changes, scope_on_create
 from .notion_values import page_value, value_from_page as _value_from_page, value_from_payload as _value_from_payload
 
 TITLE_PROP = "Nom"
@@ -415,6 +418,7 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
         items: List[Dict[str, Any]],
         status_by_id: Optional[Dict[str, str]] = None,
         team_values: Optional[Dict[str, Dict[str, Any]]] = None,
+        today: Optional[date] = None,
     ) -> Dict[str, int]:
         """Upsert the won devis and return counters for the pipeline log.
 
@@ -429,12 +433,14 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
         signed_in_notion (pages carrying a Date signature), duplicates_in_notion,
         team_values_copied (new pages that received the Commentaire or Origine
         Transfo of their "Devis à suivre" row), parent_missing (avenant whose devis
-        page could not be found or created, left without parent).
+        page could not be found or created, left without parent), left_scope /
+        back_in_scope (pages archived today because they left the scope, or brought
+        back because they returned, see notion_scope).
         """
         stats = {key: 0 for key in (
             "created", "updated", "unchanged", "errors", "relabelled", "orphans",
             "signatures_from_furious", "signed_in_notion", "duplicates_in_notion", "team_values_copied",
-            "parent_missing",
+            "parent_missing", "left_scope", "back_in_scope",
         )}
         stats["items"] = len(items)
         if not self.database_id:
@@ -476,6 +482,7 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
                 copied = {name: value for name, value in (team_values or {}).get(devis_id, {}).items()
                           if name in COPIED_FROM_FOLLOWUP and name in schema}
                 props.update(copied)
+                props.update(scope_on_create(schema))
                 new_page_id = self._create(props)
                 if new_page_id is None:
                     stats["errors"] += 1
@@ -493,22 +500,16 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
             current = page.get("properties") or {}
             changed = {name: value for name, value in props.items()
                        if _value_from_payload(value) != _value_from_page(current.get(name, {}))}
+            back = scope_changes(page, True, schema, today)
+            stats["back_in_scope"] += int(ARCHIVED_PROP in back)
+            changed.update(back)
             if not changed:
                 stats["unchanged"] += 1
                 continue
             stats["updated" if self._update(page["id"], changed) else "errors"] += 1
 
-        for devis_id, page in existing.items():
-            if devis_id in seen:
-                continue
-            status = (status_by_id or {}).get(devis_id)
-            if status is None:
-                stats["orphans"] += 1
-                continue
-            current_status = page_value(page, STATUS_PROP)
-            if STATUS_PROP in schema and status and current_status != status:
-                ok = self._update(page["id"], {STATUS_PROP: {"select": {"name": status[:100]}}})
-                stats["relabelled" if ok else "errors"] += 1
+        for key, count in self._leave_scope(existing, seen, status_by_id, schema, today).items():
+            stats[key] += count
 
         print(
             "    Done: {created} created, {updated} updated, {unchanged} unchanged, {relabelled} relabelled, "
@@ -516,6 +517,43 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
             "without parent, {errors} error(s).".format(**stats)
         )
         return stats
+
+    def _leave_scope(
+        self,
+        existing: Dict[str, Dict[str, Any]],
+        seen: set,
+        status_by_id: Optional[Dict[str, str]],
+        schema: Dict[str, Any],
+        today: Optional[date],
+    ) -> Dict[str, int]:
+        """Pages not among this run's rows: current "Statut Furious", and archived (see notion_scope).
+
+        Nothing is archived when the run had no row at all (probably an empty
+        Furious answer rather than a real change).
+        """
+        counts = {"relabelled": 0, "orphans": 0, "left_scope": 0, "errors": 0}
+        if not seen:
+            if existing:
+                print("    Warning: empty run: pages left untouched today.")
+            return counts
+        for devis_id, page in existing.items():
+            if devis_id in seen:
+                continue
+            changes: Dict[str, Any] = {}
+            status = (status_by_id or {}).get(devis_id)
+            if status is None:
+                counts["orphans"] += 1
+            elif STATUS_PROP in schema and status and page_value(page, STATUS_PROP) != status:
+                changes[STATUS_PROP] = {"select": {"name": status[:100]}}
+            changes.update(scope_changes(page, False, schema, today))
+            if not changes:
+                continue
+            if self._update(page["id"], changes):
+                counts["relabelled"] += int(STATUS_PROP in changes)
+                counts["left_scope"] += int(ARCHIVED_PROP in changes)
+            else:
+                counts["errors"] += 1
+        return counts
 
     def backfill_team_values(self, team_values: Dict[str, Dict[str, Any]]) -> Dict[str, int]:
         """One-off: copy Commentaire / Origine Transfo from "Devis à suivre" onto existing won pages.
