@@ -1065,6 +1065,7 @@ See original documentation for details on performance, security, error handling,
 - Read back, `cf_typologie_myrium` loses its "<= 15 000€" part ("PA "): an automation must map it back to the full label before re-sending.
 - Marking lost with `lost_reason_id` (e.g. 20 = Autre) works, but the devis date is not re-stamped as in the interface: a loss made through the API would keep its old date in "Devis perdus".
 - The test devis ended lost, with reason "Autre" and its BU / typologies filled; no project was created.
+- **Decision (2026-09-24): not built.** Devis statuses are changed in Furious only, so the team has one place for them; Notion only shows them. Do not propose a Notion to Furious status button again.
 
 **Recap for the team**: `docs/Regles_tables_Notion.pdf` (2 pages, French: the rule, the life of a row, the scope of each table, who fills which column, what to check when a devis does not show), built by `scripts/build_notion_rules_pdf.py` (needs reportlab, not a pipeline dependency). Rebuild it whenever one of these rules changes.
 
