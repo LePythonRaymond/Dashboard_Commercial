@@ -302,12 +302,19 @@ def check_lost_table(items: List[Dict[str, Any]], status_by_id: Dict[str, str],
 
 
 def recently_modified_ids(df: pd.DataFrame, today: Optional[datetime] = None) -> Set[str]:
-    """Devis modified in Furious today (last_updated_at): this morning's sync may predate the change."""
-    if df is None or df.empty or "last_updated_at" not in df.columns:
+    """Devis created or modified in Furious today: this morning's sync may predate them.
+
+    A devis created today and never edited has no last_updated_at, hence the
+    created_at test (met on 2026-09-28: two Brief devis created in the afternoon).
+    """
+    if df is None or df.empty:
         return set()
     day = pd.Timestamp(today or datetime.now()).normalize()
-    updated = pd.to_datetime(df["last_updated_at"], errors="coerce")
-    return set(df.loc[updated >= day, "id"].astype(str).str.strip())
+    touched = pd.Series(False, index=df.index)
+    for column in ("last_updated_at", "created_at"):
+        if column in df.columns:
+            touched |= pd.to_datetime(df[column], errors="coerce") >= day
+    return set(df.loc[touched, "id"].astype(str).str.strip())
 
 
 def check_notion_tables(

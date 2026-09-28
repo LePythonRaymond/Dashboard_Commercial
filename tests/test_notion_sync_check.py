@@ -95,6 +95,13 @@ def test_followup_table_reports_missing_extra_mismatch_and_duplicates():
     assert check.duplicates == ["6"] and check.drift and not check.ok
 
 
+def test_devis_created_today_are_skipped_even_without_an_update_date():
+    df = pd.DataFrame([dict(_devis("1", "Brief", updated="2026-09-20"), created_at=pd.Timestamp("2026-09-28")),
+                       dict(_devis("2", "Brief"), created_at=pd.Timestamp("2026-09-01"))])
+    df.loc[0, "last_updated_at"] = pd.NaT
+    assert recently_modified_ids(df, today=datetime(2026, 9, 28, 7, 30)) == {"1"}
+
+
 def test_devis_modified_today_are_skipped():
     df = pd.DataFrame([_devis("1", "Brief", updated="2026-09-24"), _devis("2", "Brief")])
     skip = recently_modified_ids(df, today=datetime(2026, 9, 24, 7, 30))
