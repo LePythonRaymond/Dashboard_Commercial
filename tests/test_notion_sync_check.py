@@ -40,7 +40,7 @@ def _won_page(devis_id, status="Gagnés en cours", amount=1000.0, date="2026-09-
         "ID Devis": {"type": "rich_text", "rich_text": [_text(devis_id)]},
         "Statut Furious": {"type": "select", "select": {"name": status}},
         "Montant HT": {"type": "number", "number": amount},
-        "Date gagné": {"type": "date", "date": {"start": date}},
+        "Date signature": {"type": "date", "date": {"start": date}},
     }}
     if parent_page is not None:
         page["properties"]["Devis parent"] = {"type": "relation", "relation": [{"id": parent_page}] if parent_page else [],

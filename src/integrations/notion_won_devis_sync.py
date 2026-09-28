@@ -5,22 +5,20 @@ upserted by ID Devis into one Notion database.
 
 Why this exists
 ---------------
-The sales team wants one place that lists the won devis and splits them into
-"gagné mais pas encore signé" and "gagné et signé", followed month by month.
-Furious never records the signature (signature_date is empty on every devis)
-and its API refuses any change to a won devis: an update returns
-"La modification d'un devis gagné est interdite" (checked on 2026-09-23).
-The signature date is therefore entered in Notion, and this sync protects it.
+The sales team wants one place that lists the signed devis, month by month.
+At Merci Raymond a devis is marked won in Furious on the day the official
+signature arrives (confirmed by Clémence on 2026-09-28): won means signed, and
+the day Furious marks the devis won, which Furious writes into the devis date,
+is its signature date. That date is "Date signature" in Notion. Furious' own
+signature_date field is empty on every devis and every avenant (e-signature is
+not used), so it is not read.
 
 Who owns which Notion property
 ------------------------------
-- Furious owns: Client, BU, Typologie, Montant HT, Statut Furious, Date gagné,
-  Début projet, Fin projet, Commercial, Chef de projet, Lien Furious. They are
-  rewritten whenever Furious changes. "Nom" is written on creation only, so a
-  rename made in Notion survives.
-- People own "Date signature". The sync never overwrites it and never clears
-  it. It only fills it when Notion is empty and Furious has a signature_date
-  (for example if Furious e-signature is used one day).
+- Furious owns: Client, BU, Typologie, Montant HT, Statut Furious, Date
+  signature, Début projet, Fin projet, Commercial, Chef de projet, Lien
+  Furious. They are rewritten whenever Furious changes. "Nom" is written on
+  creation only, so a rename made in Notion survives.
 - People own the team columns, the same ones as in "Devis à suivre":
   Commentaire, Pris en charge, Date archivage, Origine Transfo. The sync never
   writes them, with one exception when it creates a page: if the devis had a
@@ -50,13 +48,12 @@ Example: devis 251000 of 10/11/2025 (10 000 EUR) with an avenant of 5 000 EUR on
 is older than the window still gets its devis as parent: that devis row is kept
 with its own old date, so the yearly and 12-month views leave it out.
 
-Furious records no signature date on avenants (checked on 2026-09-24: empty on
-all 99), so an avenant row gets a "Date signature" only when someone types it.
+An avenant follows the same rule: it is accepted in Furious when it is
+signed, so its date is its signature date.
 
-Example: devis 263464 is won on 16/09. The sync creates its page with
-Date gagné = 16/09 and an empty Date signature, so the formula shows
-"⏳ Non signé". On 02/10 someone types Date signature = 01/10: the page moves
-to "✅ Signé" and every later run leaves that date alone.
+Example: devis 263464 is marked won on 16/09, the day its signed copy comes
+back. Next morning the sync creates its page with Date signature = 16/09 and
+the devis counts in September in every view and chart.
 """
 
 import re
@@ -75,6 +72,8 @@ from .notion_values import page_value, value_from_page as _value_from_page, valu
 TITLE_PROP = "Nom"
 ID_PROP = "ID Devis"
 STATUS_PROP = "Statut Furious"
+# The day Furious marks the devis won, i.e. the day of the official signature
+# (Furious re-stamps the devis date then). Named "Date gagné" until 2026-09-28.
 SIGNATURE_PROP = "Date signature"
 TYPE_PROP = "Type"            # "Devis" or "Avenant"
 PARENT_PROP = "Devis parent"  # relation of an avenant row to its devis row (sub-items)
@@ -145,7 +144,6 @@ def _avenant_row(addon: Dict[str, Any], parent: Dict[str, Any], date: pd.Timesta
     """One avenant as a row of its own, attached to its (won) devis."""
     title = f"[Avenant] {_clean_text(addon.get('title')) or parent['id']}"
     cf_bu = _clean_text(addon.get("cf_bu")) or _clean_text(parent.get("cf_bu"))
-    signature = pd.to_datetime(addon.get("signature_date"), errors="coerce")
     return {
         "id": f"{parent['id']}_AV{addon.get('id_system', '')}",
         "title": title,
@@ -159,7 +157,6 @@ def _avenant_row(addon: Dict[str, Any], parent: Dict[str, Any], date: pd.Timesta
         "final_bu": DataCleaner.assign_bu({"title": title, "cf_bu": cf_bu}),
         "projet_start": parent.get("projet_start"),
         "projet_stop": parent.get("projet_stop"),
-        "signature_date": signature,  # a real signature only, never the avenant date
         "row_type": "Avenant",
         "parent_id": parent["id"],
     }
@@ -245,13 +242,8 @@ def _to_number(value: Any) -> Optional[float]:
     return None if pd.isna(number) else round(number, 2)
 
 
-def page_signature_date(page: Dict[str, Any]) -> Optional[str]:
-    """The Date signature typed in Notion for this page, as YYYY-MM-DD, or None."""
-    return page_value(page, SIGNATURE_PROP)
-
-
 class NotionWonDevisSync(NotionMaintenanceWonSync):
-    """Upsert won devis into the "Devis gagnés" database and protect Date signature.
+    """Upsert the won (signed) devis and their avenants into the "Devis gagnés" database.
 
     Reuses the Notion plumbing of NotionMaintenanceWonSync (client pinned to API
     2025-09-03, data source resolution, schema loading, people mapping). Only
@@ -290,7 +282,7 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
         return list(dict.fromkeys(n for n in names if _clean_text(n)))
 
     def _build_page_properties(self, item: Dict[str, Any], schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Furious-owned properties for one row. Date signature, Devis parent and the team columns are not built here."""
+        """Furious-owned properties for one row. Devis parent and the team columns are not built here."""
         schema = schema or {}
         allow = schema.__contains__
         devis_id = str(item.get("id", "")).strip()
@@ -312,7 +304,7 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
         if allow(STATUS_PROP):
             status = _clean_text(item.get("statut"))
             props[STATUS_PROP] = {"select": {"name": status[:100]} if status else None}
-        for prop_name, key in (("Date gagné", "date"), ("Début projet", "projet_start"), ("Fin projet", "projet_stop")):
+        for prop_name, key in ((SIGNATURE_PROP, "date"), ("Début projet", "projet_start"), ("Fin projet", "projet_stop")):
             if allow(prop_name):
                 value = self._format_date(item.get(key))
                 props[prop_name] = {"date": {"start": value} if value else None}
@@ -429,9 +421,7 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
 
         Counters: created, updated, unchanged (nothing to write), errors,
         relabelled (page whose devis left the won statuses), orphans (page whose
-        devis is no longer in Furious, left untouched), signatures_from_furious,
-        signed_in_notion (pages carrying a Date signature), duplicates_in_notion,
-        team_values_copied (new pages that received the Commentaire or Origine
+        devis is no longer in Furious), duplicates_in_notion, team_values_copied (new pages that received the Commentaire or Origine
         Transfo of their "Devis à suivre" row), parent_missing (avenant whose devis
         page could not be found or created, left without parent), left_scope /
         back_in_scope (pages archived today because they left the scope, or brought
@@ -439,8 +429,7 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
         """
         stats = {key: 0 for key in (
             "created", "updated", "unchanged", "errors", "relabelled", "orphans",
-            "signatures_from_furious", "signed_in_notion", "duplicates_in_notion", "team_values_copied",
-            "parent_missing", "left_scope", "back_in_scope",
+            "duplicates_in_notion", "team_values_copied", "parent_missing", "left_scope", "back_in_scope",
         )}
         stats["items"] = len(items)
         if not self.database_id:
@@ -455,8 +444,7 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
             return stats
 
         existing, stats["duplicates_in_notion"] = self._list_existing_pages()
-        stats["signed_in_notion"] = sum(1 for page in existing.values() if page_signature_date(page))
-        print(f"    {len(existing)} page(s) already in Notion, {stats['signed_in_notion']} with a Date signature.")
+        print(f"    {len(existing)} page(s) already in Notion.")
 
         page_ids = {devis_id: page["id"] for devis_id, page in existing.items()}
         seen = set()
@@ -472,13 +460,9 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
                     props[PARENT_PROP] = {"relation": [{"id": page_ids[parent_id]}]}
                 else:
                     stats["parent_missing"] += 1
-            furious_signature = self._format_date(item.get("signature_date"))
             page = existing.get(devis_id)
 
             if page is None:
-                if furious_signature and SIGNATURE_PROP in schema:
-                    props[SIGNATURE_PROP] = {"date": {"start": furious_signature}}
-                    stats["signatures_from_furious"] += 1
                 copied = {name: value for name, value in (team_values or {}).get(devis_id, {}).items()
                           if name in COPIED_FROM_FOLLOWUP and name in schema}
                 props.update(copied)
@@ -494,9 +478,6 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
                 continue
 
             props.pop(TITLE_PROP, None)  # keep renames made in Notion
-            if not page_signature_date(page) and furious_signature and SIGNATURE_PROP in schema:
-                props[SIGNATURE_PROP] = {"date": {"start": furious_signature}}
-                stats["signatures_from_furious"] += 1
             current = page.get("properties") or {}
             changed = {name: value for name, value in props.items()
                        if _value_from_payload(value) != _value_from_page(current.get(name, {}))}

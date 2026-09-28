@@ -10,7 +10,7 @@ scripts/run_reconciliation.py, which e-mails when something is off.
 What "shown" means: a page whose "Dans le périmètre" is ticked, the checkbox
 every view filters on (see notion_scope). For a table without that checkbox:
 a follow-up page with a waiting "Statut"; a won page with a won "Statut
-Furious" and "Date gagné" inside the window; a lost page with "Statut Furious"
+Furious" and "Date signature" inside the window; a lost page with "Statut Furious"
 "Perdu" and "Date perdu" inside the window.
 
 Four kinds of problem are reported:
@@ -39,7 +39,7 @@ from .notion_alerts_sync import NotionAlertsSync
 from .notion_values import page_value
 from .notion_lost_devis_sync import LOST_DATE_PROP, REASON_PROP, NotionLostDevisSync, select_lost_devis
 from .notion_scope import SCOPE_PROP
-from .notion_won_devis_sync import PARENT_PROP, NotionWonDevisSync, build_won_rows, furious_status_by_id
+from .notion_won_devis_sync import PARENT_PROP, SIGNATURE_PROP, NotionWonDevisSync, build_won_rows, furious_status_by_id
 
 FOLLOWUP_TABLE = "Devis à suivre"
 WON_TABLE = "Devis gagnés"
@@ -222,7 +222,7 @@ def check_won_table(items: List[Dict[str, Any]], status_by_id: Dict[str, str],
     start_day = _day(start)
     scoped = _uses_scope(by_id)
     shown = _shown_pages(by_id, lambda page: _status(page_value(page, "Statut Furious")) in STATUS_WON
-                         and (page_value(page, "Date gagné") or "") >= start_day)
+                         and (page_value(page, SIGNATURE_PROP) or "") >= start_day)
     result.expected = len(items) if scoped else sum(1 for item in items if not item.get("context"))
     result.shown = len(shown)
 
@@ -239,7 +239,7 @@ def check_won_table(items: List[Dict[str, Any]], status_by_id: Dict[str, str],
         fields = [
             ("Montant HT", page_value(page, "Montant HT"), _amount(item.get("amount"))),
             ("Statut Furious", _status(page_value(page, "Statut Furious")), _status(item.get("statut"))),
-            ("Date gagné", page_value(page, "Date gagné"), _day(item.get("date"))),
+            (SIGNATURE_PROP, page_value(page, SIGNATURE_PROP), _day(item.get("date"))),
         ]
         parent_id = str(item.get("parent_id") or "").strip()
         if parent_id:

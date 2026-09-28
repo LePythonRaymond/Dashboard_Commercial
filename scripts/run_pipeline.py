@@ -526,7 +526,7 @@ class PipelineRunner:
 
             # Step 11: Sync ALL won devis (all BUs, rolling WON_DEVIS_LOOKBACK_DAYS window) to the "Devis gagnés" DB.
             # Each devis row carries its own amount, each avenant is a sub-item row under its devis.
-            # Furious-owned fields are refreshed; "Date signature" and the team columns are typed in Notion
+            # Furious-owned fields are refreshed ("Date signature" = the day Furious marked the devis won); the team columns are typed in Notion
             # and never overwritten. Skipped without avenants: the rows would be wrong for a day.
             logger.info("\n--- Step 11: Syncing won devis (all BUs) to Notion ---")
             window_start = won_devis_window_start()

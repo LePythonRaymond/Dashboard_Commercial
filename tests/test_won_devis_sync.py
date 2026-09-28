@@ -1,6 +1,7 @@
 """
-Tests for NotionWonDevisSync: devis selection, property mapping, and the rule that
-a "Date signature" typed in Notion is never overwritten or cleared by the sync.
+Tests for NotionWonDevisSync: devis selection, property mapping (won = signed:
+"Date signature" is the day Furious marked the devis won), avenant sub-items,
+team columns and the scope rule.
 """
 
 from datetime import date, datetime
@@ -13,14 +14,13 @@ from src.integrations.notion_won_devis_sync import (
     NotionWonDevisSync,
     build_won_rows,
     is_test_devis,
-    page_signature_date,
     won_devis_window_start,
 )
 
 SCHEMA = {name: {"type": kind} for name, kind in {
     "Nom": "title", "ID Devis": "rich_text", "Client": "rich_text", "BU": "select", "Typologie": "multi_select",
-    "Montant HT": "number", "Statut Furious": "select", "Date gagné": "date", "Date signature": "date",
-    "Statut signature": "formula", "Commercial": "people", "Chef de projet": "people",
+    "Montant HT": "number", "Statut Furious": "select", "Date signature": "date",
+    "Commercial": "people", "Chef de projet": "people",
     "Début projet": "date", "Fin projet": "date", "Lien Furious": "url",
     # team columns, owned by people
     "Commentaire": "rich_text", "Pris en charge": "checkbox", "Date archivage": "date", "Origine Transfo": "select",
@@ -161,44 +161,30 @@ def test_build_page_properties_mapping():
     assert props["BU"] == {"select": {"name": "AUTRE"}}
     assert props["Typologie"] == {"multi_select": [{"name": "Travaux DV"}]}
     assert props["Montant HT"] == {"number": None}
-    assert props["Date gagné"] == {"date": {"start": "2026-09-16"}}
+    assert props["Date signature"] == {"date": {"start": "2026-09-16"}}   # the day Furious marked it won
     assert props["Fin projet"] == {"date": None}
     assert props["Lien Furious"]["url"].endswith("cherche=263464")
     assert props["Commercial"]["people"] == [{"object": "user", "id": "user-guillaume"}]
     assert props["Chef de projet"]["people"] == [{"object": "user", "id": "user-mathilde"}]
-    assert "Date signature" not in props and "Statut signature" not in props
 
 
-def test_new_devis_is_created_without_signature():
+def test_new_devis_is_created_signed_on_the_day_it_was_won():
     client = FakeClient()
     stats = _sync(client).sync_won_devis([_item()], {"263464": "Gagnés en cours"})
     assert stats["created"] == 1 and stats["errors"] == 0
     created = client.created[0]
     assert created["parent"] == {"data_source_id": "ds-1"}
-    assert "Date signature" not in created["properties"]
+    assert created["properties"]["Date signature"] == {"date": {"start": "2026-09-16"}}
     assert created["properties"]["Nom"]["title"][0]["text"]["content"].startswith("(P) MR x Audace")
 
 
-def test_signature_typed_in_notion_is_never_overwritten():
-    sync = _sync(FakeClient())
-    stored = sync._build_page_properties(_item(), schema=SCHEMA)
-    stored["Date signature"] = {"date": {"start": "2026-09-01"}}
-    page = _as_page("page-1", stored)
-    client = FakeClient(pages=[page])
-    changed_item = _item(amount=5000.0, signature_date=pd.Timestamp("2026-08-15"))
-    stats = _sync(client).sync_won_devis([changed_item], {"263464": "Gagnés en cours"})
-    assert stats["updated"] == 1 and stats["signed_in_notion"] == 1
-    sent = client.updated[0]["properties"]
-    assert sent == {"Montant HT": {"number": 5000.0}}  # only the changed Furious field
-    assert page_signature_date(page) == "2026-09-01"
-
-
-def test_signature_from_furious_fills_an_empty_notion_date():
+def test_signature_date_follows_furious():
+    """Furious re-dates a devis when it is marked won: the Notion date follows."""
     sync = _sync(FakeClient())
     page = _as_page("page-1", sync._build_page_properties(_item(), schema=SCHEMA))
     client = FakeClient(pages=[page])
-    stats = _sync(client).sync_won_devis([_item(signature_date=pd.Timestamp("2026-09-20"))], {})
-    assert stats["signatures_from_furious"] == 1
+    stats = _sync(client).sync_won_devis([_item(date=pd.Timestamp("2026-09-20"))], {})
+    assert stats["updated"] == 1
     assert client.updated[0]["properties"] == {"Date signature": {"date": {"start": "2026-09-20"}}}
 
 
@@ -318,7 +304,7 @@ def test_devis_and_avenants_become_separate_rows_with_their_own_numbers():
     assert rows["240500"].get("context") is True and not rows["251000"].get("context")
     assert rows["240500_AV8"]["parent_id"] == "240500" and rows["240500_AV8"]["date"] == pd.Timestamp("2025-10-05")
     assert rows["251000_AV7"]["statut"] == "Gagnés en cours" and rows["251000_AV7"]["final_bu"] == "CONCEPTION"
-    assert pd.isna(rows["251000_AV7"]["signature_date"])   # never the avenant date
+    assert rows["251000_AV7"]["date"] == pd.Timestamp("2025-12-02")   # an avenant is signed on its own date
     assert [i["row_type"] for i in items].index("Avenant") == 3   # parents before avenants
 
 

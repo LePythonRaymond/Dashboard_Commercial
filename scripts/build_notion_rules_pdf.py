@@ -22,7 +22,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 OUT = Path(__file__).resolve().parent.parent / "docs" / "Regles_tables_Notion.pdf"
-UPDATED = "24/09/2026"
+UPDATED = "28/09/2026"
 
 # Arial covers the French accents, the euro sign and "≥"; Helvetica is the fallback.
 FONTS = Path("/System/Library/Fonts/Supplemental")
@@ -159,8 +159,9 @@ def build() -> Path:
              "tombe dans les 365 prochains jours.",
              "Gagné, perdu, probabilité sous 10 %, ou dates hors de la fenêtre."],
             ["Devis gagnés",
-             "Les devis gagnés depuis 12 mois (date du devis) et les avenants signés depuis 12 mois, rangés "
-             "sous leur devis. Un devis plus ancien reste affiché s'il porte un avenant récent.",
+             "Les devis signés depuis 12 mois (gagné = signé : date de signature) et les avenants signés "
+             "depuis 12 mois, rangés sous leur devis. Un devis plus ancien reste affiché s'il porte un "
+             "avenant récent.",
              "Plus de 12 mois, ou n'est plus gagné dans Furious."],
             ["Devis perdus",
              "Les devis perdus depuis 12 mois (la date du devis est la date de perte), sauf "
@@ -177,12 +178,13 @@ def build() -> Path:
         grid([
             ["Rempli par la synchro : modifié dans Notion, écrasé le lendemain",
              "Rempli par l'équipe : jamais écrasé par la synchro"],
-            ["Client, Montant, Statut ou Statut Furious (sauf dans Pipe travaux), dates Furious, Typologie, "
+            ["Client, Montant, Statut ou Statut Furious (sauf dans Pipe travaux), dates Furious (dont la "
+             "Date signature des Devis gagnés), Typologie, "
              f"Probabilité, Commercial, Chef de projet, Lien Furious, Motif de perte, Type (Devis / Avenant), "
              f"{q('Dans le périmètre')}, {q('Archivé par la synchro')} (colonne cachée). "
              "Le Nom n'est écrit qu'à la création : un renommage est conservé.",
              f"Commentaire, Origine Transfo, {q('Pris en charge')}, date d'archivage (remplie automatiquement "
-             f"quand on coche), Date signature (Devis gagnés), Notes Mathilde, Next Steps Commercial, "
+             f"quand on coche), Notes Mathilde, Next Steps Commercial, "
              f"Statut (Pipe travaux)."],
         ], [width / 2, width / 2], bold_first_column=False),
         Spacer(1, 4),
@@ -193,9 +195,10 @@ def build() -> Path:
         *bullets([
             "Chaque ligne montre les chiffres d'un seul document Furious : le devis avec son propre montant, "
             "chaque avenant en sous-ligne avec le sien. Le total d'un mois = devis + avenants signés ce mois-là.",
-            f"{q('Gagnés, pas encore signés')} : gagnés sans Date signature. La vue {q('(cette année)')} montre "
-            "la même chose pour l'année civile en cours et passe seule à l'année suivante le 1<super>er</super> janvier.",
-            "Furious n'enregistre pas les signatures : la Date signature se saisit dans Notion.",
+            "Gagné = signé : un devis passe en gagné dans Furious le jour où arrive la signature officielle. "
+            "La Date signature est ce jour-là (un avenant, le jour de son acceptation). Rien à saisir.",
+            f"Vues : {q('Signés (12 derniers mois)')}, {q('Signés cette année')} (passe seule à l'année suivante "
+            f"le 1<super>er</super> janvier) et le graphique {q('Montant signé par mois')}.",
             f"Les graphiques comptent toutes les lignes du périmètre, y compris celles {q('Pris en charge')}.",
             "Le statut d'un devis (en attente, gagné, perdu) se change uniquement dans Furious : "
             "Notion l'affiche et le met à jour le lendemain matin.",
