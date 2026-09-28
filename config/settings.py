@@ -150,14 +150,14 @@ class Settings:
     notion_maintenance_won_database_id: str = field(
         default_factory=lambda: get_secret("NOTION_MAINTENANCE_WON_DATABASE_ID", "")
     )
-    # Notion database/datasource for ALL won devis (all BUs), with the signature date
-    # typed in Notion (Furious refuses API changes on won devis). Daily sync, step 11.
+    # Notion database/datasource for ALL won devis (all BUs). Won means signed: "Date signature" is the
+    # day Furious marked the devis won (official signature). Daily sync, step 11.
     notion_won_devis_database_id: str = field(
         default_factory=lambda: get_secret("NOTION_WON_DEVIS_DATABASE_ID", "")
     )
-    # Rolling window of the won devis sync: devis won in the last N days are
-    # created or refreshed. Older pages stay in Notion (history) but are no
-    # longer refreshed, except for their "Statut Furious".
+    # Rolling window of the won and lost devis syncs: devis of the last N days
+    # are in scope. Older pages leave the scope, are archived, and go to the
+    # Notion trash six months later (src/integrations/notion_scope.py).
     won_devis_lookback_days: int = field(
         default_factory=lambda: int(get_secret("WON_DEVIS_LOOKBACK_DAYS", "365"))
     )

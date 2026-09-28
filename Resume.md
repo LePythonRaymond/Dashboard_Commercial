@@ -1075,6 +1075,19 @@ See original documentation for details on performance, security, error handling,
 
 **Tests**: 308 passed (new `tests/test_notion_scope.py`; leftover, TRAVAUX, won and lost tests rewritten for the rule).
 
+### 18.20 Won means signed: one "Date signature" in "Devis gagnés" (September 2026)
+
+**Business fact (Clémence, 2026-09-28)**: a devis is marked won in Furious on the day the official signature arrives. Won therefore means signed, and the day Furious marks the devis won (Furious re-stamps the devis `date` then) is the signature date. The same holds for avenants, accepted when signed. The "gagné pas encore signé" split of §18.16 no longer exists.
+
+**Notion "Devis gagnés"**:
+- "Date gagné" renamed "Date signature" (Furious-owned: the devis date, the avenant date for an avenant row). The manual "Date signature" column (empty on all 377 rows) and the formulas "Statut signature", "Mois signature" and "Mois gagné" are deleted. The formula "Gagné cette année" now reads "Date signature".
+- Views: "⏳ Gagnés, pas encore signés" deleted (it could only be empty); "✅ Gagnés et signés" became "✅ Signés (12 derniers mois)" and "⏳ Gagnés, pas encore signés (cette année)" became "✅ Signés cette année", both grouped by month of Date signature; "🖋️ Montant signé par mois" now charts every row in scope by Date signature. "📋 Tous les devis gagnés" is unchanged.
+- The sync no longer protects or fills a typed signature (the counters `signatures_from_furious` / `signed_in_notion` are gone); the 11 avenant dates cleared on 2026-09-24 as "fake signatures" were in fact the right dates and come back as "Date signature".
+
+**Dashboard and other syncs**: nothing to change. The "Signé" sheets and the Objectifs "Signature" figures already place a devis in the month Furious marked it won (`date`, with the always-empty `signature_date` as first choice); the TRAVAUX projection writes "Date Signature" = `signature_date` or `date`.
+
+**Recap PDF** rebuilt (rules of 28/09/2026). **Tests**: 307 passed.
+
 ---
 
 ## 17. Conclusion
@@ -1090,7 +1103,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.45
+**Document Version**: 1.46
 **Last Updated**: September 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System

@@ -15,12 +15,13 @@ A page must be shared with the Myrium integration ("Connections" menu) before
 already exist (matched by name) instead of creating duplicates: this replaces
 what the team changed in them, so prefer the two safe modes below.
 
-Views, every table grouped by month with the most recent month first:
-  ⏳ Gagnés, pas encore signés : no Date signature, grouped by month of Date gagné
-  ⏳ Gagnés, pas encore signés (cette année) : the same, current calendar year only
-  ✅ Gagnés et signés          : with a Date signature, grouped by month of Date signature
-  📊 Montant gagné par mois    : columns, sum of Montant HT per month of Date gagné, stacked by BU
-  🖋️ Montant signé par mois    : columns, sum of Montant HT per month of Date signature
+Won means signed (a devis is marked won in Furious on the day of the official
+signature), so "Date signature" is the only date and there is no "not signed yet"
+list. Views, tables grouped by month of Date signature, newest month first,
+all limited to "Dans le périmètre":
+  ✅ Signés (12 derniers mois) : every row of the table
+  ✅ Signés cette année        : the current calendar year only
+  🖋️ Montant signé par mois    : columns, sum of Montant HT per month
 
 --team-columns adds the columns the team owns in "Devis à suivre" (Commentaire,
 Pris en charge, Date archivage, Origine Transfo) to the database when they are
@@ -54,9 +55,11 @@ from src.integrations.notion_views import data_source_of, notion_call, same_prop
 
 WON_STATUSES = ("Gagnés en cours", "Gagnés et finis")
 TEAM_COLUMNS = ["Commentaire", "Pris en charge", "Date archivage", "Origine Transfo"]
-TABLE_COLUMNS = ["Nom", "Type", "Client", "BU", "Montant HT", "Date gagné", "Date signature", "Commercial",
+TABLE_COLUMNS = ["Nom", "Type", "Client", "BU", "Montant HT", "Date signature", "Commercial",
                  "Lien Furious", *TEAM_COLUMNS]
 PARENT_PROP, CHILDREN_PROP, TYPE_PROP, THIS_YEAR = "Devis parent", "Avenants", "Type", "Gagné cette année"
+SIGNED_ON = "Date signature"   # the day Furious marked the devis won (official signature)
+SCOPE_PROP = "Dans le périmètre"
 # Same options and colours as "Origine Transfo" in "Devis à suivre" on 2026-09-24,
 # used when that table cannot be read.
 ORIGINE_TRANSFO_OPTIONS = [{"name": "DV", "color": "pink"}, {"name": "Paysage", "color": "red"},
@@ -79,33 +82,21 @@ def _subtasks(pid: Dict[str, str]) -> Dict[str, Any]:
 def build_view_specs(pid: Dict[str, str]) -> List[Dict[str, Any]]:
     """The views, in the data source query filter format used by the views API."""
     won = {"or": [{"property": "Statut Furious", "select": {"equals": s}} for s in WON_STATUSES]}
-    not_signed = {"property": "Date signature", "date": {"is_empty": True}}
-    signed = {"property": "Date signature", "date": {"is_not_empty": True}}
+    in_scope = [{"property": SCOPE_PROP, "checkbox": {"equals": True}}] if SCOPE_PROP in pid else []
     this_year = {"property": THIS_YEAR, "formula": {"checkbox": {"equals": True}}}
     columns = [{"property_id": pid[name], "visible": name in TABLE_COLUMNS} for name in
                TABLE_COLUMNS + [n for n in pid if n not in TABLE_COLUMNS]]
-
-    def table(date_prop: str) -> Dict[str, Any]:
-        return {"type": "table", "group_by": _month_group(pid[date_prop]), "properties": columns,
-                "subtasks": _subtasks(pid)}
-
+    table = {"type": "table", "group_by": _month_group(pid[SIGNED_ON]), "properties": columns,
+             "subtasks": _subtasks(pid)}
+    newest_first = [{"property": SIGNED_ON, "direction": "descending"}]
     return [
-        {"name": "⏳ Gagnés, pas encore signés", "type": "table", "filter": {"and": [not_signed, won]},
-         "sorts": [{"property": "Date gagné", "direction": "descending"}], "configuration": table("Date gagné")},
-        {"name": "⏳ Gagnés, pas encore signés (cette année)", "type": "table",
-         "filter": {"and": [not_signed, won, this_year]},
-         "sorts": [{"property": "Date gagné", "direction": "descending"}], "configuration": table("Date gagné")},
-        {"name": "✅ Gagnés et signés", "type": "table", "filter": {"and": [signed, won]},
-         "sorts": [{"property": "Date signature", "direction": "descending"}], "configuration": table("Date signature")},
-        {"name": "📊 Montant gagné par mois", "type": "chart", "filter": won,
+        {"name": "✅ Signés (12 derniers mois)", "type": "table", "filter": {"and": [won, *in_scope]},
+         "sorts": newest_first, "configuration": table},
+        {"name": "✅ Signés cette année", "type": "table", "filter": {"and": [won, this_year, *in_scope]},
+         "sorts": newest_first, "configuration": table},
+        {"name": "🖋️ Montant signé par mois", "type": "chart", "filter": {"and": [won, *in_scope]},
          "configuration": {"type": "chart", "chart_type": "column", "height": "large", "group_style": "normal",
-                           "x_axis": {"type": "date", "property_id": pid["Date gagné"], "group_by": "month",
-                                      "sort": {"type": "ascending"}},
-                           "y_axis": {"aggregator": "sum", "property_id": pid["Montant HT"]},
-                           "stack_by": {"type": "select", "property_id": pid["BU"], "sort": {"type": "manual"}}}},
-        {"name": "🖋️ Montant signé par mois", "type": "chart", "filter": {"and": [signed, won]},
-         "configuration": {"type": "chart", "chart_type": "column", "height": "large",
-                           "x_axis": {"type": "date", "property_id": pid["Date signature"], "group_by": "month",
+                           "x_axis": {"type": "date", "property_id": pid[SIGNED_ON], "group_by": "month",
                                       "sort": {"type": "ascending"}},
                            "y_axis": {"aggregator": "sum", "property_id": pid["Montant HT"]}}},
     ]
@@ -151,7 +142,7 @@ def ensure_subitem_structure(data_source_id: str, properties: Dict[str, Any]) ->
                                                    {"name": "Avenant", "color": "orange"}]}}
     if THIS_YEAR not in properties:
         extra[THIS_YEAR] = {"formula": {
-            "expression": 'if(empty(prop("Date gagné")), false, year(prop("Date gagné")) == year(now()))'}}
+            "expression": 'if(empty(prop("Date signature")), false, year(prop("Date signature")) == year(now()))'}}
     if extra:
         notion_call("PATCH", f"data_sources/{data_source_id}", {"properties": extra})
         print(f"created  {sorted(extra)}")
