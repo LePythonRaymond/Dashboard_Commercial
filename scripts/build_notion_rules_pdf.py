@@ -22,7 +22,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 OUT = Path(__file__).resolve().parent.parent / "docs" / "Regles_tables_Notion.pdf"
-UPDATED = "28/09/2026"
+UPDATED = "29/09/2026"
 
 # Arial covers the French accents, the euro sign and "≥"; Helvetica is the fallback.
 FONTS = Path("/System/Library/Fonts/Supplemental")
@@ -138,8 +138,8 @@ def build() -> Path:
                 "Elle ne retire que ses propres coches, si le devis revient dans le périmètre.",
                 "Le 1<super>er</super> de chaque mois, les lignes archivées, hors périmètre et dont la date "
                 "d'archivage a plus de 6 mois partent à la corbeille Notion (récupérables 30 jours).",
-                "Horaires : synchro à 6 h (Pipe travaux à 6 h 15). Un changement fait dans Furious aujourd'hui "
-                "apparaît dans Notion demain matin.",
+                "Horaires, heure de Paris : synchro vers 8 h, Pipe travaux vers 8 h 15 (7 h et 7 h 15 en hiver). "
+                "Un changement fait dans Furious aujourd'hui apparaît dans Notion demain matin.",
             ]),
         ], width),
         Spacer(1, 8),
@@ -152,7 +152,8 @@ def build() -> Path:
              "date de début ou de fin de projet manquante, début après la fin, probabilité à 0 %.",
              "Le problème est corrigé, ou le devis n'est plus en attente ni gagné ce mois-ci."],
             ["Devis à suivre / relancer",
-             "Tous les devis en attente (Brief, En cours, Envoyée(s) attente réponse), quelle que soit leur date.",
+             "Tous les devis en attente (Brief, En cours, Envoyée(s) attente réponse), quelle que soit leur date. "
+             "Un devis mis en gagné dans Notion y reste jusqu'à la signature.",
              f"Le devis est gagné, perdu ou supprimé. Son {q('Statut')} affiche alors le statut Furious."],
             ["Pipe travaux",
              "Les devis TRAVAUX en attente, de probabilité ≥ 10 %, dont la date du devis ou le début de projet "
@@ -178,19 +179,32 @@ def build() -> Path:
         grid([
             ["Rempli par la synchro : modifié dans Notion, écrasé le lendemain",
              "Rempli par l'équipe : jamais écrasé par la synchro"],
-            ["Client, Montant, Statut ou Statut Furious (sauf dans Pipe travaux), dates Furious (dont la "
+            ["Client, Montant, Statut ou Statut Furious (sauf dans Devis à suivre et Pipe travaux), dates Furious (dont la "
              "Date signature des Devis gagnés), Typologie, "
              f"Probabilité, Commercial, Chef de projet, Lien Furious, Motif de perte, Type (Devis / Avenant), "
              f"{q('Dans le périmètre')}, {q('Archivé par la synchro')} (colonne cachée). "
              "Le Nom n'est écrit qu'à la création : un renommage est conservé.",
              f"Commentaire, Origine Transfo, {q('Pris en charge')}, date d'archivage (remplie automatiquement "
              f"quand on coche), Notes Mathilde, Next Steps Commercial, "
-             f"Statut (Pipe travaux)."],
+             f"Statut (Pipe travaux), Statut de Devis à suivre (envoyé à Furious, voir ci-dessous)."],
         ], [width / 2, width / 2], bold_first_column=False),
         Spacer(1, 4),
         Paragraph(f"Quand un devis de {q('Devis à suivre')} est gagné ou perdu, son Commentaire et son "
                   f"Origine Transfo sont recopiés dans {q('Devis gagnés')} ou {q('Devis perdus')}, "
                   "à la création de la ligne. Ensuite, les deux lignes sont indépendantes.", SMALL),
+        Paragraph("Devis à suivre : le statut se change dans Notion", H),
+        *bullets([
+            "<b>Brief, En cours, Envoyée(s) attente réponse</b> : changez-les dans Notion, Furious suit en 2 minutes "
+            "environ (pendant la synchro du matin, juste après).",
+            f"<b>gagné</b> : le client a dit oui, la signature n'est pas là. Reste dans Notion seulement (Furious garde "
+            f"le devis en attente). Vue {q('Gagnés, en attente de signature')}.",
+            "<b>Signature reçue</b> : passez le devis en gagné dans Furious, comme avant (le projet se crée). "
+            "Le lendemain matin, il quitte Devis à suivre et arrive dans Devis gagnés, à la date de signature.",
+            "<b>Perdu</b> : dans Furious, avec la raison de la perte. Choisi dans Notion, il est remis comme avant.",
+            f"Furious refuse (ex. « BU est requis » : champ à remplir dans Furious) : le statut revient comme avant "
+            f"et la raison s'affiche dans {q('Retour Furious')}.",
+            "Un statut changé dans Furious arrive dans Notion le lendemain matin, sauf sur une ligne en gagné.",
+        ]),
         Paragraph("Bon à savoir sur Devis gagnés", H),
         *bullets([
             "Chaque ligne montre les chiffres d'un seul document Furious : le devis avec son propre montant, "
@@ -200,8 +214,7 @@ def build() -> Path:
             f"Vues : {q('Signés (12 derniers mois)')}, {q('Signés cette année')} (passe seule à l'année suivante "
             f"le 1<super>er</super> janvier) et le graphique {q('Montant signé par mois')}.",
             f"Les graphiques comptent toutes les lignes du périmètre, y compris celles {q('Pris en charge')}.",
-            "Le statut d'un devis (en attente, gagné, perdu) se change uniquement dans Furious : "
-            "Notion l'affiche et le met à jour le lendemain matin.",
+            "Gagné et perdu se marquent dans Furious ; Notion les affiche le lendemain matin.",
         ]),
         Paragraph("Je ne vois pas un devis : à vérifier dans l'ordre", H),
         *bullets([
@@ -212,7 +225,7 @@ def build() -> Path:
             f"La vue filtre-t-elle une personne ? ({q('Vue personnelle')} : vous êtes Commercial ou "
             f"Chef de projet ; {q('Pipe Vincent')}, {q('Clémence')}... : cette personne.)",
             f"Est-ce un devis de test ou un {q('Devis en doublon')} ? Ils sont exclus.",
-            "Toujours rien : chaque matin à 7 h 30, un contrôle compare Notion et Furious et signale "
+            "Toujours rien : chaque matin vers 9 h 30 (8 h 30 en hiver), un contrôle compare Notion et Furious et signale "
             "tout écart par mail. Prévenez Taddeo.",
         ], numbered=True),
     ]
