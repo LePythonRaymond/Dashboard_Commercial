@@ -915,10 +915,23 @@ class NotionAlertsSync:
         print("Syncing Alerts to Notion")
         print("=" * 50)
 
-        results = {
-            "weird_proposals": self.sync_weird_proposals(alerts_output.weird_proposals, status_by_id, today),
-            "commercial_followup": self.sync_followup_alerts(alerts_output.commercial_followup, status_by_id, today)
+        # Each table is synced on its own: one failing must not stop the other (on
+        # 2026-09-29 "Devis à normaliser" stopped being reachable and, raised from
+        # here, its error also kept "Devis à suivre" from being synced). A failed
+        # table comes back with "failed" (the error) in its statistics.
+        syncs = {
+            "weird_proposals": lambda: self.sync_weird_proposals(alerts_output.weird_proposals, status_by_id, today),
+            "commercial_followup": lambda: self.sync_followup_alerts(
+                alerts_output.commercial_followup, status_by_id, today),
         }
+        results = {}
+        for name, sync in syncs.items():
+            try:
+                results[name] = sync()
+            except Exception as exc:
+                print(f"  ✗ {name} sync failed: {exc}")
+                results[name] = {"created": 0, "updated": 0, "archived": 0, "errors": 1,
+                                 "failed": f"{type(exc).__name__}: {exc}"[:300]}
 
         # Print summary
         total_created = results["weird_proposals"]["created"] + results["commercial_followup"]["created"]

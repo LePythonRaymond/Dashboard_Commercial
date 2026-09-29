@@ -481,9 +481,12 @@ class PipelineRunner:
                         alerts_for_notion, status_by_id=furious_status_by_id(df_processed)
                     )
                     followup_stats = alerts_sync_stats["commercial_followup"]
-                    self._log_step("notion_alerts_sync", "success", {
-                        "weird_created": alerts_sync_stats["weird_proposals"]["created"],
-                        "weird_archived": alerts_sync_stats["weird_proposals"]["archived"],
+                    weird_stats = alerts_sync_stats["weird_proposals"]
+                    failed = [name for name, stats in alerts_sync_stats.items() if "failed" in stats]
+                    self._log_step("notion_alerts_sync", "error" if failed else "success", {
+                        "weird_created": weird_stats["created"],
+                        "weird_archived": weird_stats["archived"],
+                        **({"weird_failed": weird_stats["failed"]} if "failed" in weird_stats else {}),
                         **{f"followup_{key}": value for key, value in followup_stats.items()},
                     })
                 except Exception as e:
