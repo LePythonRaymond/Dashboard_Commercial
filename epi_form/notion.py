@@ -47,6 +47,8 @@ REFUSED = "Refusée"
 # Only "Remis" moves the stock; "À commander" feeds the order list.
 HANDED, TO_ORDER, LINE_REFUSED = "Remis", "À commander", "Refusé"
 LINE_CHOICES = (HANDED, TO_ORDER, LINE_REFUSED)
+# Set by the office on a worn item; the service turns it into WORN_OUT plus a replacement request.
+TO_REPLACE, WORN_OUT = "À remplacer", "Hors d'usage"
 
 
 class NotionError(RuntimeError):
@@ -287,7 +289,7 @@ def pending_elsewhere(item: Optional[Dict[str, Any]], qty: float) -> float:
 # --------------------------------------------------------------------- writes
 def create_request(client: NotionClient, demandes_ds: str, registre_ds: str, person: Dict[str, Any],
                    lines: List[Dict[str, Any]], motif: Optional[str], urgent: bool, commentaire: str,
-                   today: date) -> Dict[str, Any]:
+                   today: date, source: str = "Formulaire web") -> Dict[str, Any]:
     """Create the request page, then its register lines (Statut Demandé), PARALLEL_CALLS at a time.
 
     All or nothing: if Notion fails on any line, every page already created
@@ -317,7 +319,7 @@ def create_request(client: NotionClient, demandes_ds: str, registre_ds: str, per
             "Bénéficiaire": _people([person.get("user_id")]),
             "Type": _select("Sortie"),
             "Statut": _select("Demandé"),
-            "Source": _select("Formulaire web"),
+            "Source": _select(source),
             "Motif": _select(motif),
             "Urgence": _select(urgence),
             "Demande": _relation([page["id"]]),
@@ -357,6 +359,33 @@ def fill_missing_dates(client: NotionClient, registre_ds: str, today: date) -> D
     if errors:
         raise errors[0]
     return {"remis": len(handed), "rendus": len(returned)}
+
+
+def lines_to_replace(client: NotionClient, registre_ds: str) -> List[Dict[str, Any]]:
+    """Register lines the office set to "À remplacer" (handed-out items only)."""
+    pages = client.query_all(registre_ds, {"filter": {"property": "Statut", "select": {"equals": TO_REPLACE}}})
+    return [{
+        "id": page["id"],
+        "title": _prop(page, "Détail") or "",
+        "qty": _prop(page, "Quantité") or 1,
+        "article_id": (_prop(page, "Article") or [None])[0],
+        "user_ids": _prop(page, "Bénéficiaire") or [],
+        "request_ids": _prop(page, "Demande") or [],
+        "handed_on": _prop(page, "Remis le"),
+    } for page in pages if (_prop(page, "Type") or "Sortie") == "Sortie"]
+
+
+def requester_of(client: NotionClient, request_id: str) -> Optional[str]:
+    """The "Équipe EPI" page of the person who made a request."""
+    return (_prop(client.get_page(request_id), "Demandeur") or [None])[0]
+
+
+def set_worn_out(client: NotionClient, line_id: str, today: Optional[date]) -> None:
+    """Hors d'usage with today's "Rendu le"; today=None puts the line back to "À remplacer"."""
+    if today is None:
+        client.update_page(line_id, {"Statut": _select(TO_REPLACE), "Rendu le": {"date": None}})
+    else:
+        client.update_page(line_id, {"Statut": _select(WORN_OUT), "Rendu le": _date(today)})
 
 
 def store_links(client: NotionClient, request_id: str, urls: Dict[str, str]) -> None:
