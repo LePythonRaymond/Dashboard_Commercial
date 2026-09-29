@@ -42,7 +42,7 @@ try {
 }
 """
 
-RETRY = "Furious ne répond pas : nouvel essai automatique dans quelques minutes."
+FOLLOWUP_DS = "2ced9278-02d7-802a-8642-000be714240f"
 
 
 def run(file: str, input_items: List[Dict[str, Any]], nodes: Optional[Dict[str, Any]] = None) -> Any:
@@ -56,21 +56,23 @@ def run(file: str, input_items: List[Dict[str, Any]], nodes: Optional[Dict[str, 
 
 
 def page(page_id: str, devis_id: Any = "263219", statut: str = "en cours", statut_furious: Optional[str] = "brief",
-         retour: str = "") -> Dict[str, Any]:
+         scope: bool = True, data_source: str = FOLLOWUP_DS) -> Dict[str, Any]:
     ids = devis_id if isinstance(devis_id, list) else [devis_id]
-    return {"id": page_id, "properties": {
-        "Name": {"type": "title", "title": [{"plain_text": "Devis test"}]},
-        "ID Devis": {"type": "rich_text", "rich_text": [{"plain_text": part} for part in ids if part]},
-        "Statut": {"type": "status", "status": {"name": statut}},
-        "Statut Furious": {"type": "select", "select": {"name": statut_furious} if statut_furious else None},
-        "Retour Furious": {"type": "rich_text", "rich_text": [{"plain_text": retour}] if retour else []},
-    }}
+    return {"object": "page", "id": page_id,
+            "parent": {"type": "data_source_id", "data_source_id": data_source, "database_id": "x"},
+            "properties": {
+                "Name": {"type": "title", "title": [{"plain_text": "Devis test"}]},
+                "ID Devis": {"type": "rich_text", "rich_text": [{"plain_text": part} for part in ids if part]},
+                "Statut": {"type": "status", "status": {"name": statut}},
+                "Statut Furious": {"type": "select", "select": {"name": statut_furious} if statut_furious else None},
+                "Dans le périmètre": {"type": "checkbox", "checkbox": scope},
+            }}
 
 
 def row(devis_id: str = "263219", statut: str = "en cours", statut_furious: str = "brief", pipe: Optional[int] = 0,
-        retour: str = "", page_id: str = "p1") -> Dict[str, Any]:
+        page_id: str = "p1") -> Dict[str, Any]:
     return {"page_id": page_id, "devis_id": devis_id, "titre": "Devis test", "statut": statut,
-            "statut_furious": statut_furious, "retour_actuel": retour, "pipe_cible": pipe, "action": "envoyer"}
+            "statut_furious": statut_furious, "pipe_cible": pipe, "action": "envoyer"}
 
 
 def answer(body: Any = None, status: int = 200, index: int = 0, error: Optional[str] = None) -> Dict[str, Any]:
@@ -89,16 +91,41 @@ def props(item: Dict[str, Any]) -> Dict[str, Any]:
     return item["notion_body"]["properties"]
 
 
-def feedback(item: Dict[str, Any]) -> str:
-    return "".join(part["text"]["content"] for part in props(item)["Retour Furious"]["rich_text"])
+def comment(item: Dict[str, Any]) -> str:
+    assert item["comment_body"]["parent"] == {"page_id": item["page_id"]}
+    return "".join(part["text"]["content"] for part in item["comment_body"]["rich_text"])
+
+
+# ---------------------------------------------------------------- Page modifiée (webhook)
+
+@needs_node
+def test_webhook_keeps_only_the_page_id_from_body_data():
+    call = {"headers": {}, "body": {"source": {"type": "automation", "user_id": "u1"},
+                                    "data": {"object": "page", "id": "2ced9278-02d7-8155-aaaa-000000000001",
+                                             "properties": {"Statut": {"status": {"name": "Perdu"}}}}}}
+    assert run("page_modifiee.js", [{"json": call}]) == [{"page_id": "2ced9278-02d7-8155-aaaa-000000000001"}]
+
+
+@needs_node
+def test_webhook_finds_a_page_elsewhere_in_the_payload_and_ignores_repeats():
+    nested = {"body": {"event": {"entity": {"object": "page", "id": "2ced927802d78155aaaa000000000002"}}}}
+    again = {"body": {"data": {"object": "page", "id": "2ced9278-02d7-8155-aaaa-000000000002"}}}
+    assert run("page_modifiee.js", [{"json": nested}, {"json": again}]) == [{"page_id": "2ced927802d78155aaaa000000000002"}]
+
+
+@needs_node
+def test_webhook_without_a_page_fails_so_the_error_workflow_reports_it():
+    with pytest.raises(RuntimeError, match="sans page Notion reconnaissable"):
+        run("page_modifiee.js", [{"json": {"body": {"hello": "world"}}}])
 
 
 # ---------------------------------------------------------------- Préparer les changements
 
 @needs_node
 def test_waiting_statuses_get_their_furious_pipe_and_query():
-    pages = [page("a", statut="brief"), page("b", statut="en cours"), page("c", statut="envoyée(s) attente réponse"),
-             page("d", statut="Envoyée(s) en attente de réponse"), page("e", statut=" Brief ")]
+    pages = [page("a", statut="brief", statut_furious="en cours"), page("b", statut="en cours"),
+             page("c", statut="envoyée(s) attente réponse"), page("d", statut="Envoyée(s) en attente de réponse"),
+             page("e", statut=" Brief ", statut_furious="en cours")]
     out = run("preparer.js", [{"json": {"results": pages}}])
     assert [(o["page_id"], o["action"], o["pipe_cible"]) for o in out] == [
         ("a", "envoyer", 5), ("b", "envoyer", 0), ("c", "envoyer", 4), ("d", "envoyer", 4), ("e", "envoyer", 5)]
@@ -107,30 +134,41 @@ def test_waiting_statuses_get_their_furious_pipe_and_query():
 
 
 @needs_node
-def test_a_status_notion_cannot_send_is_put_back_with_a_message():
+def test_the_page_read_after_a_webhook_is_handled_like_a_catch_up_row():
+    out = run("preparer.js", [{"json": page("p1", statut="en cours", statut_furious="brief")}])
+    assert [(o["page_id"], o["action"], o["pipe_cible"]) for o in out] == [("p1", "envoyer", 0)]
+
+
+@needs_node
+def test_only_real_pending_changes_are_sent():
+    """Same test as the formula "À envoyer à Furious"; also ignores the webhook calls
+    made when the sync or n8n itself writes the status."""
+    pages = [page("same", statut="brief", statut_furious="brief"),        # written by the sync or n8n
+             page("gagne", statut="gagné", statut_furious="brief"),       # Notion only
+             page("out", scope=False),                                    # left the list
+             page("new", statut_furious=None),                            # row made by hand
+             page("other", data_source="11111111-2222-3333-4444-555555555555")]   # another table
+    assert run("preparer.js", [{"json": {"results": pages}}]) == []
+
+
+@needs_node
+def test_a_status_notion_cannot_send_is_put_back_with_a_comment():
     out = run("preparer.js", [{"json": {"results": [page("a", statut="Perdu", statut_furious="en cours")]}}])
     assert out[0]["action"] == "annuler" and "furious_query" not in out[0]
-    assert props(out[0])["Statut"] == {"status": {"name": "en cours"}}
-    assert feedback(out[0]).startswith("« Perdu » ne se choisit pas dans Notion")
+    assert props(out[0]) == {"Statut": {"status": {"name": "en cours"}}}
+    assert comment(out[0]).startswith("🔁 Statut remis à « en cours » : « Perdu » ne se choisit pas dans Notion")
 
 
 @needs_node
 def test_id_devis_split_in_several_text_parts_is_read_whole_and_a_row_without_id_is_refused():
     out = run("preparer.js", [{"json": {"results": [page("a", devis_id=["2632", "19"]), page("b", devis_id="")]}}])
     assert out[0]["devis_id"] == "263219" and out[0]["action"] == "envoyer"
-    assert out[1]["action"] == "annuler" and feedback(out[1]).startswith("Pas d'ID Devis")
+    assert out[1]["action"] == "annuler" and comment(out[1]).endswith("pas d'ID Devis sur cette ligne.")
 
 
 @needs_node
 def test_no_pending_row_gives_no_item():
     assert run("preparer.js", [{"json": {"results": []}}]) == []
-
-
-@needs_node
-def test_a_refusal_already_shown_is_not_rewritten_but_the_status_is_still_put_back():
-    first = run("preparer.js", [{"json": {"results": [page("a", statut="gagnés en cours")]}}])[0]
-    again = run("preparer.js", [{"json": {"results": [page("a", statut="gagnés en cours", retour=feedback(first))]}}])
-    assert props(again[0]) == {"Statut": {"status": {"name": "brief"}}}
 
 
 # ---------------------------------------------------------------- Devis à envoyer (login)
@@ -152,8 +190,8 @@ def test_login_accepted_passes_every_row_on():
 def test_login_refused_puts_the_statuses_back(login):
     out = after_login(login, [row(statut="en cours", statut_furious="brief")])
     assert out[0]["action"] == "connexion_refusee"
-    assert props(out[0])["Statut"] == {"status": {"name": "brief"}}
-    assert "identifiants à mettre à jour dans n8n" in feedback(out[0])
+    assert props(out[0]) == {"Statut": {"status": {"name": "brief"}}}
+    assert "identifiants à mettre à jour dans n8n" in comment(out[0])
 
 
 @needs_node
@@ -193,40 +231,37 @@ def test_custom_fields_read_as_lists_or_html_encoded_and_missing_ones_left_out()
 
 @needs_node
 def test_furious_already_at_that_status_confirms_without_updating():
-    out = decide([answer(proposal(pipe="0", statut="En cours"))], [row(pipe=0, retour=RETRY)])
-    assert out[0]["action"] == "a_jour" and "furious_body" not in out[0]
-    assert props(out[0]) == {"Statut Furious": {"select": {"name": "en cours"}}, "Retour Furious": {"rich_text": []}}
+    out = decide([answer(proposal(pipe="0", statut="En cours"))], [row(pipe=0)])
+    assert out[0]["action"] == "a_jour" and "furious_body" not in out[0] and "comment_body" not in out[0]
+    assert props(out[0]) == {"Statut Furious": {"select": {"name": "en cours"}}}
 
 
 @needs_node
 @pytest.mark.parametrize("pipe,statut", [("1", "Perdu"), ("3", "Gagnés en cours"), ("2", "Gagnés et finis")])
 def test_a_devis_lost_or_won_in_furious_meanwhile_is_not_touched(pipe, statut):
     out = decide([answer(proposal(pipe=pipe, statut=statut))], [row()])
-    assert out[0]["action"] == "annuler" and props(out[0])["Statut"] == {"status": {"name": "brief"}}
-    assert feedback(out[0]).startswith(f"Ce devis est déjà « {statut} » dans Furious")
+    assert out[0]["action"] == "annuler" and props(out[0]) == {"Statut": {"status": {"name": "brief"}}}
+    assert f"ce devis est déjà « {statut} » dans Furious" in comment(out[0])
 
 
 @needs_node
 def test_devis_not_found_in_furious_is_put_back():
     out = decide([answer({"data": {"Proposal": []}})], [row()])
-    assert out[0]["action"] == "annuler" and "introuvable dans Furious" in feedback(out[0])
+    assert out[0]["action"] == "annuler" and "introuvable dans Furious" in comment(out[0])
 
 
 @needs_node
 def test_unknown_typologie_myrium_is_never_sent():
     out = decide([answer(proposal(myrium="XL "))], [row()])
-    assert out[0]["action"] == "annuler" and "Typologie Myrium « XL »" in feedback(out[0])
+    assert out[0]["action"] == "annuler" and "Typologie Myrium « XL »" in comment(out[0])
 
 
 @needs_node
 @pytest.mark.parametrize("reply", [answer("oops", status=500), answer(error="ECONNRESET"),
                                    answer({"success": False, "message": "Token invalide"}, status=401),
                                    answer({"success": False, "message": "?"})])
-def test_no_usable_answer_leaves_the_row_pending_and_says_so_once(reply):
-    out = decide([reply], [row()])
-    assert out[0]["action"] == "reessayer" and props(out[0]) == {
-        "Retour Furious": {"rich_text": [{"type": "text", "text": {"content": RETRY}}]}}
-    assert decide([reply], [row(retour=RETRY)]) == []   # message already there: nothing to write
+def test_no_usable_answer_writes_nothing_so_the_catch_up_tries_again(reply):
+    assert decide([reply], [row()]) == []
 
 
 @needs_node
@@ -245,15 +280,9 @@ def read_answers(answers: List[Dict[str, Any]], rows: List[Dict[str, Any]]) -> A
 
 
 @needs_node
-def test_success_confirms_the_status_and_clears_an_old_message():
-    out = read_answers([answer({"success": True, "id": 263219})], [row(retour="Furious a refusé le changement : x.")])
-    assert out[0]["action"] == "ok" and "furious_body" not in out[0]
-    assert props(out[0]) == {"Statut Furious": {"select": {"name": "en cours"}}, "Retour Furious": {"rich_text": []}}
-
-
-@needs_node
-def test_success_without_an_old_message_only_confirms():
+def test_success_confirms_the_status():
     out = read_answers([answer({"success": True, "id": 263219})], [row()])
+    assert out[0]["action"] == "ok" and "furious_body" not in out[0] and "comment_body" not in out[0]
     assert props(out[0]) == {"Statut Furious": {"select": {"name": "en cours"}}}
 
 
@@ -262,19 +291,18 @@ def test_refusal_puts_the_status_back_with_furious_reasons():
     refused = {"success": False, "message": [{"field": "custom_fields[4][]", "message": "BU est requis"},
                                              {"field": "custom_fields[3][]", "message": "Typologie Myrium est requis"}]}
     out = read_answers([answer(refused)], [row()])
-    assert out[0]["action"] == "annuler" and props(out[0])["Statut"] == {"status": {"name": "brief"}}
-    assert feedback(out[0]) == ("Furious a refusé le changement : BU est requis ; Typologie Myrium est requis. "
-                                "Statut remis comme avant.")
+    assert out[0]["action"] == "annuler" and props(out[0]) == {"Statut": {"status": {"name": "brief"}}}
+    assert comment(out[0]) == ("🔁 Statut remis à « brief » : Furious a refusé le changement "
+                               "(BU est requis ; Typologie Myrium est requis).")
     out = read_answers([answer({"success": False, "message": ["Pipe invalide (5: Brief|0: En cours)"]})], [row()])
-    assert "Pipe invalide (5: Brief|0: En cours)" in feedback(out[0])
+    assert "Pipe invalide (5: Brief|0: En cours)" in comment(out[0])
 
 
 @needs_node
 @pytest.mark.parametrize("reply", [answer("<html>502</html>", status=502), answer(error="ETIMEDOUT"),
                                    answer("<html>maintenance</html>")])
-def test_no_answer_to_the_update_leaves_the_row_pending(reply):
-    out = read_answers([reply], [row()])
-    assert out[0]["action"] == "reessayer" and "Statut" not in props(out[0])
+def test_no_answer_to_the_update_writes_nothing_so_the_catch_up_tries_again(reply):
+    assert read_answers([reply], [row()]) == []
 
 
 # ---------------------------------------------------------------- the workflow file
@@ -302,9 +330,36 @@ def test_workflow_structure_and_no_secret():
     login = next(n for n in wf["nodes"] if n["name"] == "Furious : connexion")["parameters"]
     assert (login["authentication"], login["genericAuthType"]) == ("genericCredentialType", "httpCustomAuth")
     assert json.loads(login["jsonBody"]) == {"action": "auth"}   # "data" comes from the credential
+    hook = next(n for n in wf["nodes"] if n["type"] == "n8n-nodes-base.webhook")
+    assert hook["parameters"]["responseMode"] == "onReceived"   # a failed call pauses the Notion automation
+    assert hook["webhookId"] == hook["parameters"]["path"] and builder.WEBHOOK_URL.endswith(hook["webhookId"])
+    for name in ("Notion : laisser un commentaire", "Notion : expliquer le refus de connexion"):
+        assert next(n for n in wf["nodes"] if n["name"] == name)["onError"] == "continueRegularOutput"
+    assert wf["settings"]["errorWorkflow"] == builder.ERROR_WORKFLOW
+    assert wf["connections"]["Résultat"]["main"][0] == [
+        {"node": "Notion : écrire le résultat", "type": "main", "index": 0},
+        {"node": "Commentaire à laisser ?", "type": "main", "index": 0}]
     note = next(n for n in wf["nodes"] if n["name"] == "Note")["parameters"]["content"]
     assert '"username": "…", "password": "…"' in note   # a placeholder, filled in n8n only
     others = json.dumps([n for n in wf["nodes"] if n["name"] != "Note"], ensure_ascii=False).lower()
     assert not re.search(r"(password|username|token)\W{0,4}[:=]", others)   # no value set anywhere
     assert "f-auth-token" in others   # the Furious token is only read from the login answer
     assert "—" not in builder.OUTPUT.read_text()
+
+
+def test_deploy_keeps_the_credentials_chosen_in_n8n():
+    import deploy_n8n_statut_workflow as deploy
+
+    wanted = builder.build()
+    live = {"nodes": [{"name": "Furious : connexion", "credentials": {"httpCustomAuth": {"id": "abc", "name": "Furious API (Myrium)"}}},
+                      {"name": "Notion : lire la page", "credentials": {"notionApi": {"id": "other", "name": "Autre"}}},
+                      {"name": "Ancien nœud", "credentials": {"notionApi": {"id": "x", "name": "x"}}}]}
+
+    body = deploy.merged_definition(wanted, live)
+
+    nodes = {n["name"]: n for n in body["nodes"]}
+    assert nodes["Furious : connexion"]["credentials"] == {"httpCustomAuth": {"id": "abc", "name": "Furious API (Myrium)"}}
+    assert nodes["Notion : lire la page"]["credentials"] == {"notionApi": {"id": "other", "name": "Autre"}}
+    assert "Ancien nœud" not in nodes and set(body) == {"name", "nodes", "connections", "settings"}
+    assert body["settings"]["errorWorkflow"] == builder.ERROR_WORKFLOW
+    assert "credentials" not in next(n for n in wanted["nodes"] if n["name"] == "Furious : connexion")   # file untouched

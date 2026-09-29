@@ -109,7 +109,7 @@ def test_followup_check_accepts_gagne_and_reports_a_status_stuck_in_notion():
 def test_a_status_changed_in_notion_minutes_ago_is_not_reported_yet():
     df = pd.DataFrame([_devis("1", "Brief"), _devis("2", "Brief")])
     pages = [_followup_page("1", "en cours"), _followup_page("2", "en cours")]
-    for page, edited in zip(pages, ("2026-09-29T09:50:00.000Z", "2026-09-29T08:00:00.000Z")):
+    for page, edited in zip(pages, ("2026-09-29T09:50:00.000Z", "2026-09-29T07:55:00.000Z")):
         page["properties"]["Statut Furious"] = {"type": "select", "select": {"name": "brief"}}
         page["last_edited_time"] = edited
 

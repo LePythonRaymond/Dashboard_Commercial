@@ -4,7 +4,8 @@ Prepare "Devis à suivre" for statuses changed in Notion (decided 2026-09-29).
 
 The team moves a waiting devis between brief, en cours and envoyée(s) attente
 réponse in Notion, and the n8n workflow deploy/n8n/devis_statut_notion_vers_furious.json
-sends the change to Furious within a few minutes. "gagné" exists in Notion only:
+(called by the Notion automation "Statut modifié") sends the change to Furious
+within seconds. "gagné" exists in Notion only:
 the client said yes, the signed copy is not back. At the signature the devis is
 marked won in Furious, as before, and the sync takes it out of the list. Perdu
 and the win are still set in Furious.
@@ -17,15 +18,15 @@ and the win are still set in Furious.
   Statut Furious       select, hidden   the status Furious had at the last sync or n8n
                                         push (written by the sync and by n8n only)
   À envoyer à Furious  formula, hidden  checked while "Statut" holds a change n8n has
-                                        to send or refuse: the rows n8n polls
-  Retour Furious       text             n8n's message when Furious refused a change
+                                        to send or refuse: what its hourly catch-up reads
+(A third column, "Retour Furious", existed on 2026-09-29 only: refusals are now
+explained in a comment on the page.)
 
---apply-views shows "Retour Furious" right after "Statut" in every table view
-(linked views on other pages included) and hides the two others; columns that
-are already there are left as the team set them, nothing else changes. It also
-creates the view "🤝 Gagnés, en attente de signature" on the database when no
-view has that name. Run the follow-up sync once in between, so that "Statut
-Furious" is filled before n8n starts reading the formula.
+--apply-views hides the two in every table view (linked views on other pages
+included); columns that are already there are left as the team set them, nothing
+else changes. It also creates the view "🤝 Gagnés, en attente de signature" on the
+database when no view has that name. Run the follow-up sync once in between, so
+that "Statut Furious" is filled before n8n starts reading the formula.
 """
 
 import argparse
@@ -39,20 +40,15 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.settings import settings
-from src.integrations.notion_alerts_sync import (
-    FEEDBACK_PROP,
-    FURIOUS_STATUS_PROP,
-    NOTION_ONLY_STATUSES,
-    TO_SEND_PROP,
-)
+from src.integrations.notion_alerts_sync import FURIOUS_STATUS_PROP, NOTION_ONLY_STATUSES, TO_SEND_PROP
 from src.integrations.notion_scope import SCOPE_PROP
 from src.integrations.notion_views import data_source_of, notion_call, same_property, views_of_data_source, writable
 
 STATUS_PROP = "Statut"
 TAKEN_PROP = "Pris en charge"
 WON_VIEW = "🤝 Gagnés, en attente de signature"
-WON_VIEW_COLUMNS = ["Name", "Client", "Commercial", "Montant", STATUS_PROP, FEEDBACK_PROP, "Date",
-                    "Début projet", "Commentaire", "Lien Furious"]
+WON_VIEW_COLUMNS = ["Name", "Client", "Commercial", "Montant", STATUS_PROP, "Date", "Début projet",
+                    "Commentaire", "Lien Furious"]
 
 # In scope, "Statut Furious" known, "Statut" different from it and not a
 # Notion-only status. A row the team created by hand has no "Statut Furious",
@@ -66,9 +62,7 @@ DESCRIPTIONS = {
     FURIOUS_STATUS_PROP: ("Géré par la synchro et par n8n : le statut que Furious avait à la dernière synchro "
                           "ou au dernier envoi. Ne pas modifier."),
     TO_SEND_PROP: ("Coché tant que « Statut » a été changé dans Notion et pas encore envoyé à Furious "
-                   "(n8n l'envoie en quelques minutes). « gagné » reste dans Notion."),
-    FEEDBACK_PROP: ("Écrit par n8n quand Furious a refusé un changement de statut (le statut est alors remis "
-                    "comme avant). Effacé au prochain envoi réussi."),
+                   "(n8n l'envoie en quelques secondes). « gagné » reste dans Notion."),
 }
 
 
@@ -83,8 +77,6 @@ def ensure_properties(data_source_id: str, props: Dict[str, Any], apply: bool) -
     if TO_SEND_PROP not in props:
         changes[TO_SEND_PROP] = {"formula": {"expression": TO_SEND_EXPRESSION},
                                  "description": DESCRIPTIONS[TO_SEND_PROP]}
-    if FEEDBACK_PROP not in props:
-        changes[FEEDBACK_PROP] = {"rich_text": {}, "description": DESCRIPTIONS[FEEDBACK_PROP]}
     if not changes:
         print("properties ok")
         return props
@@ -95,15 +87,11 @@ def ensure_properties(data_source_id: str, props: Dict[str, Any], apply: bool) -
 
 
 def with_status_columns(columns: List[Dict[str, Any]], pid: Dict[str, str]) -> List[Dict[str, Any]]:
-    """The view columns plus the missing new ones: "Retour Furious" after "Statut", the two others hidden."""
+    """The view columns plus the missing new ones, hidden."""
     def present(name: str) -> bool:
         return any(same_property(c["property_id"], pid[name]) for c in columns)
 
     out = list(columns)
-    if not present(FEEDBACK_PROP):
-        after = next((i + 1 for i, c in enumerate(out) if same_property(c["property_id"], pid[STATUS_PROP])),
-                     len(out))
-        out.insert(after, {"property_id": unquote(pid[FEEDBACK_PROP]), "visible": True})
     for name in (FURIOUS_STATUS_PROP, TO_SEND_PROP):
         if not present(name):
             out.append({"property_id": unquote(pid[name]), "visible": False})
@@ -127,7 +115,7 @@ def won_view_body(database_id: str, data_source_id: str, pid: Dict[str, str]) ->
 
 
 def apply_views(database_id: str, data_source_id: str, props: Dict[str, Any], apply: bool) -> None:
-    missing = [name for name in (FURIOUS_STATUS_PROP, TO_SEND_PROP, FEEDBACK_PROP) if name not in props]
+    missing = [name for name in (FURIOUS_STATUS_PROP, TO_SEND_PROP) if name not in props]
     if missing:
         print(f"views left alone: {missing} missing (run --add-properties first)")
         return

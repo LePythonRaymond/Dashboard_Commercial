@@ -12,7 +12,7 @@
 
 import pytest
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 from src.integrations.notion_alerts_sync import NotionAlertsSync
 
@@ -395,3 +395,45 @@ def test_one_table_failing_does_not_stop_the_other():
     assert results["weird_proposals"]["failed"] == "RuntimeError: Could not find database with ID: db-1"
     assert "failed" not in results["commercial_followup"]
     assert updated == [("page-123", {"Montant": {"number": 6000.0}})]
+
+
+READ_AT = datetime(2026, 9, 29, 6, 0, 25, tzinfo=timezone.utc)   # when the pipeline read Furious
+
+
+def test_a_row_edited_after_furious_was_read_keeps_its_status_until_the_next_run():
+    """The status webhook can send a change to Furious while the sync runs: the Furious
+    data read a few minutes earlier would put the old status back."""
+    page = _with_status(_as_page("page-123", _stored(_item(statut="Brief")), scope=True),
+                        statut="en cours", statut_furious="en cours")   # sent by n8n at 06:03
+    page["last_edited_time"] = "2026-09-29T06:03:00.000Z"
+    sync, _, updated = _followup_sync([page])
+
+    stats = sync.sync_followup_alerts({"owner1": [_item(statut="Brief", amount=6000)]}, status_by_id={},
+                                      today=TODAY, furious_read_at=READ_AT)
+
+    assert updated == [("page-123", {"Montant": {"number": 6000.0}})]
+    assert stats["edited_since_furious_read"] == 1
+
+
+def test_an_edit_in_the_same_minute_as_the_read_counts_as_after_it():
+    page = _as_page("page-123", _stored(_item(statut="Brief")), scope=True)
+    page["last_edited_time"] = "2026-09-29T06:00:00.000Z"   # Notion rounds down to the minute
+    sync, _, updated = _followup_sync([page])
+
+    sync.sync_followup_alerts({"owner1": [_item(statut="En cours")]}, status_by_id={}, today=TODAY,
+                              furious_read_at=READ_AT)
+
+    assert updated == []
+
+
+def test_a_row_edited_before_furious_was_read_gets_the_furious_status():
+    page = _as_page("page-123", _stored(_item(statut="Brief")), scope=True)
+    page["last_edited_time"] = "2026-09-29T05:59:00.000Z"
+    sync, _, updated = _followup_sync([page])
+
+    stats = sync.sync_followup_alerts({"owner1": [_item(statut="En cours")]}, status_by_id={}, today=TODAY,
+                                      furious_read_at=READ_AT)
+
+    assert updated == [("page-123", {"Statut": {"status": {"name": "en cours"}},
+                                     "Statut Furious": {"select": {"name": "en cours"}}})]
+    assert stats["edited_since_furious_read"] == 0

@@ -48,9 +48,10 @@ FOLLOWUP_TABLE = "Devis à suivre"
 WON_TABLE = "Devis gagnés"
 LOST_TABLE = "Devis perdus"
 AMOUNT_TOLERANCE_EUR = 0.01
-# A status changed in Notion reaches Furious within minutes (n8n polls every
-# 2 minutes); one still waiting after this long is reported as stuck.
-PENDING_GRACE = timedelta(minutes=30)
+# A status changed in Notion reaches Furious within seconds (Notion webhook to
+# n8n), and n8n retries a missed one every hour; one still waiting after this
+# long is reported as stuck.
+PENDING_GRACE = timedelta(minutes=90)
 LISTED_PER_KIND = 25  # problems listed per kind in the log and the e-mail
 
 _extract_id = NotionAlertsSync._extract_id_devis_from_page

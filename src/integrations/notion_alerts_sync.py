@@ -6,7 +6,7 @@ Creates pages in dedicated databases with person property mapping.
 """
 
 from typing import Callable, Dict, List, Any, Optional, Set, Tuple
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from urllib.parse import urlparse, parse_qs
 from notion_client import Client
 
@@ -21,16 +21,15 @@ from .notion_scope import ARCHIVED_PROP, scope_changes, scope_on_create
 FURIOUS_URL_TEMPLATE = "https://merciraymond.furious-squad.com/compta.php?view=5&cherche={id}"
 
 # "Devis à suivre": the team changes the waiting statuses in Notion and an n8n
-# workflow (deploy/n8n/devis_statut_notion_vers_furious.json) sends them to
-# Furious. "Statut Furious" (hidden select) is the status Furious had at the last
-# sync or push: while "Statut" differs from it, the change made in Notion is not
-# in Furious yet and the sync must not overwrite it.
+# workflow (deploy/n8n/devis_statut_notion_vers_furious.json), called by a Notion
+# automation when "Statut" changes, sends them to Furious. "Statut Furious" (hidden
+# select) is the status Furious had at the last sync or push: while "Statut"
+# differs from it, the change made in Notion is not in Furious yet and the sync
+# must not overwrite it.
 FURIOUS_STATUS_PROP = "Statut Furious"
-# Formula, checked while "Statut" holds a change n8n has to send (the rows n8n
-# polls), and n8n's message when Furious refused a change. Created by
-# scripts/setup_followup_statuses.py; the sync never writes them.
+# Hidden formula, checked while "Statut" holds a change n8n has to send: what the
+# workflow's hourly catch-up reads. Created by scripts/setup_followup_statuses.py.
 TO_SEND_PROP = "À envoyer à Furious"
-FEEDBACK_PROP = "Retour Furious"
 # Statuses that exist in Notion only and never go to Furious. "gagné" = the
 # client agreed, the signed copy is not back yet; the devis stays waiting in
 # Furious until the signature, when it is marked won there (decided 2026-09-29).
@@ -39,6 +38,21 @@ NOTION_ONLY_STATUSES = ("gagné",)
 
 def is_notion_only_status(name: Any) -> bool:
     return str(name or "").strip().lower() in NOTION_ONLY_STATUSES
+
+
+def edited_since(page: Dict[str, Any], moment: datetime) -> bool:
+    """True when the page was edited at or after `moment`.
+
+    Notion gives last_edited_time to the minute (rounded down), so an edit in
+    the same minute as `moment` counts as after it: when in doubt, the page is
+    treated as edited.
+    """
+    raw = page.get("last_edited_time")
+    if not raw:
+        return False
+    edited = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    moment = moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+    return edited >= moment.replace(second=0, microsecond=0)
 
 
 class NotionAlertsSync:
@@ -545,19 +559,30 @@ class NotionAlertsSync:
         return {"select": {"name": (status_payload.get("status") or {}).get("name")}}
 
     @staticmethod
-    def _keep_status_set_in_notion(page: Dict[str, Any], properties: Dict[str, Any]) -> None:
+    def _keep_status_set_in_notion(page: Dict[str, Any], properties: Dict[str, Any],
+                                   furious_read_at: Optional[datetime] = None) -> bool:
         """Leave "Statut" alone when Notion holds a status Furious does not have yet.
 
         That is a Notion-only status ("gagné"), or a status changed in Notion that the
         n8n workflow has not sent to Furious yet ("Statut" differs from the hidden
         "Statut Furious"). "Statut Furious" itself is still refreshed.
+
+        When the page was edited after Furious was read (furious_read_at), neither is
+        written: n8n may have sent a newer status to Furious since (the status webhook
+        works at any time, the sync writes a few minutes after reading Furious). The
+        next run writes them. Returns True in that case.
         """
         if "Statut" not in properties or FURIOUS_STATUS_PROP not in properties:
-            return
+            return False
+        if furious_read_at and edited_since(page, furious_read_at):
+            properties.pop("Statut")
+            properties.pop(FURIOUS_STATUS_PROP)
+            return True
         in_notion = page_value(page, "Statut")
         last_known = page_value(page, FURIOUS_STATUS_PROP)
         if is_notion_only_status(in_notion) or (last_known and in_notion != last_known):
             properties.pop("Statut")
+        return False
 
     @staticmethod
     def _extract_id_devis_from_page(page: Dict[str, Any]) -> str:
@@ -729,6 +754,7 @@ class NotionAlertsSync:
         build: Callable[..., Dict[str, Any]],
         status_by_id: Optional[Dict[str, str]],
         today: Optional[date],
+        furious_read_at: Optional[datetime] = None,
     ) -> Dict[str, int]:
         """Upsert the items of one table and apply the scope rule (see notion_scope).
 
@@ -740,7 +766,7 @@ class NotionAlertsSync:
         """
         stats = {"created": 0, "updated": 0, "unchanged": 0, "left_scope": 0, "back_in_scope": 0,
                  "relabelled": 0, "orphans": 0, "unmapped_status": 0, "duplicates_in_notion": 0,
-                 "archived": 0, "errors": 0}
+                 "archived": 0, "errors": 0, "edited_since_furious_read": 0}
         schema = self._get_database_schema(database_id)
         if schema:
             print(f"    Schema loaded ({len(schema)} properties).")
@@ -765,7 +791,7 @@ class NotionAlertsSync:
                     stats["errors"] += 1
                 continue
             properties.pop("Name", None)   # keep the title (and its comments) as they are
-            self._keep_status_set_in_notion(page, properties)
+            stats["edited_since_furious_read"] += int(self._keep_status_set_in_notion(page, properties, furious_read_at))
             current = page.get("properties") or {}
             changed = {name: value for name, value in properties.items()
                        if value_from_payload(value) != value_from_page(current.get(name, {}))}
@@ -853,6 +879,7 @@ class NotionAlertsSync:
         followup_alerts: Dict[str, List[Dict[str, Any]]],
         status_by_id: Optional[Dict[str, str]] = None,
         today: Optional[date] = None,
+        furious_read_at: Optional[datetime] = None,
     ) -> Dict[str, int]:
         """
         Sync the follow-up alerts (every WAITING devis) to "Devis à suivre".
@@ -892,13 +919,15 @@ class NotionAlertsSync:
         print(f"\n  Syncing follow-up alerts to Notion...")
         print(f"    Database: {self.followup_database_id[:8]}...")
         return self._sync_scoped_table(self.followup_database_id, self._flatten(followup_alerts),
-                                       self._build_followup_page_properties, status_by_id, today)
+                                       self._build_followup_page_properties, status_by_id, today,
+                                       furious_read_at)
 
     def sync_all(
         self,
         alerts_output: AlertsOutput,
         status_by_id: Optional[Dict[str, str]] = None,
         today: Optional[date] = None,
+        furious_read_at: Optional[datetime] = None,
     ) -> Dict[str, Dict[str, int]]:
         """
         Sync all alerts to Notion databases.
@@ -907,6 +936,7 @@ class NotionAlertsSync:
             alerts_output: AlertsOutput containing all alerts
             status_by_id: Furious status of every devis, by id (see sync_followup_alerts)
             today: archive date written by the sync (defaults to today)
+            furious_read_at: when the Furious data was read (see _keep_status_set_in_notion)
 
         Returns:
             Combined sync statistics for both databases
@@ -922,7 +952,7 @@ class NotionAlertsSync:
         syncs = {
             "weird_proposals": lambda: self.sync_weird_proposals(alerts_output.weird_proposals, status_by_id, today),
             "commercial_followup": lambda: self.sync_followup_alerts(
-                alerts_output.commercial_followup, status_by_id, today),
+                alerts_output.commercial_followup, status_by_id, today, furious_read_at),
         }
         results = {}
         for name, sync in syncs.items():
