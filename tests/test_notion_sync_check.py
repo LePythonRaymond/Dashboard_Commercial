@@ -2,7 +2,7 @@
 Tests for the Notion vs Furious check of "Devis à suivre" and "Devis gagnés".
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -93,6 +93,29 @@ def test_followup_table_reports_missing_extra_mismatch_and_duplicates():
     assert [(m["id"], m["field"], m["notion"], m["furious"]) for m in check.mismatches] == [("3", "Montant", 1000.0, 2500.0)]
     assert {e["id"]: e["furious"] for e in check.extra} == {"4": "Gagnés en cours", "5": "absent de Furious"}
     assert check.duplicates == ["6"] and check.drift and not check.ok
+
+
+def test_followup_check_accepts_gagne_and_reports_a_status_stuck_in_notion():
+    df = pd.DataFrame([_devis("1", "Brief"), _devis("2", "Brief"), _devis("3", "Brief")])
+    pages = [_followup_page("1", "gagné"), _followup_page("2", "en cours"), _followup_page("3", "brief")]
+    for page in pages:
+        page["properties"]["Statut Furious"] = {"type": "select", "select": {"name": "brief"}}
+
+    check = check_followup_table(df, pages)
+
+    assert [(m["id"], m["field"]) for m in check.mismatches] == [("2", "Statut changé dans Notion, pas encore dans Furious")]
+
+
+def test_a_status_changed_in_notion_minutes_ago_is_not_reported_yet():
+    df = pd.DataFrame([_devis("1", "Brief"), _devis("2", "Brief")])
+    pages = [_followup_page("1", "en cours"), _followup_page("2", "en cours")]
+    for page, edited in zip(pages, ("2026-09-29T09:50:00.000Z", "2026-09-29T08:00:00.000Z")):
+        page["properties"]["Statut Furious"] = {"type": "select", "select": {"name": "brief"}}
+        page["last_edited_time"] = edited
+
+    check = check_followup_table(df, pages, now=datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc))
+
+    assert [m["id"] for m in check.mismatches] == ["2"]   # 10 minutes: n8n may be on it; 2 hours: stuck
 
 
 def test_devis_created_today_are_skipped_even_without_an_update_date():

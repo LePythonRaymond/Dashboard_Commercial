@@ -17,7 +17,10 @@ Four kinds of problem are reported:
 - missing:    Furious says the devis belongs in the table, Notion does not show it;
 - extra:      Notion shows the devis, Furious says it does not belong there any more;
 - mismatches: the devis is on both sides but the amount, the status or the devis
-              date differ (and, for an avenant, the devis it sits under);
+              date differ (and, for an avenant, the devis it sits under); in the
+              follow-up, a status changed in Notion that n8n has not sent to Furious
+              after PENDING_GRACE (the status compared with Furious is then the
+              hidden "Statut Furious");
 - duplicates: two Notion pages carry the same ID Devis.
 
 Example: devis 263464 is marked "Perdu" in Furious at 10:00. Until the next
@@ -28,14 +31,14 @@ after the sync has seen them.
 """
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import pandas as pd
 
 from config.settings import settings, STATUS_WAITING, STATUS_WON
-from .notion_alerts_sync import NotionAlertsSync
+from .notion_alerts_sync import FURIOUS_STATUS_PROP, NotionAlertsSync, is_notion_only_status
 from .notion_values import page_value
 from .notion_lost_devis_sync import LOST_DATE_PROP, REASON_PROP, NotionLostDevisSync, select_lost_devis
 from .notion_scope import SCOPE_PROP
@@ -45,6 +48,9 @@ FOLLOWUP_TABLE = "Devis à suivre"
 WON_TABLE = "Devis gagnés"
 LOST_TABLE = "Devis perdus"
 AMOUNT_TOLERANCE_EUR = 0.01
+# A status changed in Notion reaches Furious within minutes (n8n polls every
+# 2 minutes); one still waiting after this long is reported as stuck.
+PENDING_GRACE = timedelta(minutes=30)
 LISTED_PER_KIND = 25  # problems listed per kind in the log and the e-mail
 
 _extract_id = NotionAlertsSync._extract_id_devis_from_page
@@ -167,10 +173,21 @@ def _compare(devis_id: str, page: Dict[str, Any], fields: List[Tuple[str, Any, A
     return found
 
 
+def _edited_before(page: Dict[str, Any], limit: datetime) -> bool:
+    stamp = pd.to_datetime(page.get("last_edited_time"), errors="coerce", utc=True)
+    return pd.isna(stamp) or stamp.to_pydatetime() < limit
+
+
 def check_followup_table(df: pd.DataFrame, pages: Iterable[Dict[str, Any]],
-                         skip_ids: Iterable[str] = ()) -> TableCheck:
-    """Every WAITING devis of df must be shown in "Devis à suivre", and nothing else."""
+                         skip_ids: Iterable[str] = (), now: Optional[datetime] = None) -> TableCheck:
+    """Every WAITING devis of df must be shown in "Devis à suivre", and nothing else.
+
+    A status changed in Notion and not in Furious yet is reported only when the
+    page was last edited more than PENDING_GRACE ago (n8n may be sending it).
+    """
     skip = set(skip_ids)
+    now = now or datetime.now(timezone.utc)
+    stuck_before = (now if now.tzinfo else now.replace(tzinfo=timezone.utc)) - PENDING_GRACE
     result = TableCheck(FOLLOWUP_TABLE)
     waiting = df[df["statut_clean"].isin(STATUS_WAITING)]
     expected = {str(row["id"]).strip(): row for row in waiting.to_dict("records")}
@@ -189,11 +206,19 @@ def check_followup_table(df: pd.DataFrame, pages: Iterable[Dict[str, Any]],
                                    "furious": row.get("statut"),
                                    "notion": _hidden_state(by_id.get(devis_id), "Statut")})
             continue
+        # "Statut" may hold a status set in Notion (see notion_alerts_sync): Furious is
+        # compared with the hidden "Statut Furious" when the table has it.
+        in_notion = page_value(page, "Statut")
+        last_known = page_value(page, FURIOUS_STATUS_PROP)
         result.mismatches += _compare(devis_id, page, [
             ("Montant", page_value(page, "Montant"), _amount(row.get("amount"))),
-            ("Statut", _status(page_value(page, "Statut")), _status(row.get("statut"))),
+            ("Statut", _status(last_known if last_known else in_notion), _status(row.get("statut"))),
             ("Date", page_value(page, "Date"), _day(row.get("date"))),
         ])
+        if (last_known and _status(in_notion) != _status(last_known) and not is_notion_only_status(in_notion)
+                and _edited_before(page, stuck_before)):
+            result.mismatches.append({"id": devis_id, "field": "Statut changé dans Notion, pas encore dans Furious",
+                                      "notion": in_notion, "furious": row.get("statut"), "title": _title(page)})
 
     for devis_id, page in shown.items():
         if devis_id in expected:

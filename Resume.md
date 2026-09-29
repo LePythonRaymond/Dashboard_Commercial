@@ -1065,7 +1065,7 @@ See original documentation for details on performance, security, error handling,
 - Read back, `cf_typologie_myrium` loses its "<= 15 000€" part ("PA "): an automation must map it back to the full label before re-sending.
 - Marking lost with `lost_reason_id` (e.g. 20 = Autre) works, but the devis date is not re-stamped as in the interface: a loss made through the API would keep its old date in "Devis perdus".
 - The test devis ended lost, with reason "Autre" and its BU / typologies filled; no project was created.
-- **Decision (2026-09-24): not built.** Devis statuses are changed in Furious only, so the team has one place for them; Notion only shows them. Do not propose a Notion to Furious status button again.
+- **Decision (2026-09-24): not built.** Devis statuses are changed in Furious only, so the team has one place for them; Notion only shows them. **Superseded on 2026-09-29 (§18.21)**: the waiting statuses are now changed in Notion and sent to Furious by n8n.
 
 **Recap for the team**: `docs/Regles_tables_Notion.pdf` (2 pages, French: the rule, the life of a row, the scope of each table, who fills which column, what to check when a devis does not show), built by `scripts/build_notion_rules_pdf.py` (needs reportlab, not a pipeline dependency). Rebuild it whenever one of these rules changes.
 
@@ -1088,6 +1088,30 @@ See original documentation for details on performance, security, error handling,
 
 **Recap PDF** rebuilt (rules of 28/09/2026). **Tests**: 307 passed.
 
+### 18.21 Statuses of "Devis à suivre" changed in Notion, sent to Furious by n8n (September 2026)
+
+**Decision (Tadd with Clémence, 2026-09-29)**: since won = signed (§18.20), "won, not signed yet" has to live somewhere. In "Devis à suivre" the team now changes the waiting statuses in Notion and Furious follows; a Notion-only status **gagné** means "the client said yes, the signed copy is not back". At the signature the devis is marked won in Furious as before (that creates the project), and the next sync moves it to "Devis gagnés" with its signature date. Perdu stays in Furious (loss reason there; a loss made through the API keeps the old devis date, §18.19).
+
+**Notion "Devis à suivre"** (`scripts/setup_followup_statuses.py --add-properties` then `--apply-views`, safe to re-run):
+- "Statut Furious" (select, hidden): the status Furious had at the last sync or n8n push. Written by the sync (`FURIOUS_STATUS_PROP`) and by n8n, never by hand.
+- "À envoyer à Furious" (formula, hidden): `prop("Dans le périmètre") and not empty(prop("Statut Furious")) and prop("Statut") != prop("Statut Furious") and lower(prop("Statut")) != "gagné"`. Checked while a change waits; this is what n8n polls. Tested on a hidden scratch page (7 cases) before use. A row made by hand has no "Statut Furious" and is never sent.
+- "Retour Furious" (text, shown after Statut in the 5 views): n8n's message when a change was refused or Furious did not answer; cleared at the next success.
+- New view "🤝 Gagnés, en attente de signature" (Statut = gagné, in scope, oldest devis first).
+
+**Sync** (`notion_alerts_sync.py`): `_keep_status_set_in_notion` leaves "Statut" alone when it holds a Notion-only status (`NOTION_ONLY_STATUSES = ("gagné",)`) or differs from "Statut Furious" (a change n8n has not sent yet); "Statut Furious" is refreshed anyway. A devis that leaves the waiting list (won, lost) is still relabelled and archived, "gagné" included. Before the first run with this rule, the 318 rows in scope were compared with Furious: no status had been changed in Notion yet, so nothing was lost.
+
+**Check** (`notion_sync_check.py`): Furious is compared with "Statut Furious"; a change still waiting in Notion after `PENDING_GRACE` (30 min, from the page's `last_edited_time`) is reported as "Statut changé dans Notion, pas encore dans Furious" (n8n down, or credential refused).
+
+**n8n workflow** `deploy/n8n/devis_statut_notion_vers_furious.json`, built by `scripts/build_n8n_statut_workflow.py` from `deploy/n8n/devis_statut/*.js` (`--check` fails when the JSON is stale; `tests/test_n8n_statut_workflow.py` runs the Code nodes under Node.js):
+- Every 2 minutes, UTC, paused 06:00-06:19 while the Myrium sync reads Furious (06:00:25) and writes Notion (done by ~06:07): a push in between could be undone by the sync's older Furious data. Keeps failed executions only (720 runs a day).
+- Notion query of "À envoyer à Furious" (100 per run, the rest at the next run) → "Préparer les changements" (brief → pipe 5, en cours → 0, envoyée(s) attente réponse and the legacy "envoyée(s) en attente de réponse" → 4; anything else refused before Furious) → one Furious login (`POST /auth/`, run once) → `GET /proposal/?query=` per devis → "Décider": not waiting in Furious any more (lost or won since the morning) → put back, never touched; already at that pipe → confirmed without update; else update body with the 3 custom fields re-sent ("PA " mapped back to "PA <= 15 000€"; an unknown Typologie Myrium is never sent) → `POST /proposal/` → "Lire la réponse": success → "Statut Furious" confirmed; refusal (HTTP 200, `success: false`) → "Statut" put back + reasons; no usable answer → left pending, retried next run (a lost answer is safe: the next run reads the devis again).
+- Furious login refused (wrong or expired password in n8n): the rows are put back with a message and the run stops in error, so nothing retries every 2 minutes (repeated failures could lock the Furious account the Myrium sync uses too). Furious not answering the login: the run fails and the rows stay pending.
+- Queries and bodies are built in the Code nodes: the Furious query contains `}}`, which ends an n8n expression.
+- Credentials: "Notion Rapport" (`ciGEF85fAeNKNsVu`) and a **Custom Auth** credential "Furious API (Myrium)" `{"body": {"data": {"username": "…", "password": "…"}}}` created in n8n; HTTP Request 4.x merges its `body` into the JSON body `{"action": "auth"}` (read in the n8n 2.36.7 source). No secret in the file.
+- Tested end to end in a throwaway n8n 1.76 against a local mock of Notion and Furious: 7 rows covering every case, then a refused login. That run found that the login node lacked `authentication: genericCredentialType` (n8n ignored the credential); fixed and pinned by a test.
+
+**Recap PDF** rebuilt (rules of 29/09/2026): a "Devis à suivre : le statut se change dans Notion" section; the times are now given in Paris time (the VPS runs in UTC: the 06:00 sync is 08:00 in summer, 07:00 in winter). **Tests**: 345 passed.
+
 ---
 
 ## 17. Conclusion
@@ -1103,7 +1127,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.46
+**Document Version**: 1.47
 **Last Updated**: September 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System
