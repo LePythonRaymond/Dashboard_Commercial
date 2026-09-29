@@ -41,7 +41,11 @@ PARIS = ZoneInfo("Europe/Paris")
 FORM_HTML = Path(__file__).with_name("static").joinpath("form.html")
 CACHE_SECONDS = 60
 USERS_CACHE_SECONDS = 3600
-RATE_LIMIT = (10, 600)          # at most 10 requests per IP every 10 minutes
+# At most 60 requests every 10 minutes per client address. On the VPS every
+# client reaches the service through Docker's gateway (the logs show one
+# address for everybody), so in practice this is one shared safety valve
+# against a runaway script, sized well above a busy Monday for the team.
+RATE_LIMIT = (60, 600)
 ACTIONS = {"valider": notion.VALIDATED, "refuser": notion.REFUSED}
 NOTION_RECIPIENT = "notion"     # <who> of the links stored in Notion
 SECURITY_HEADERS = {
@@ -170,6 +174,7 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
             else:
                 mailer.send_mail(cfg.smtp_host, cfg.smtp_port, cfg.smtp_user, cfg.smtp_password, to, message,
                                  dry_run_dir=cfg.mail_dry_run_dir)
+            print(f"[epi-form] e-mail sent to {to}: {message['subject']}")
         except Exception as exc:  # the request exists in Notion even if the e-mail fails
             print(f"[epi-form] e-mail to {to} failed: {exc}")
 
