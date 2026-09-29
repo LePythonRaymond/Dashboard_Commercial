@@ -131,6 +131,8 @@
       "parameters": {
         "method": "POST",
         "url": "https://merciraymond.furious-squad.com/api/v2/auth/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "{\n  \"action\": \"auth\"\n}",

@@ -299,6 +299,9 @@ def test_workflow_structure_and_no_secret():
             assert {"name": "Notion-Version", "value": "2025-09-03"} in node["parameters"]["headerParameters"]["parameters"]
         if "furious-squad.com" in node["parameters"].get("url", ""):
             assert "credentials" not in node   # the Furious login credential is created in n8n
+    login = next(n for n in wf["nodes"] if n["name"] == "Furious : connexion")["parameters"]
+    assert (login["authentication"], login["genericAuthType"]) == ("genericCredentialType", "httpCustomAuth")
+    assert json.loads(login["jsonBody"]) == {"action": "auth"}   # "data" comes from the credential
     note = next(n for n in wf["nodes"] if n["name"] == "Note")["parameters"]["content"]
     assert '"username": "…", "password": "…"' in note   # a placeholder, filled in n8n only
     others = json.dumps([n for n in wf["nodes"] if n["name"] != "Note"], ensure_ascii=False).lower()

@@ -82,12 +82,14 @@ def condition(name: str, action: str, position: List[int]) -> Dict[str, Any]:
 
 def http(name: str, position: List[int], method: str, url: str, *, body: Optional[str] = None,
          headers: Optional[List[Dict[str, str]]] = None, query: Optional[List[Dict[str, str]]] = None,
-         notion: bool = False, batch_ms: Optional[int] = None, full_response: bool = False,
-         **node_settings: Any) -> Dict[str, Any]:
+         notion: bool = False, custom_auth: bool = False, batch_ms: Optional[int] = None,
+         full_response: bool = False, **node_settings: Any) -> Dict[str, Any]:
     params: Dict[str, Any] = {"method": method, "url": url}
     if notion:
         params.update(authentication="predefinedCredentialType", nodeCredentialType="notionApi")
         headers = [{"name": "Notion-Version", "value": "2025-09-03"}] + (headers or [])
+    if custom_auth:   # the credential's "body" is merged into the JSON body (checked in n8n 2.36.7)
+        params.update(authentication="genericCredentialType", genericAuthType="httpCustomAuth")
     if query:
         params.update(sendQuery=True, queryParameters={"parameters": query})
     if headers:
@@ -130,7 +132,7 @@ def build() -> Dict[str, Any]:
         # One login per run; no retry, and a refusal is not retried at the next run either
         # (see devis_a_envoyer.js): repeated failed logins could lock the Furious account.
         http("Furious : connexion", [880, -140], "POST", f"{FURIOUS_API}/auth/", body='{\n  "action": "auth"\n}',
-             full_response=True, executeOnce=True, onError="continueRegularOutput"),
+             custom_auth=True, full_response=True, executeOnce=True, onError="continueRegularOutput"),
         code("Devis à envoyer", "devis_a_envoyer.js", [1100, -140]),
         condition("Connexion acceptée ?", "envoyer", [1320, -140]),
         http("Furious : lire le devis", [1540, -260], "GET", f"{FURIOUS_API}/proposal/",
