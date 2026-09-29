@@ -9,6 +9,8 @@ lowers the stock is checked end to end against the real bases, not here.
 
 import copy
 import re
+import threading
+import time
 import uuid
 from datetime import datetime
 from types import SimpleNamespace
@@ -79,53 +81,66 @@ def _matches(page, flt):
 
 
 class FakeNotion:
+    """In-memory Notion. The service calls it from several threads at once, hence the lock."""
+
     def __init__(self):
         self.pages = {}
         self.calls = []
+        self.queries = []           # data sources read, in order (to check what the cache spares)
         self.fail = None            # fail(kind, target) -> True to simulate a Notion error
         self.numbers = 0
+        self.lock = threading.RLock()
 
     def add(self, ds, properties):
-        page_id = str(uuid.uuid4())
-        self.pages[page_id] = {"id": page_id, "url": f"https://www.notion.so/{page_id.replace('-', '')}",
-                               "parent": {"type": "data_source_id", "data_source_id": ds},
-                               "in_trash": False, "properties": properties}
-        return page_id
+        with self.lock:
+            page_id = str(uuid.uuid4())
+            self.pages[page_id] = {"id": page_id, "url": f"https://www.notion.so/{page_id.replace('-', '')}",
+                                   "parent": {"type": "data_source_id", "data_source_id": ds},
+                                   "in_trash": False, "properties": properties}
+            return page_id
 
     def _maybe_fail(self, kind, target):
         if self.fail and self.fail(kind, target):
             raise notion.NotionError(f"{kind} {target} -> 500", status=500)
 
     def create_page(self, ds, properties):
-        self._maybe_fail("create", ds)
-        page_id = self.add(ds, _read_format(properties))
-        if ds == DEMANDES:
-            self.numbers += 1
-            self.pages[page_id]["properties"]["N°"] = {
-                "type": "unique_id", "unique_id": {"prefix": "DEM", "number": self.numbers}}
-        self.calls.append(("create", ds))
-        return copy.deepcopy(self.pages[page_id])
+        with self.lock:
+            self._maybe_fail("create", ds)
+            page_id = self.add(ds, _read_format(properties))
+            if ds == DEMANDES:
+                self.numbers += 1
+                self.pages[page_id]["properties"]["N°"] = {
+                    "type": "unique_id", "unique_id": {"prefix": "DEM", "number": self.numbers}}
+            self.calls.append(("create", ds))
+            return copy.deepcopy(self.pages[page_id])
 
     def update_page(self, page_id, properties):
-        self._maybe_fail("update", page_id)
-        self.pages[page_id]["properties"].update(_read_format(properties))
-        self.calls.append(("update", page_id))
-        return copy.deepcopy(self.pages[page_id])
+        with self.lock:
+            self._maybe_fail("update", page_id)
+            self.pages[page_id]["properties"].update(_read_format(properties))
+            self.calls.append(("update", page_id))
+            return copy.deepcopy(self.pages[page_id])
 
     def get_page(self, page_id):
-        if page_id not in self.pages:
-            raise notion.NotionError(f"GET pages/{page_id} -> 404", status=404)
-        return copy.deepcopy(self.pages[page_id])
+        with self.lock:
+            if page_id not in self.pages:
+                raise notion.NotionError(f"GET pages/{page_id} -> 404", status=404)
+            return copy.deepcopy(self.pages[page_id])
 
     def trash_page(self, page_id):
-        self.pages[page_id]["in_trash"] = True
-        self.calls.append(("trash", page_id))
+        with self.lock:
+            self.pages[page_id]["in_trash"] = True
+            self.calls.append(("trash", page_id))
 
     def query_all(self, ds, body=None):
-        return [copy.deepcopy(p) for p in self.pages.values()
-                if p["parent"]["data_source_id"] == ds and not p["in_trash"] and _matches(p, (body or {}).get("filter"))]
+        with self.lock:
+            self.queries.append(ds)
+            return [copy.deepcopy(p) for p in self.pages.values() if p["parent"]["data_source_id"] == ds
+                    and not p["in_trash"] and _matches(p, (body or {}).get("filter"))]
 
     def users(self):
+        with self.lock:
+            self.queries.append("users")
         return [{"object": "user", "type": "person", "id": LEA_ID, "name": "Léa WURTZ", "person": {"email": LEA}},
                 {"object": "user", "type": "person", "id": PRISCILLA_ID, "name": "Priscilla", "person": {"email": PRISCILLA}},
                 {"object": "user", "type": "person", "id": ALICE_USER, "name": "Alice", "person": {"email": "alice@example.test"}}]
@@ -135,7 +150,9 @@ class FakeNotion:
         return notion.plain(self.pages[page_id]["properties"].get(name))
 
     def ids(self, ds):
-        return [p["id"] for p in self.query_all(ds)]
+        with self.lock:
+            return [p["id"] for p in self.pages.values()
+                    if p["parent"]["data_source_id"] == ds and not p["in_trash"]]
 
 
 def seed(fake):
@@ -468,6 +485,83 @@ def test_links_to_deleted_or_foreign_pages_lead_nowhere(env):
     assert env.client.get(link(request_id)).status_code == 404           # a request put in the trash
     assert env.client.post(link(request_id)).status_code == 404
     assert env.fake.value(line_id, "Statut") == "Demandé"
+
+
+# ------------------------------------------------------------ speed
+def test_a_submission_reads_neither_the_team_nor_the_catalogue_again(env):
+    assert env.client.get(f"/f/{FORM_KEY}/data").status_code == 200    # the form page loads both
+    env.fake.queries.clear()
+    assert submit(env, [("tshirt", 1), ("shoes", 1)]).json()["ok"] is True
+    assert EQUIPE not in env.fake.queries and ARTICLES not in env.fake.queries
+    assert len(env.sent) == 2 and "Lien valider" in env.fake.pages[only(env, DEMANDES)]["properties"]
+
+
+def test_the_cache_is_filled_when_the_service_starts():
+    fake = FakeNotion()
+    seed(fake)
+    app = app_module.create_app(config=make_config(), client=fake, send=lambda *a: None, now=lambda: NOW)
+    with TestClient(app) as client:                  # entering runs the start-up (lifespan)
+        for _ in range(300):
+            if "users" in fake.queries:              # the warm-up reads team, catalogue, then users
+                break
+            time.sleep(0.01)
+        before = list(fake.queries)
+        assert client.get(f"/f/{FORM_KEY}/data").status_code == 200
+        assert fake.queries == before                # served from memory, nothing read again
+
+
+def test_the_cache_serves_the_old_copy_while_it_refreshes():
+    clock = [0.0]
+    cache = app_module._Cache(clock=lambda: clock[0])
+    loads, slow_notion = [], threading.Event()
+
+    def load():
+        loads.append(len(loads) + 1)
+        if len(loads) > 1:
+            slow_notion.wait(5)
+        return f"v{len(loads)}"
+
+    assert cache.get("x", 60, load) == "v1"                      # empty: the first visitor waits once
+    clock[0] = 30
+    assert cache.get("x", 60, load) == "v1" and loads == [1]     # fresh: nothing reloaded
+    clock[0] = 61
+    assert cache.get("x", 60, load) == "v1"                      # stale: the old copy at once...
+    assert cache.get("x", 60, load) == "v1" and loads == [1, 2]  # ...and a single refresh at a time
+    slow_notion.set()
+    for _ in range(300):
+        if cache.get("x", 60, load) == "v2":
+            break
+        time.sleep(0.01)
+    assert cache.get("x", 60, load) == "v2" and loads == [1, 2]
+
+
+def test_a_failed_refresh_keeps_the_old_copy():
+    clock = [0.0]
+    cache = app_module._Cache(clock=lambda: clock[0])
+    assert cache.get("x", 60, lambda: "v1") == "v1"
+    clock[0] = 61
+    failed = threading.Event()
+
+    def notion_down():
+        failed.set()
+        raise notion.NotionError("down", status=503)
+
+    assert cache.get("x", 60, notion_down) == "v1"
+    assert failed.wait(2)
+    time.sleep(0.05)                                             # let the refresh thread finish
+    assert cache.get("x", 60, lambda: "v2") == "v1"              # still served; this call retries in the background
+
+
+def test_in_parallel_keeps_the_order_and_reports_each_error():
+    def value(v):
+        return lambda: v
+
+    def boom():
+        raise ValueError("boom")
+
+    outcomes = notion.in_parallel([value(1), boom, value(3), value(4)])
+    assert [result for result, _ in outcomes] == [1, None, 3, 4]
+    assert outcomes[0][1] is None and isinstance(outcomes[1][1], ValueError)
 
 
 # ------------------------------------------------------------ small pieces

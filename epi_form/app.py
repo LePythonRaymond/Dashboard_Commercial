@@ -18,6 +18,7 @@ Run locally:  uvicorn epi_form.app:app --port 8765   (settings: see config.py)
 
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -94,25 +95,52 @@ def _norm(page_id: Optional[str]) -> str:
 
 
 class _Cache:
-    """Tiny time-based cache: the form reloads the team and catalogue at most once a minute."""
+    """Time-based cache that never makes a visitor wait for a refresh.
 
-    def __init__(self):
-        self._values: Dict[str, Any] = {}
+    A value younger than `seconds` is served as is. An older one is still served
+    at once, while a background thread reloads it for the next visitor ("stale
+    while revalidate"). Only an empty cache (the very first use) waits for Notion.
+    Example: the catalogue takes about 2 s to read from Notion; the form and the
+    submission use the copy in memory, and that copy is at most one visit behind.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic):
+        self._values: Dict[str, Tuple[float, Any]] = {}
+        self._refreshing: set = set()
         self._lock = threading.Lock()
+        self._clock = clock
 
     def get(self, name: str, seconds: int, load: Callable[[], Any]) -> Any:
         with self._lock:
             stamp, value = self._values.get(name, (0.0, None))
-            if value is not None and time.monotonic() - stamp < seconds:
-                return value
-        value = load()
-        with self._lock:
-            self._values[name] = (time.monotonic(), value)
+        if value is None:
+            return self.load(name, load)
+        if self._clock() - stamp >= seconds:
+            self.refresh_in_background(name, load)
         return value
 
-    def clear(self, name: str) -> None:
+    def load(self, name: str, load: Callable[[], Any]) -> Any:
+        """Read now, store and return (first use, or when fresh data matters)."""
+        value = load()
         with self._lock:
-            self._values.pop(name, None)
+            self._values[name] = (self._clock(), value)
+        return value
+
+    def refresh_in_background(self, name: str, load: Callable[[], Any]) -> None:
+        with self._lock:
+            if name in self._refreshing:
+                return
+            self._refreshing.add(name)
+        threading.Thread(target=self._refresh, args=(name, load), daemon=True).start()
+
+    def _refresh(self, name: str, load: Callable[[], Any]) -> None:
+        try:
+            self.load(name, load)
+        except Exception as exc:  # keep serving the old copy; the next visit tries again
+            print(f"[epi-form] background refresh of {name} failed: {exc}")
+        finally:
+            with self._lock:
+                self._refreshing.discard(name)
 
 
 class SecurityHeaders:
@@ -161,7 +189,14 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
     cache = _Cache()
     hits: Dict[str, List[float]] = {}
     decide_lock = threading.Lock()   # one decision at a time: two quick clicks cannot both apply
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # Fill the cache as soon as the service starts, so the first worker does not wait.
+        threading.Thread(target=warm_up, daemon=True).start()
+        yield
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.add_middleware(SecurityHeaders)
     for problem in cfg.problems():
         print(f"[epi-form] configuration: {problem}")
@@ -178,20 +213,39 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
         except Exception as exc:  # the request exists in Notion even if the e-mail fails
             print(f"[epi-form] e-mail to {to} failed: {exc}")
 
-    def team() -> List[Dict[str, Any]]:
-        return cache.get("team", CACHE_SECONDS, lambda: notion.load_team(api, cfg.equipe_ds))
+    def load_team() -> List[Dict[str, Any]]:
+        return notion.load_team(api, cfg.equipe_ds)
 
-    def catalogue(fresh: bool = False) -> List[Dict[str, Any]]:
-        if fresh:
-            cache.clear("catalogue")
-        return cache.get("catalogue", CACHE_SECONDS, lambda: notion.load_catalogue(api, cfg.articles_ds))
+    def load_catalogue() -> List[Dict[str, Any]]:
+        return notion.load_catalogue(api, cfg.articles_ds)
+
+    def warm_up() -> None:
+        for name, load in (("team", load_team), ("catalogue", load_catalogue), ("users", api.users)):
+            try:
+                cache.load(name, load)
+            except Exception as exc:  # the first visitor will load it instead
+                print(f"[epi-form] warm-up of {name} failed: {exc}")
+
+    def team() -> List[Dict[str, Any]]:
+        return cache.get("team", CACHE_SECONDS, load_team)
+
+    def catalogue() -> List[Dict[str, Any]]:
+        return cache.get("catalogue", CACHE_SECONDS, load_catalogue)
 
     def stock_now() -> Dict[str, Dict[str, Any]]:
-        """Fresh catalogue by normalised id; empty (stock shown as "?") if Notion does not answer."""
+        """Fresh catalogue by normalised id, for decisions; empty (stock shown as "?") if Notion does not answer."""
         try:
-            return {_norm(item["id"]): item for item in catalogue(fresh=True)}
+            return {_norm(item["id"]): item for item in cache.load("catalogue", load_catalogue)}
         except (notion.NotionError, requests.RequestException) as exc:
             print(f"[epi-form] stock unavailable: {exc}")
+            return {}
+
+    def stock_in_memory() -> Dict[str, Dict[str, Any]]:
+        """Catalogue by id as kept in memory, for the e-mail (the new request does not change the stock)."""
+        try:
+            return {item["id"]: item for item in catalogue()}
+        except (notion.NotionError, requests.RequestException) as exc:
+            print(f"[epi-form] stock unavailable for the e-mail: {exc}")
             return {}
 
     def users_by_email() -> Dict[str, Dict[str, Any]]:
@@ -345,8 +399,14 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
                              "size_field_by_family": notion.SIZE_FIELD_BY_FAMILY},
                             headers={"Cache-Control": "no-store"})
 
-    def register(payload: DemandeIn) -> Tuple[Dict[str, Any], List[Tuple[str, Dict[str, str]]]]:
-        """Create the request in Notion; return it with the e-mails to send. Blocking: runs in a thread."""
+    def register(payload: DemandeIn) -> Dict[str, Any]:
+        """Create the request and its lines in Notion (blocking: runs in a thread).
+
+        Only what the worker must see confirmed happens here: the request page
+        and its register lines (about 1 s). The Notion links and the e-mails
+        wait for follow_up(), after the answer.
+        """
+        started = time.monotonic()
         person = next((p for p in team() if _norm(p["id"]) == _norm(payload.person_id)), None)
         if person is None:
             raise Refused("Nom inconnu. Recharge la page.")
@@ -363,14 +423,25 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
         commentaire = payload.commentaire.strip()
         when = now()
         created = notion.create_request(api, cfg.demandes_ds, cfg.registre_ds, person, lines, motif,
-                                        payload.urgent, commentaire, when.date(),
-                                        links=lambda request_id: links_for(request_id, NOTION_RECIPIENT))
-        stock = {item["id"]: item for item in catalogue(fresh=True)}
-        messages = [(email, mailer.request_email(person["name"], created, lines, stock, motif, payload.urgent,
-                                                 commentaire, links_for(created["id"], email), created.get("url"), when))
-                    for email in cfg.notify_emails]
-        print(f"[epi-form] request {created.get('number')} from {person['name']}: {created['total']} article(s)")
-        return created, messages
+                                        payload.urgent, commentaire, when.date())
+        print(f"[epi-form] request {created.get('number')} from {person['name']}: {created['total']} article(s), "
+              f"recorded in {time.monotonic() - started:.1f} s")
+        return {"created": created, "person": person, "lines": lines, "motif": motif, "urgent": payload.urgent,
+                "commentaire": commentaire, "when": when}
+
+    def follow_up(job: Dict[str, Any]) -> None:
+        """After the answer to the worker: Valider / Refuser links in Notion, then the office e-mails."""
+        created = job["created"]
+        try:
+            notion.store_links(api, created["id"], links_for(created["id"], NOTION_RECIPIENT))
+        except (notion.NotionError, requests.RequestException) as exc:
+            # The e-mail links still work; only the Notion columns stay empty for this request.
+            print(f"[epi-form] Notion links of {created.get('number')} not stored: {exc}")
+        stock = stock_in_memory()
+        for email in cfg.notify_emails:
+            deliver(email, mailer.request_email(job["person"]["name"], created, job["lines"], stock, job["motif"],
+                                                job["urgent"], job["commentaire"], links_for(created["id"], email),
+                                                created.get("url"), job["when"]))
 
     @app.post("/f/{key}/demande")
     async def submit(key: str, request: Request, background: BackgroundTasks):
@@ -382,24 +453,30 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
         except (ValidationError, ValueError):
             return JSONResponse({"ok": False, "error": "Demande incomplète."}, status_code=400)
         try:
-            created, messages = await run_in_threadpool(register, payload)
+            job = await run_in_threadpool(register, payload)
         except Refused as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         except (notion.NotionError, requests.RequestException) as exc:
             print(f"[epi-form] Notion error while creating a request: {exc}")
             return JSONResponse({"ok": False, "error": "Notion ne répond pas. Réessaie dans une minute."},
                                 status_code=502)
-        for email, message in messages:   # sent after the answer: the worker does not wait for SMTP
-            background.add_task(deliver, email, message)
-        return {"ok": True, "numero": created.get("number")}
+        background.add_task(follow_up, job)   # after the answer: the worker waits for neither Notion links nor SMTP
+        return {"ok": True, "numero": job["created"].get("number")}
+
+    def request_and_stock(request_id: str) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+        """The request (404/502 when unavailable) and the fresh stock, read at the same time."""
+        (req, error), (stock, _) = notion.in_parallel([lambda: load_or_404(request_id), stock_now])
+        if error is not None:
+            raise error
+        return req, stock
 
     @app.get("/v/{request_id}/{action}/{who}/{signature}", response_class=HTMLResponse)
     def confirm(request_id: str, action: str, who: str, signature: str):
         recipient = verify_link(request_id, action, who, signature)
-        req = load_or_404(request_id)
+        req, stock = request_and_stock(request_id)
         if req["statut"] != notion.WAITING:
             return already_decided(req)
-        return confirmation(req, action, recipient, stock_now())
+        return confirmation(req, action, recipient, stock)
 
     def apply_decision(request_id: str, action: str, recipient: str, fields: Dict[str, List[str]]) -> HTMLResponse:
         """Blocking part of the POST: runs in a thread, one decision at a time."""
@@ -407,10 +484,10 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
         if recipient == NOTION_RECIPIENT:
             decider = ((fields.get("par") or [""])[0]).strip().lower()
             if decider not in cfg.notify_emails:
-                req = load_or_404(request_id)
+                req, stock = request_and_stock(request_id)
                 if req["statut"] != notion.WAITING:
                     return already_decided(req)
-                return confirmation(req, action, recipient, stock_now(), error="Choisis qui décide.", status=400)
+                return confirmation(req, action, recipient, stock, error="Choisis qui décide.", status=400)
         choices = {name[len("ligne_"):]: values[0] for name, values in fields.items()
                    if name.startswith("ligne_") and values}
         if any(value not in notion.LINE_CHOICES for value in choices.values()):
@@ -429,7 +506,7 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
                 return _page("Notion n'a pas répondu",
                              "<p>Réessaie dans une minute avec le même lien : ce qui est déjà fait ne sera pas refait.</p>",
                              status=502)
-        cache.clear("catalogue")
+        cache.refresh_in_background("catalogue", load_catalogue)   # the stock moved: next visitors see it
         req = result["request"]
         if not result["changed"]:
             return already_decided(req)
