@@ -10,15 +10,20 @@ or À commander, or Refusé). A "Remis" line is what makes the stock formulas of
 "Articles EPI" move, by themselves.
 """
 
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
 API = "https://api.notion.com/v1"
 NOTION_VERSION = "2025-09-03"
 RETRYABLE = {409, 429, 500, 502, 503, 504}
+# Notion accepts about 3 requests per second per integration: writing 3 pages
+# at once divides the wait by 3 without tripping the limit (a 429 is retried).
+PARALLEL_CALLS = 3
 
 # Which size of "Équipe EPI" pre-selects the articles of each family.
 SIZE_FIELD_BY_FAMILY = {
@@ -55,15 +60,29 @@ class RequestGone(NotionError):
 
 
 class NotionClient:
-    """Minimal REST client: retries rate limits and server errors with backoff."""
+    """Minimal REST client: retries rate limits and server errors with backoff.
+
+    Each thread gets its own HTTP session, so parallel calls are safe and each
+    thread keeps its connection to Notion open between calls (no new TLS
+    handshake every time).
+    """
 
     def __init__(self, token: str, session: Optional[requests.Session] = None,
                  sleep: Callable[[float], None] = time.sleep, attempts: int = 5):
-        self.session = session or requests.Session()
+        self._shared_session = session
+        self._local = threading.local()
         self.headers = {"Authorization": f"Bearer {token}", "Notion-Version": NOTION_VERSION,
                         "Content-Type": "application/json"}
         self.sleep = sleep
         self.attempts = attempts
+
+    @property
+    def session(self) -> requests.Session:
+        if self._shared_session is not None:
+            return self._shared_session
+        if getattr(self._local, "session", None) is None:
+            self._local.session = requests.Session()
+        return self._local.session
 
     def call(self, method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         delay = 1.0
@@ -109,6 +128,25 @@ class NotionClient:
             if not result.get("has_more"):
                 return found
             cursor = result["next_cursor"]
+
+
+def in_parallel(calls: List[Callable[[], Any]]) -> List[Tuple[Any, Optional[Exception]]]:
+    """Run the calls PARALLEL_CALLS at a time; one (result, error) pair per call, in order.
+
+    Example: 4 register lines at about 0.55 s each take about 1.1 s instead of 2.2 s.
+    Every call runs to its end, even when another one fails, so the caller knows
+    exactly which pages exist (to put them in the trash, for instance).
+    """
+    def attempt(call: Callable[[], Any]) -> Tuple[Any, Optional[Exception]]:
+        try:
+            return call(), None
+        except Exception as exc:  # reported to the caller, never swallowed
+            return None, exc
+
+    if len(calls) <= 1:
+        return [attempt(call) for call in calls]
+    with ThreadPoolExecutor(max_workers=min(PARALLEL_CALLS, len(calls))) as pool:
+        return list(pool.map(attempt, calls))
 
 
 # --------------------------------------------------------------------- values
@@ -239,13 +277,12 @@ def default_choice(item: Optional[Dict[str, Any]], qty: float) -> str:
 # --------------------------------------------------------------------- writes
 def create_request(client: NotionClient, demandes_ds: str, registre_ds: str, person: Dict[str, Any],
                    lines: List[Dict[str, Any]], motif: Optional[str], urgent: bool, commentaire: str,
-                   today: date, links: Optional[Callable[[str], Dict[str, str]]] = None) -> Dict[str, Any]:
-    """Create the request page, then one register line per article (Statut Demandé).
+                   today: date) -> Dict[str, Any]:
+    """Create the request page, then its register lines (Statut Demandé), PARALLEL_CALLS at a time.
 
-    links(request_id) gives the "valider" and "refuser" URLs stored on the
-    request, which Notion shows as the Valider / Refuser columns.
-    All or nothing: if Notion fails halfway, the pages already created go to
-    the trash, so a retry does not leave a half request behind.
+    All or nothing: if Notion fails on any line, every page already created
+    goes to the trash and the error is raised, so the worker can simply send
+    again without leaving a half request behind.
     """
     total = sum(line["qty"] for line in lines)
     title = f"{person['name']} · {today:%d/%m} · {total} article{'s' if total > 1 else ''}"
@@ -261,50 +298,59 @@ def create_request(client: NotionClient, demandes_ds: str, registre_ds: str, per
         "Urgence": _select(urgence),
         "Commentaire": _text(commentaire),
     })
-    created = [page["id"]]
-    try:
-        for line in lines:
-            created.append(client.create_page(registre_ds, {
-                "Détail": _title(line["title"]),
-                "Article": _relation([line["article_id"]]),
-                "Quantité": {"number": line["qty"]},
-                "Bénéficiaire": _people([person.get("user_id")]),
-                "Type": _select("Sortie"),
-                "Statut": _select("Demandé"),
-                "Source": _select("Formulaire web"),
-                "Motif": _select(motif),
-                "Urgence": _select(urgence),
-                "Demande": _relation([page["id"]]),
-            })["id"])
-        if links:
-            urls = links(page["id"])
-            client.update_page(page["id"], {"Lien valider": {"url": urls["valider"]},
-                                            "Lien refuser": {"url": urls["refuser"]}})
-    except Exception:
-        for page_id in reversed(created):
-            try:
-                client.trash_page(page_id)
-            except Exception:  # best effort: the original error matters more
-                pass
-        raise
+
+    def create_line(line: Dict[str, Any]) -> Callable[[], Dict[str, Any]]:
+        return lambda: client.create_page(registre_ds, {
+            "Détail": _title(line["title"]),
+            "Article": _relation([line["article_id"]]),
+            "Quantité": {"number": line["qty"]},
+            "Bénéficiaire": _people([person.get("user_id")]),
+            "Type": _select("Sortie"),
+            "Statut": _select("Demandé"),
+            "Source": _select("Formulaire web"),
+            "Motif": _select(motif),
+            "Urgence": _select(urgence),
+            "Demande": _relation([page["id"]]),
+        })
+
+    outcomes = in_parallel([create_line(line) for line in lines])
+    errors = [error for _, error in outcomes if error is not None]
+    if errors:
+        created = [page["id"]] + [result["id"] for result, _ in outcomes if result]
+        for _, error in in_parallel([lambda pid=pid: client.trash_page(pid) for pid in created]):
+            pass  # best effort: the original error matters more
+        raise errors[0]
     return {"id": page["id"], "number": _prop(page, "N°"), "url": page.get("url"), "title": title, "total": total}
+
+
+def store_links(client: NotionClient, request_id: str, urls: Dict[str, str]) -> None:
+    """Save the "valider" and "refuser" URLs that Notion shows as the Valider / Refuser columns."""
+    client.update_page(request_id, {"Lien valider": {"url": urls["valider"]},
+                                    "Lien refuser": {"url": urls["refuser"]}})
 
 
 def load_request(client: NotionClient, registre_ds: str, demande_id: str,
                  demandes_ds: Optional[str] = None) -> Dict[str, Any]:
-    """The request and its register lines. RequestGone for a missing, trashed or foreign page."""
-    try:
-        page = client.get_page(demande_id)
-    except NotionError as exc:
-        if exc.status in (400, 404):
-            raise RequestGone(str(exc), exc.status)
-        raise
+    """The request and its register lines. RequestGone for a missing, trashed or foreign page.
+
+    The page and its lines are read at the same time (two calls in parallel).
+    """
+    (page, page_error), (lines, lines_error) = in_parallel([
+        lambda: client.get_page(demande_id),
+        lambda: client.query_all(registre_ds, {"filter": {"property": "Demande",
+                                                          "relation": {"contains": demande_id}}}),
+    ])
+    if page_error is not None:
+        if isinstance(page_error, NotionError) and page_error.status in (400, 404):
+            raise RequestGone(str(page_error), page_error.status)
+        raise page_error
     if page.get("in_trash") or page.get("archived"):
         raise RequestGone("the request is in the trash")
     parent = (page.get("parent") or {}).get("data_source_id", "")
     if demandes_ds and parent.replace("-", "") != demandes_ds.replace("-", ""):
         raise RequestGone("page is not a request of Demandes EPI")
-    lines = client.query_all(registre_ds, {"filter": {"property": "Demande", "relation": {"contains": demande_id}}})
+    if lines_error is not None:
+        raise lines_error
     return {
         "id": page["id"],
         "url": page.get("url"),
@@ -346,7 +392,7 @@ def decide_request(client: NotionClient, registre_ds: str, demande_id: str, deci
     request = load_request(client, registre_ds, demande_id, demandes_ds)
     if request["statut"] != WAITING:
         return {"changed": False, "statut": request["statut"], "lines": [], "request": request}
-    moved = []
+    moved, updates = [], []
     for line in request["lines"]:
         if line["statut"] not in PENDING_LINE_STATUSES:
             continue
@@ -356,8 +402,14 @@ def decide_request(client: NotionClient, registre_ds: str, demande_id: str, deci
             props["Remis le"] = _date(today)
         if user_id:
             props["Traité par"] = _people([user_id])
-        client.update_page(line["id"], props)
+        updates.append(lambda line_id=line["id"], props=props: client.update_page(line_id, props))
         moved.append(dict(line, statut=target))
+    # The lines first (in parallel), the request last: if Notion fails on a line,
+    # the request stays "En attente" and the same link finishes the job later
+    # (lines already moved are no longer pending, so they are not redone).
+    errors = [error for _, error in in_parallel(updates) if error is not None]
+    if errors:
+        raise errors[0]
     final = decision
     if decision == VALIDATED and moved and all(line["statut"] == LINE_REFUSED for line in moved):
         final = REFUSED
