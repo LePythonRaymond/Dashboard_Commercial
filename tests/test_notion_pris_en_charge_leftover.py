@@ -365,3 +365,33 @@ def test_travaux_devis_that_left_the_projection_is_archived_once():
     assert updated == [("page-456", {"Dans le périmètre": {"checkbox": False}, "Pris en charge": {"checkbox": True},
                                      "Archivé par la synchro": {"checkbox": True},
                                      "Date archive": {"date": {"start": "2026-09-25"}}})]
+
+
+def test_one_table_failing_does_not_stop_the_other():
+    """Met on 2026-09-29: "Devis à normaliser" (db-1) became unreachable and its error
+    stopped the "Devis à suivre" sync too."""
+    from src.processing.alerts import AlertsOutput
+
+    page = _as_page("page-123", _stored(_item()), scope=True)
+    sync, _, updated = _followup_sync([page])
+    unreachable = RuntimeError("Could not find database with ID: db-1")
+
+    def schema_of(db_id):
+        if db_id == sync.weird_database_id:
+            raise unreachable
+        return FOLLOWUP_SCHEMA
+
+    def pages_of(db_id):
+        if db_id == sync.weird_database_id:
+            raise unreachable
+        return [page]
+
+    sync._get_database_schema, sync.list_pages = schema_of, pages_of
+    alerts = AlertsOutput(weird_proposals={"owner1": [_item("999")]}, commercial_followup={"owner1": [_item(amount=6000)]},
+                          count_weird=1, count_followup=1)
+
+    results = sync.sync_all(alerts, status_by_id={}, today=TODAY)
+
+    assert results["weird_proposals"]["failed"] == "RuntimeError: Could not find database with ID: db-1"
+    assert "failed" not in results["commercial_followup"]
+    assert updated == [("page-123", {"Montant": {"number": 6000.0}})]
