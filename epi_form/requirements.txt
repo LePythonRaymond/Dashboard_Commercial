@@ -1,0 +1,7 @@
+# EPI form service only (the Myrium pipeline has its own requirements.txt at the root).
+# Versions tested locally with tests/test_epi_form.py.
+fastapi==0.115.13
+pydantic==2.10.4
+uvicorn==0.32.1
+requests==2.33.1
+python-dotenv==1.0.1
