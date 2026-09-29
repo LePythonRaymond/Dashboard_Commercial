@@ -13,6 +13,10 @@ Routes:
 in the Valider / Refuser columns of "Demandes EPI" (the page then asks who is
 deciding). The signature covers id, action and <who>: see security.py.
 
+In the background, every MAINTENANCE_SECONDS, the service dates the register
+lines whose status was changed by hand in Notion ("Remis le", "Rendu le"), so
+no paid Notion automation is needed.
+
 Run locally:  uvicorn epi_form.app:app --port 8765   (settings: see config.py)
 """
 
@@ -42,6 +46,7 @@ PARIS = ZoneInfo("Europe/Paris")
 FORM_HTML = Path(__file__).with_name("static").joinpath("form.html")
 CACHE_SECONDS = 60
 USERS_CACHE_SECONDS = 3600
+MAINTENANCE_SECONDS = 300       # how often "Remis le" / "Rendu le" are filled for lines changed by hand
 # At most 60 requests every 10 minutes per client address. On the VPS every
 # client reaches the service through Docker's gateway (the logs show one
 # address for everybody), so in practice this is one shared safety valve
@@ -173,10 +178,11 @@ select{{font:inherit;font-size:15px;padding:6px;border-radius:6px;border:1px sol
 td.decision{{width:9.5em}}td.decision select{{width:100%}}
 button{{font-size:16px;padding:12px 20px;border-radius:8px;border:0;background:#2f6b4f;color:#fff;cursor:pointer}}
 button.secondary{{background:#e9e9e6;color:#1f1f1f}}button:disabled{{opacity:.5}}.muted{{color:#666;font-size:14px}}
-.warn,.error{{color:#b42318}}.error{{font-weight:600}}
+.warn,.error{{color:#b42318}}.error{{font-weight:600}}.facts{{font-size:14px;margin-top:3px}}
+.enough{{color:#2f6b4f;font-weight:600}}.short{{color:#b42318;font-weight:600}}
 @media (prefers-color-scheme: dark){{body{{background:#161616;color:#eee}}td,th{{border-color:#333}}
 .muted{{color:#aaa}}button.secondary{{background:#333;color:#eee}}select{{background:#222;color:#eee;border-color:#444}}
-.warn,.error{{color:#f97066}}a{{color:#8ab4f8}}}}</style></head>
+.warn,.error,.short{{color:#f97066}}.enough{{color:#5fae86}}a{{color:#8ab4f8}}}}</style></head>
 <body><h1>{escape(title)}</h1>{body}{script}</body></html>"""
     return HTMLResponse(html, status_code=status, headers={"Cache-Control": "no-store"})
 
@@ -192,9 +198,13 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        # Fill the cache as soon as the service starts, so the first worker does not wait.
+        # Fill the cache as soon as the service starts, so the first worker does not wait,
+        # and date the lines changed by hand in Notion every few minutes.
+        stop = threading.Event()
         threading.Thread(target=warm_up, daemon=True).start()
+        threading.Thread(target=maintenance_loop, args=(stop,), daemon=True).start()
         yield
+        stop.set()
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.add_middleware(SecurityHeaders)
@@ -225,6 +235,25 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
                 cache.load(name, load)
             except Exception as exc:  # the first visitor will load it instead
                 print(f"[epi-form] warm-up of {name} failed: {exc}")
+
+    def maintain() -> Dict[str, int]:
+        """One pass of the date keeper: see notion.fill_missing_dates."""
+        try:
+            filled = notion.fill_missing_dates(api, cfg.registre_ds, now().date())
+        except Exception as exc:  # try again at the next pass
+            print(f"[epi-form] date keeper failed: {exc}")
+            return {"remis": 0, "rendus": 0}
+        if filled["remis"] or filled["rendus"]:
+            print(f"[epi-form] dates filled: {filled['remis']} « Remis le », {filled['rendus']} « Rendu le »")
+        return filled
+
+    def maintenance_loop(stop: threading.Event) -> None:
+        delay = 30   # first pass soon after start, then every MAINTENANCE_SECONDS
+        while not stop.wait(delay):
+            maintain()
+            delay = MAINTENANCE_SECONDS
+
+    app.state.maintain = maintain   # for tests and manual runs
 
     def team() -> List[Dict[str, Any]]:
         return cache.get("team", CACHE_SECONDS, load_team)
@@ -306,6 +335,28 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
             raise HTTPException(status_code=502)
 
     # --------------------------------------------------------------- pages
+    def stock_facts(item: Optional[Dict[str, Any]], qty: float, pending: bool) -> str:
+        """The stock of one article as the office needs it to decide, read from Notion when the page opens.
+
+        Examples: "Stock : 9 → 7 après remise", "Stock : 0 · il en manque 1",
+        "Stock pas encore compté", each followed by "· 2 autres en attente"
+        when other requests wait for the same article.
+        """
+        if not item or (item.get("stock") is None and not item.get("a_compter")):
+            return "<span class='muted'>Stock inconnu</span>"
+        if item.get("a_compter"):
+            text = "<span class='muted'>Stock pas encore compté</span>"
+        elif not pending:
+            text = f"Stock : {item['stock']:g}"
+        elif notion.shortage(item, qty):
+            text = (f"<span class='short'>Stock : {item['stock']:g} · il en manque "
+                    f"{notion.shortage(item, qty):g}</span>")
+        else:
+            text = f"<span class='enough'>Stock : {item['stock']:g} → {item['stock'] - qty:g} après remise</span>"
+        others = notion.pending_elsewhere(item, qty if pending else 0)
+        return text + (f" <span class='muted'>· {others:g} autre{'s' if others > 1 else ''} en attente</span>"
+                       if others else "")
+
     def summary(req: Dict[str, Any]) -> str:
         bits = []
         if req.get("motif"):
@@ -337,9 +388,7 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
         rows = []
         for line in req["lines"]:
             item = stock.get(_norm(line["article_id"]))
-            missing = notion.shortage(item, line["qty"])
-            in_stock = escape(notion.stock_label(item)) + (
-                f" <span class='warn'>(manque {missing:g})</span>" if missing else "")
+            in_stock = stock_facts(item, line["qty"], line["id"] in pending)
             title = escape(line["title"] or "")
             if line["id"] not in pending:
                 decision = f"<span class='muted'>{escape(line['statut'] or '')}, déjà traité</span>"
@@ -351,7 +400,7 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
             else:
                 decision = notion.LINE_REFUSED
             # Two columns only, so the page fits a phone: quantity and stock go under the article.
-            rows.append(f"<tr><td>{title}<div class='muted'>Qté {line['qty']:g} · en stock : {in_stock}</div></td>"
+            rows.append(f"<tr><td><b>{title}</b><div class='facts'>Demandé : {line['qty']:g} · {in_stock}</div></td>"
                         f"<td class='decision'>{decision}</td></tr>")
         table = "<table><tr><th>Article</th><th>Décision</th></tr>" + "".join(rows) + "</table>"
         verb = "Valider" if action == "valider" else "Refuser"
@@ -394,7 +443,7 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
     def form_data(key: str):
         require_form_key(key)
         people = [{"id": p["id"], "name": p["name"], "sizes": p["sizes"]} for p in team()]
-        items = [{k: item[k] for k in ("id", "title", "famille", "taille", "couleur", "mode")} for item in catalogue()]
+        items = [{k: item[k] for k in ("id", "title", "famille", "taille", "mode")} for item in catalogue()]
         return JSONResponse({"team": people, "catalogue": items, "motifs": notion.MOTIFS,
                              "size_field_by_family": notion.SIZE_FIELD_BY_FAMILY},
                             headers={"Cache-Control": "no-store"})
@@ -494,6 +543,10 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
             raise HTTPException(status_code=400)
         user_id = (users_by_email().get(decider) or {}).get("id")
         via = "Notion" if recipient == NOTION_RECIPIENT else "Email"
+        try:   # read seconds ago by the confirmation page, kept in memory
+            stock_before = {_norm(item["id"]): item for item in catalogue()}
+        except (notion.NotionError, requests.RequestException):
+            stock_before = {}
         with decide_lock:
             try:
                 result = notion.decide_request(api, cfg.registre_ds, request_id, ACTIONS[action], user_id, via,
@@ -512,6 +565,12 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
             return already_decided(req)
         after = {line["id"]: line["statut"] for line in result["lines"]}
         notes = []
+        for line in result["lines"]:   # handed out although the counted stock was short: say so
+            item = stock_before.get(_norm(line["article_id"]))
+            if line["statut"] == notion.HANDED and notion.shortage(item, line["qty"]):
+                notes.append(f"<span class='short'>Attention : {escape(line['title'] or '')} était en stock "
+                             f"insuffisant ({item['stock']:g}). Son stock passe à {item['stock'] - line['qty']:g} : "
+                             "vérifie le comptage, ou repasse la ligne en « À commander » dans Notion.</span>")
         if notion.HANDED in after.values():
             notes.append("Le stock est à jour.")
         if notion.TO_ORDER in after.values():

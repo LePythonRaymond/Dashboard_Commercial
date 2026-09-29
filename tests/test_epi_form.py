@@ -69,6 +69,8 @@ def _matches(page, flt):
         return True
     if "and" in flt:
         return all(_matches(page, f) for f in flt["and"])
+    if "or" in flt:
+        return any(_matches(page, f) for f in flt["or"])
     value = notion.plain(page["properties"].get(flt["property"]))
     if "select" in flt:
         cond = flt["select"]
@@ -77,6 +79,8 @@ def _matches(page, flt):
         return bool(value) == flt["checkbox"]["equals"]
     if "relation" in flt:
         return flt["relation"]["contains"] in (value or [])
+    if "date" in flt and flt["date"].get("is_empty"):
+        return not value
     raise NotImplementedError(flt)
 
 
@@ -167,6 +171,7 @@ def seed(fake):
         return fake.add(ARTICLES, {"Article": title(name), "Famille": select(famille), "Taille": select(taille),
                                    "Actif": checkbox(actif), "État": select(etat), "Mode": select(mode),
                                    "Stock": formula(stock), "Disponible": formula(stock),
+                                   "Demandé": {"type": "rollup", "rollup": {"type": "number", "number": 0}},
                                    "À compter": checkbox(a_compter)})
 
     ids["tshirt"] = article("T-shirt noir · M", "T-shirt", "M", 5)
@@ -255,7 +260,7 @@ def test_data_lists_active_people_and_new_articles_without_private_fields(env):
     assert set(data["team"][0]) == {"id", "name", "sizes"}
     assert data["team"][0]["sizes"]["T-shirt"] == "M"
     assert [i["title"] for i in data["catalogue"]] == ["T-shirt noir · M", "Chaussures sécurité · 42", "Gants · 9"]
-    assert all(set(i) == {"id", "title", "famille", "taille", "couleur", "mode"} for i in data["catalogue"])
+    assert all(set(i) == {"id", "title", "famille", "taille", "mode"} for i in data["catalogue"])
     assert ALICE_USER not in response.text and "@" not in response.text
 
 
@@ -485,6 +490,51 @@ def test_links_to_deleted_or_foreign_pages_lead_nowhere(env):
     assert env.client.get(link(request_id)).status_code == 404           # a request put in the trash
     assert env.client.post(link(request_id)).status_code == 404
     assert env.fake.value(line_id, "Statut") == "Demandé"
+
+
+# ------------------------------------------------------------ stock on the validation page
+def test_the_validation_page_shows_the_live_stock_of_each_article(env):
+    env.fake.pages[env.ids["tshirt"]]["properties"]["Demandé"] = {"type": "rollup", "rollup": {"type": "number", "number": 3}}
+    submit(env, [("tshirt", 2), ("shoes", 1), ("gloves", 1)])
+    page = env.client.get(links_in(env.sent[0][1])["valider"]).text
+    assert "Stock : 5 → 3 après remise" in page          # enough: what remains once handed out
+    assert "1 autre en attente" in page                    # 3 requested in all, 2 of them by this request
+    assert "Stock : 0 · il en manque 1" in page            # short: in red, "À commander" pre-selected
+    assert "Stock pas encore compté" in page               # never counted: the office decides
+
+
+def test_handing_out_beyond_the_counted_stock_is_flagged(env):
+    submit(env, [("shoes", 1)])
+    valider = links_in(env.sent[0][1])["valider"]
+    env.client.get(valider)                                            # the office opens the page
+    done = env.client.post(valider, data={choice_field(line_of(env, "shoes")): "Remis"})
+    assert "Attention" in done.text and "passe à -1" in done.text
+    assert env.fake.value(line_of(env, "shoes"), "Statut") == "Remis"  # allowed: the count may be wrong
+
+
+def test_pending_elsewhere():
+    assert notion.pending_elsewhere({"pending": 3}, 2) == 1
+    assert notion.pending_elsewhere({"pending": 2}, 2) == 0
+    assert notion.pending_elsewhere({"pending": 0}, 1) == 0
+    assert notion.pending_elsewhere(None, 1) == 0
+
+
+# ------------------------------------------------------------ date keeper
+def test_the_date_keeper_dates_lines_changed_by_hand(env):
+    def line(statut, **dates):
+        props = {"Détail": title("ligne"), "Statut": select(statut)}
+        for name, day in dates.items():
+            props[name] = {"type": "date", "date": {"start": day}}
+        return env.fake.add(REGISTRE, props)
+
+    handed, dated = line("Remis"), line("Remis", **{"Remis le": "2026-01-15"})
+    returned, lost, waiting = line("Rendu"), line("Perdu"), line("Demandé")
+    assert env.client.app.state.maintain() == {"remis": 1, "rendus": 2}
+    assert env.fake.value(handed, "Remis le") == "2026-09-29"
+    assert env.fake.value(dated, "Remis le") == "2026-01-15"               # an existing date is kept
+    assert env.fake.value(returned, "Rendu le") == env.fake.value(lost, "Rendu le") == "2026-09-29"
+    assert env.fake.value(waiting, "Remis le") is None
+    assert env.client.app.state.maintain() == {"remis": 0, "rendus": 0}    # nothing left to date
 
 
 # ------------------------------------------------------------ speed

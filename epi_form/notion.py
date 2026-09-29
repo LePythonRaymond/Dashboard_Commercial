@@ -233,10 +233,10 @@ def load_catalogue(client: NotionClient, articles_ds: str) -> List[Dict[str, Any
         "title": _prop(page, "Article") or "",
         "famille": _prop(page, "Famille") or "Autre",
         "taille": _prop(page, "Taille") or "",
-        "couleur": _prop(page, "Couleur") or "",
         "mode": _prop(page, "Mode") or "Dotation",
         "stock": _prop(page, "Stock"),
         "disponible": _prop(page, "Disponible"),
+        "pending": _prop(page, "Demandé") or 0,     # units requested and not handed out yet, all requests
         "a_compter": bool(_prop(page, "À compter")),
     } for page in pages]
     return sorted(items, key=lambda i: (rank.get(i["famille"], len(rank)), i["title"].casefold()))
@@ -272,6 +272,16 @@ def shortage(item: Optional[Dict[str, Any]], qty: float) -> float:
 def default_choice(item: Optional[Dict[str, Any]], qty: float) -> str:
     """Pre-selected decision on the validation page: hand it out, unless the counted stock is short."""
     return TO_ORDER if shortage(item, qty) else HANDED
+
+
+def pending_elsewhere(item: Optional[Dict[str, Any]], qty: float) -> float:
+    """Units other requests still wait for. "Demandé" counts this request too, hence the subtraction.
+
+    Example: 3 units requested in total, this request asks 1: 2 wait elsewhere.
+    """
+    if not item:
+        return 0
+    return max(0, (item.get("pending") or 0) - qty)
 
 
 # --------------------------------------------------------------------- writes
@@ -321,6 +331,32 @@ def create_request(client: NotionClient, demandes_ds: str, registre_ds: str, per
             pass  # best effort: the original error matters more
         raise errors[0]
     return {"id": page["id"], "number": _prop(page, "N°"), "url": page.get("url"), "title": title, "total": total}
+
+
+RETURNED_STATUSES = ("Rendu", "Rendu usé", "Hors d'usage", "Perdu")
+
+
+def fill_missing_dates(client: NotionClient, registre_ds: str, today: date) -> Dict[str, int]:
+    """Date the lines whose status was changed by hand in Notion, as a Notion automation would.
+
+    A "Remis" line without "Remis le" gets today: the wear clock starts from
+    that date, so an empty one would never turn orange. A returned, worn-out or
+    lost line without "Rendu le" gets today. Lines already dated are left alone.
+    """
+    handed = client.query_all(registre_ds, {"filter": {"and": [
+        {"property": "Statut", "select": {"equals": HANDED}},
+        {"property": "Remis le", "date": {"is_empty": True}},
+    ]}})
+    returned = client.query_all(registre_ds, {"filter": {"and": [
+        {"or": [{"property": "Statut", "select": {"equals": status}} for status in RETURNED_STATUSES]},
+        {"property": "Rendu le", "date": {"is_empty": True}},
+    ]}})
+    updates = [lambda pid=page["id"]: client.update_page(pid, {"Remis le": _date(today)}) for page in handed]
+    updates += [lambda pid=page["id"]: client.update_page(pid, {"Rendu le": _date(today)}) for page in returned]
+    errors = [error for _, error in in_parallel(updates) if error is not None]
+    if errors:
+        raise errors[0]
+    return {"remis": len(handed), "rendus": len(returned)}
 
 
 def store_links(client: NotionClient, request_id: str, urls: Dict[str, str]) -> None:
