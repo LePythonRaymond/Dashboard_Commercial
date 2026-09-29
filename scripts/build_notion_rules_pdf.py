@@ -121,11 +121,11 @@ def build() -> Path:
     story = [
         Paragraph("Tables commerciales Notion : ce qui s'affiche, et pourquoi", TITLE),
         Spacer(1, 3),
-        Paragraph("Devis à normaliser · Devis à suivre / relancer · Pipe travaux · Devis gagnés · Devis perdus. "
+        Paragraph("Devis à suivre / relancer · Pipe travaux · Devis gagnés · Devis perdus. "
                   "Remplies chaque matin depuis Furious.", SUB),
         Spacer(1, 8),
         boxed([
-            Paragraph("La règle, identique dans les 5 tables", ParagraphStyle("bh", parent=H, spaceBefore=0)),
+            Paragraph("La règle, identique dans les 4 tables", ParagraphStyle("bh", parent=H, spaceBefore=0)),
             Paragraph(f"Une ligne est visible quand <b>{q('Dans le périmètre')} est coché</b> et "
                       f"<b>{q('Pris en charge')} ne l'est pas</b>.", P),
             Spacer(1, 4),
@@ -147,10 +147,6 @@ def build() -> Path:
         Paragraph("Le périmètre de chaque table", H),
         grid([
             ["Table", "Contient", "Une ligne sort quand"],
-            ["Devis à normaliser",
-             "Les devis en attente, et les devis gagnés du mois en cours, qui ont un problème de données : "
-             "date de début ou de fin de projet manquante, début après la fin, probabilité à 0 %.",
-             "Le problème est corrigé, ou le devis n'est plus en attente ni gagné ce mois-ci."],
             ["Devis à suivre / relancer",
              "Tous les devis en attente (Brief, En cours, Envoyée(s) attente réponse), quelle que soit leur date. "
              "Un devis mis en gagné dans Notion y reste jusqu'à la signature.",
@@ -194,15 +190,15 @@ def build() -> Path:
                   "à la création de la ligne. Ensuite, les deux lignes sont indépendantes.", SMALL),
         Paragraph("Devis à suivre : le statut se change dans Notion", H),
         *bullets([
-            "<b>Brief, En cours, Envoyée(s) attente réponse</b> : changez-les dans Notion, Furious suit en 2 minutes "
-            "environ (pendant la synchro du matin, juste après).",
+            "<b>Brief, En cours, Envoyée(s) attente réponse</b> : changez-les dans Notion, Furious suit en quelques "
+            "secondes.",
             f"<b>gagné</b> : le client a dit oui, la signature n'est pas là. Reste dans Notion seulement (Furious garde "
             f"le devis en attente). Vue {q('Gagnés, en attente de signature')}.",
             "<b>Signature reçue</b> : passez le devis en gagné dans Furious, comme avant (le projet se crée). "
             "Le lendemain matin, il quitte Devis à suivre et arrive dans Devis gagnés, à la date de signature.",
             "<b>Perdu</b> : dans Furious, avec la raison de la perte. Choisi dans Notion, il est remis comme avant.",
-            f"Furious refuse (ex. « BU est requis » : champ à remplir dans Furious) : le statut revient comme avant "
-            f"et la raison s'affiche dans {q('Retour Furious')}.",
+            "Furious refuse (ex. « BU est requis » : champ à remplir dans Furious) : le statut revient comme avant, "
+            "avec un commentaire sur la page qui dit pourquoi.",
             "Un statut changé dans Furious arrive dans Notion le lendemain matin, sauf sur une ligne en gagné.",
         ]),
         Paragraph("Bon à savoir sur Devis gagnés", H),

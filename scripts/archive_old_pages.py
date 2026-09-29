@@ -77,35 +77,45 @@ def main() -> int:
         database_id = getattr(settings, setting, "").replace("-", "")
         if not database_id:
             continue
-        data_source_id = data_source_of(database_id)
-        props = notion_call("GET", f"data_sources/{data_source_id}")["properties"]
-        missing = [name for name in (ARCHIVED_PROP, SCOPE_PROP) if name not in props]
-        if missing or not archive_date_prop(props):
-            print(f"{label}: skipped, missing {missing or ['archive date']}")
-            report["tables"][label] = {"skipped": missing or ["archive date"]}
-            continue
-        due = due_pages(data_source_id, props, cutoff)
-        total = len(query_all(data_source_id, {}))
-        rows = [{"page_id": p["id"], "id_devis": page_value(p, "ID Devis"),
-                 "title": page_value(p, "Name") or page_value(p, "Nom"),
-                 "archived_on": page_value(p, archive_date_prop(props))} for p in due]
-        entry: Dict[str, Any] = {"total_pages": total, "due": len(rows), "moved": 0, "pages": rows}
-        if total and len(rows) > args.max_share * total:
-            entry["refused"] = f"{len(rows)} of {total} pages exceed --max-share {args.max_share}"
-            print(f"{label}: REFUSED, {entry['refused']}")
-        else:
-            for row in rows:
-                if args.apply:
-                    notion_call("PATCH", f"pages/{row['page_id']}", {"in_trash": True})
-                    entry["moved"] += 1
-            print(f"{label}: {len(rows)} page(s) due of {total}" + (f", {entry['moved']} moved to the trash" if args.apply else ""))
-        report["tables"][label] = entry
+        try:
+            report["tables"][label] = archive_table(label, database_id, cutoff, args)
+        except Exception as exc:
+            # One table failing (e.g. no longer shared with the integration, met on
+            # 2026-09-29 with "Devis à normaliser") must not stop the others.
+            report["tables"][label] = {"error": f"{type(exc).__name__}: {exc}"[:300]}
+            print(f"{label}: ERROR, {report['tables'][label]['error']}")
 
     out = PROJECT_ROOT / "logs" / f"archive_old_pages_{date.today():%Y%m%d}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, ensure_ascii=False))
     print(f"Report: {out}")
-    return 0
+    return 1 if any("error" in entry for entry in report["tables"].values()) else 0
+
+
+def archive_table(label: str, database_id: str, cutoff: date, args: argparse.Namespace) -> Dict[str, Any]:
+    """Trash (or list) the due pages of one table; returns its report entry."""
+    data_source_id = data_source_of(database_id)
+    props = notion_call("GET", f"data_sources/{data_source_id}")["properties"]
+    missing = [name for name in (ARCHIVED_PROP, SCOPE_PROP) if name not in props]
+    if missing or not archive_date_prop(props):
+        print(f"{label}: skipped, missing {missing or ['archive date']}")
+        return {"skipped": missing or ["archive date"]}
+    due = due_pages(data_source_id, props, cutoff)
+    total = len(query_all(data_source_id, {}))
+    rows = [{"page_id": p["id"], "id_devis": page_value(p, "ID Devis"),
+             "title": page_value(p, "Name") or page_value(p, "Nom"),
+             "archived_on": page_value(p, archive_date_prop(props))} for p in due]
+    entry: Dict[str, Any] = {"total_pages": total, "due": len(rows), "moved": 0, "pages": rows}
+    if total and len(rows) > args.max_share * total:
+        entry["refused"] = f"{len(rows)} of {total} pages exceed --max-share {args.max_share}"
+        print(f"{label}: REFUSED, {entry['refused']}")
+    else:
+        for row in rows:
+            if args.apply:
+                notion_call("PATCH", f"pages/{row['page_id']}", {"in_trash": True})
+                entry["moved"] += 1
+        print(f"{label}: {len(rows)} page(s) due of {total}" + (f", {entry['moved']} moved to the trash" if args.apply else ""))
+    return entry
 
 
 if __name__ == "__main__":

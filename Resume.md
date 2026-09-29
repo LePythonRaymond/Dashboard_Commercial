@@ -1112,6 +1112,29 @@ See original documentation for details on performance, security, error handling,
 
 **Recap PDF** rebuilt (rules of 29/09/2026): a "Devis à suivre : le statut se change dans Notion" section; the times are now given in Paris time (the VPS runs in UTC: the 06:00 sync is 08:00 in summer, 07:00 in winter). **Tests**: 345 passed.
 
+### 18.22 Status webhook instead of polling, "Devis à normaliser" off, sync and archive hardening (September 2026)
+
+**Decisions (Tadd, 2026-09-29, same day as §18.21)**: the status changes go to Furious through a **Notion webhook** (instant) rather than a poll every 2 minutes, and **no "Retour Furious" column** (too much for the team): a refusal is explained in a **comment** on the page. "Devis à normaliser" was used by nobody: Tadd moved it to a private page, its sync is **off**.
+
+**n8n workflow** (`deploy/n8n/devis_statut_notion_vers_furious.json`, same id `DevisStatutNtoF1`, built by `scripts/build_n8n_statut_workflow.py`):
+- Entry 1, **Webhook** (POST, production URL printed by the build script): called by the Notion automation "quand Statut est modifié → Envoyer un webhook" of "Devis à suivre" (set up by hand in Notion: the API cannot create automations). It answers 200 at once (`responseMode: onReceived`): Notion **pauses an automation after a failed call** (help centre, 2026-09-29), possibly without notice. "Page modifiée" keeps only the page id (`body.data.id`, then a search of the payload: Notion does not document it) and the page is read again from Notion, so a late, repeated or forged call can only make n8n act on what Notion holds; no page id → the run fails (Error Workflow e-mail).
+- Entry 2, **hourly catch-up** (`30 * * * *` UTC): the rows whose hidden formula "À envoyer à Furious" is checked, i.e. what the webhook missed (n8n down, Furious not answering, automation paused).
+- "Préparer les changements" applies the formula's test itself (in scope, "Statut Furious" known, different from "Statut", not "gagné"), which also ignores the webhook calls caused by the sync or by n8n (Notion documents that automations do not trigger other automations; API edits are covered either way).
+- Refusal (status not allowed, devis lost/won meanwhile, not found, Furious "success: false", unknown Typologie Myrium, login refused): "Statut" put back to "Statut Furious" + comment "🔁 Statut remis à « … » : raison". Comments need the **"Insert comments" capability** of the Notion integration, which it lacks (403 on 2026-09-29): the comment nodes are best effort (`continueRegularOutput`) until Tadd ticks it. Furious not answering: nothing written, the catch-up retries.
+- Settings: successful executions saved again (about 24 catch-up runs a day), `errorWorkflow` = "Error Workflow" (`606htw7ATyek8vJn`, Gmail to Tadd, as 13 other workflows).
+- `scripts/deploy_n8n_statut_workflow.py` (API key from `N8N_API_KEY`, never stored) pushes the file to the live n8n and **keeps the credentials chosen in n8n** (the Furious Custom Auth one), `--activate` to switch it on.
+- Tested end to end in a throwaway n8n 1.76 against a mock of Notion and Furious: webhook accepted / refused / nothing to send, catch-up of 7 rows with comments refused (403), refused login.
+
+**Sync** (`notion_alerts_sync.py`): the morning pause of n8n is replaced by a guard. The pipeline records when it read Furious (`furious_read_at`, step 2); the follow-up sync writes neither "Statut" nor "Statut Furious" on a row edited at or after that minute (Notion rounds `last_edited_time` down to the minute): n8n may have sent a newer status to Furious in between. Counted as `edited_since_furious_read`; the next run writes them.
+
+**Check**: `PENDING_GRACE` 90 min (webhook within seconds, catch-up every hour).
+
+**"Devis à normaliser" off**: `NOTION_WEIRD_DATABASE_ID` commented out in the VPS `.env` (backup `.env.bak.20260929-before-weird-off`, mode 600); the sync, the setup scripts and the monthly archive job skip a table that is not configured. Its 404 since 2026-09-29 06:05 UTC had stopped step 9 (fixed by PR #15: each table synced on its own) and, first in `SCOPED_TABLES`, it would have stopped the whole archive job of 1 October: `archive_old_pages.py` now reports a failing table and goes on with the others (exit code 1).
+
+**Found, not changed (Tadd to decide)**: the active n8n workflow **"Archivage suivi commercial"** (`aAO2fHt9xkJ2sv7k`, since March 2026, Fridays 22:00 Paris) trashes every row of "Devis à suivre", "Pipe travaux" and "Devis à normaliser" whose "Pris en charge" is ticked, whatever its archive date. Since the scope rule of §18.19 keeps that tick, it overrides the 6-month retention of `archive_old_pages.py`, and a devis a person ticks while still waiting is trashed on Friday and recreated without its Commentaire by the next sync. On 2026-09-25 it trashed 5 follow-up rows (all won or lost, no comment), 41 "Devis à normaliser" rows and 4 "Pipe travaux" rows. Its "Devis à normaliser" node will fail from 2026-10-02.
+
+**Recap PDF** (rules of 29/09/2026): 4 tables; status sent within seconds, refusals explained in a comment.
+
 ---
 
 ## 17. Conclusion
@@ -1127,7 +1150,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.47
+**Document Version**: 1.48
 **Last Updated**: September 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System

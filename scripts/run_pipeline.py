@@ -22,7 +22,7 @@ import json
 import logging
 import pandas as pd
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 # Add project root to path
@@ -209,6 +209,9 @@ class PipelineRunner:
             # Step 2: Fetch Proposals
             logger.info("\n--- Step 2: Fetching Proposals ---")
             proposals_client = ProposalsClient(auth=auth)
+            # When Furious was read: the follow-up sync (step 9) leaves the status of
+            # rows edited since then alone, n8n may have sent a newer one to Furious.
+            self.furious_read_at = datetime.now(timezone.utc)
             df_raw = proposals_client.fetch_all()
             self._log_step("fetch_proposals", "success", {"count": len(df_raw)})
 
@@ -478,7 +481,8 @@ class PipelineRunner:
                     # alerts_for_notion holds every waiting devis; status_by_id lets the sync
                     # relabel the pages whose devis was won or lost since the last run.
                     alerts_sync_stats = notion_alerts_sync.sync_all(
-                        alerts_for_notion, status_by_id=furious_status_by_id(df_processed)
+                        alerts_for_notion, status_by_id=furious_status_by_id(df_processed),
+                        furious_read_at=getattr(self, "furious_read_at", None),
                     )
                     followup_stats = alerts_sync_stats["commercial_followup"]
                     weird_stats = alerts_sync_stats["weird_proposals"]
