@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Demande de matériel</title>
+<style>
+  :root { --bg: #f6f5f1; --card: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e4e2dc;
+          --accent: #2f6b4f; --accent-soft: #e3efe8; --danger: #b42318; --radius: 12px; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141413; --card: #1f1f1d; --text: #efeee9; --muted: #a3a29c; --line: #34332f;
+            --accent: #5fae86; --accent-soft: #23372c; --danger: #f97066; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 16px 16px 120px; }
+  h1 { font-size: 22px; margin: 8px 0 0; }
+  .sub { color: var(--muted); margin: 0 0 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+          padding: 16px; margin-bottom: 12px; }
+  label.field { display: block; font-weight: 600; margin-bottom: 6px; }
+  select, textarea { width: 100%; font: inherit; color: var(--text); background: var(--card);
+                     border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+  textarea { min-height: 80px; resize: vertical; }
+  .toggle { display: flex; gap: 10px; align-items: center; margin: 4px 0 12px; color: var(--muted); }
+  .toggle input { width: 20px; height: 20px; }
+  details { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+            margin-bottom: 8px; overflow: hidden; }
+  summary { list-style: none; cursor: pointer; padding: 14px 16px; display: flex;
+            justify-content: space-between; align-items: center; font-weight: 600; }
+  summary::-webkit-details-marker { display: none; }
+  summary .hint { color: var(--muted); font-weight: 400; font-size: 14px; }
+  .badge { background: var(--accent); color: #fff; border-radius: 999px; padding: 2px 10px;
+           font-size: 14px; margin-left: 8px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+         padding: 10px 16px; border-top: 1px solid var(--line); }
+  .row.selected { background: var(--accent-soft); }
+  .name { flex: 1; }
+  .tag { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 6px;
+         padding: 1px 6px; margin-left: 6px; }
+  .stepper { display: flex; align-items: center; gap: 6px; }
+  .stepper button { width: 44px; height: 44px; border-radius: 10px; border: 1px solid var(--line);
+                    background: var(--bg); color: var(--text); font-size: 22px; line-height: 1; cursor: pointer; }
+  .stepper button:disabled { opacity: .35; cursor: default; }
+  .qty { min-width: 28px; text-align: center; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; background: var(--card); border-top: 1px solid var(--line);
+         padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+  .bar-inner { max-width: 640px; margin: 0 auto; display: flex; gap: 12px; align-items: center; justify-content: space-between; }
+  .send { background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 14px 20px;
+          font: inherit; font-weight: 600; cursor: pointer; }
+  .send:disabled { opacity: .45; cursor: default; }
+  .error { color: var(--danger); margin: 8px 0 0; }
+  .done { text-align: center; padding: 32px 16px; }
+  .done .num { font-size: 20px; font-weight: 700; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Demande de matériel</h1>
+  <p class="sub">EPI et vêtements de travail</p>
+
+  <div id="loading" class="card">Chargement…</div>
+  <div id="load-error" class="card error" hidden>La page n'a pas pu charger le catalogue. Réessaie dans un instant.</div>
+
+  <section id="form" hidden>
+    <div class="card">
+      <label class="field" for="who">Qui es-tu ?</label>
+      <select id="who"><option value="">Choisis ton nom</option></select>
+    </div>
+
+    <div id="catalogue" hidden>
+      <label class="toggle"><input type="checkbox" id="all-sizes"> Voir toutes les tailles</label>
+      <div id="families"></div>
+
+      <div class="card">
+        <label class="field" for="motif">Motif</label>
+        <select id="motif"><option value="">Choisis un motif (facultatif)</option></select>
+        <label class="toggle" style="margin-top:12px"><input type="checkbox" id="urgent"> C'est urgent</label>
+        <label class="field" for="comment">Précisions (facultatif)</label>
+        <textarea id="comment" maxlength="1000" placeholder="Ex : chaussures trop grandes, besoin avant lundi…"></textarea>
+      </div>
+      <p id="send-error" class="error" hidden></p>
+    </div>
+  </section>
+
+  <section id="done" class="card done" hidden>
+    <p class="num" id="done-number"></p>
+    <p>Demande envoyée. Le bureau la valide et te prévient quand c'est prêt.</p>
+    <button class="send" id="again">Faire une autre demande</button>
+  </section>
+</main>
+
+<div class="bar" id="bar" hidden>
+  <div class="bar-inner">
+    <span id="count">Aucun article</span>
+    <button class="send" id="send" disabled>Envoyer la demande</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var base = location.pathname.replace(/\/+$/, "");
+  var state = { team: [], catalogue: [], sizeField: {}, person: null, qty: {}, showAll: false, sending: false };
+  var $ = function (id) { return document.getElementById(id); };
+
+  function store(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
+  function recall(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+
+  function familyOrder() {
+    var seen = [], order = [];
+    state.catalogue.forEach(function (item) {
+      if (seen.indexOf(item.famille) < 0) { seen.push(item.famille); order.push(item.famille); }
+    });
+    return order;
+  }
+
+  function personSize(family) {
+    var field = state.sizeField[family];
+    return field && state.person ? state.person.sizes[field] : null;
+  }
+
+  function visible(family, items) {
+    var size = personSize(family);
+    if (state.showAll || !size) return items;
+    var mine = items.filter(function (i) {
+      return i.taille === size || i.taille === "Unique" || !i.taille || (state.qty[i.id] || 0) > 0;
+    });
+    return mine.length ? mine : items;
+  }
+
+  function total() {
+    return Object.keys(state.qty).reduce(function (sum, id) { return sum + state.qty[id]; }, 0);
+  }
+
+  function renderBar() {
+    var n = total();
+    $("count").textContent = n === 0 ? "Aucun article" : n + (n > 1 ? " articles" : " article");
+    $("send").disabled = n === 0 || !state.person || state.sending;
+  }
+
+  function setQty(id, value) {
+    var q = Math.max(0, Math.min(50, value));
+    if (q === 0) delete state.qty[id]; else state.qty[id] = q;
+    renderFamilies();
+    renderBar();
+  }
+
+  function renderFamilies() {
+    var box = $("families");
+    var openFamilies = {};
+    Array.prototype.forEach.call(box.querySelectorAll("details"), function (d) {
+      if (d.open) openFamilies[d.dataset.family] = true;
+    });
+    box.innerHTML = "";
+    familyOrder().forEach(function (family) {
+      var items = state.catalogue.filter(function (i) { return i.famille === family; });
+      var shown = visible(family, items);
+      var chosen = items.reduce(function (s, i) { return s + (state.qty[i.id] || 0); }, 0);
+      var details = document.createElement("details");
+      details.dataset.family = family;
+      details.open = !!openFamilies[family];
+      var summary = document.createElement("summary");
+      var left = document.createElement("span");
+      left.textContent = family;
+      if (chosen) {
+        var badge = document.createElement("span");
+        badge.className = "badge";
+        badge.textContent = chosen;
+        left.appendChild(badge);
+      }
+      var hint = document.createElement("span");
+      hint.className = "hint";
+      var size = personSize(family);
+      hint.textContent = size && !state.showAll ? "taille " + size : shown.length + " choix";
+      summary.appendChild(left);
+      summary.appendChild(hint);
+      details.appendChild(summary);
+      shown.forEach(function (item) {
+        var q = state.qty[item.id] || 0;
+        var row = document.createElement("div");
+        row.className = "row" + (q ? " selected" : "");
+        var name = document.createElement("span");
+        name.className = "name";
+        name.textContent = item.title;
+        if (item.mode === "Prêt") {
+          var tag = document.createElement("span");
+          tag.className = "tag";
+          tag.textContent = "prêt";
+          name.appendChild(tag);
+        }
+        var stepper = document.createElement("span");
+        stepper.className = "stepper";
+        var minus = document.createElement("button");
+        minus.type = "button";
+        minus.textContent = "−";
+        minus.disabled = q === 0;
+        minus.setAttribute("aria-label", "Retirer un " + item.title);
+        minus.addEventListener("click", function () { setQty(item.id, q - 1); });
+        var count = document.createElement("span");
+        count.className = "qty";
+        count.textContent = q;
+        count.setAttribute("aria-live", "polite");
+        var plus = document.createElement("button");
+        plus.type = "button";
+        plus.textContent = "+";
+        plus.setAttribute("aria-label", "Ajouter un " + item.title);
+        plus.addEventListener("click", function () { setQty(item.id, q + 1); });
+        stepper.appendChild(minus);
+        stepper.appendChild(count);
+        stepper.appendChild(plus);
+        row.appendChild(name);
+        row.appendChild(stepper);
+        details.appendChild(row);
+      });
+      box.appendChild(details);
+    });
+  }
+
+  function choosePerson(id) {
+    state.person = state.team.filter(function (p) { return p.id === id; })[0] || null;
+    $("catalogue").hidden = !state.person;
+    $("bar").hidden = !state.person;
+    if (state.person) store("epi-person", state.person.id);
+    renderFamilies();
+    renderBar();
+  }
+
+  function showError(message) {
+    $("send-error").textContent = message;
+    $("send-error").hidden = !message;
+  }
+
+  function send() {
+    if (!state.person || total() === 0 || state.sending) return;
+    state.sending = true;
+    showError("");
+    renderBar();
+    $("send").textContent = "Envoi…";
+    var payload = {
+      person_id: state.person.id,
+      items: Object.keys(state.qty).map(function (id) { return { article_id: id, qty: state.qty[id] }; }),
+      motif: $("motif").value || null,
+      urgent: $("urgent").checked,
+      commentaire: $("comment").value.trim()
+    };
+    fetch(base + "/demande", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).then(function (res) {
+      return res.json().catch(function () { return { ok: false }; }).then(function (body) {
+        if (!res.ok || !body.ok) {
+          throw new Error(body.error || (res.status === 429 ? "Trop de demandes, réessaie plus tard." : "L'envoi a échoué. Réessaie."));
+        }
+        return body;
+      });
+    }).then(function (body) {
+      $("done-number").textContent = body.numero ? "Demande " + body.numero : "Demande envoyée";
+      $("form").hidden = true;
+      $("bar").hidden = true;
+      $("done").hidden = false;
+      window.scrollTo(0, 0);
+    }).catch(function (err) {
+      showError(err.message);
+    }).then(function () {
+      state.sending = false;
+      $("send").textContent = "Envoyer la demande";
+      renderBar();
+    });
+  }
+
+  function reset() {
+    state.qty = {};
+    $("motif").value = "";
+    $("urgent").checked = false;
+    $("comment").value = "";
+    $("done").hidden = true;
+    $("form").hidden = false;
+    choosePerson(state.person ? state.person.id : "");
+  }
+
+  fetch(base + "/data", { headers: { "Accept": "application/json" } })
+    .then(function (res) { if (!res.ok) throw new Error(); return res.json(); })
+    .then(function (data) {
+      state.team = data.team;
+      state.catalogue = data.catalogue;
+      state.sizeField = data.size_field_by_family || {};
+      var who = $("who");
+      data.team.forEach(function (p) {
+        var option = document.createElement("option");
+        option.value = p.id;
+        option.textContent = p.name;
+        who.appendChild(option);
+      });
+      var motif = $("motif");
+      data.motifs.forEach(function (m) {
+        var option = document.createElement("option");
+        option.value = m;
+        option.textContent = m;
+        motif.appendChild(option);
+      });
+      who.addEventListener("change", function () { choosePerson(who.value); });
+      $("all-sizes").addEventListener("change", function (e) { state.showAll = e.target.checked; renderFamilies(); });
+      $("send").addEventListener("click", send);
+      $("again").addEventListener("click", reset);
+      var remembered = recall("epi-person");
+      if (remembered && data.team.some(function (p) { return p.id === remembered; })) {
+        who.value = remembered;
+        choosePerson(remembered);
+      }
+      $("loading").hidden = true;
+      $("form").hidden = false;
+    })
+    .catch(function () {
+      $("loading").hidden = true;
+      $("load-error").hidden = false;
+    });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,368 @@
+"""
+Notion access for the EPI form (REST API, Notion-Version 2025-09-03).
+
+Three bases are read (team, catalogue) and two are written:
+- "Demandes EPI": one page per request (who, what, when), status En attente,
+  Validée or Refusée;
+- "Registre EPI": one line per requested article, linked to its request.
+Validating a request gives each pending line its decision (Remis by default,
+or À commander, or Refusé). A "Remis" line is what makes the stock formulas of
+"Articles EPI" move, by themselves.
+"""
+
+import time
+from datetime import date
+from typing import Any, Callable, Dict, Iterable, List, Optional
+
+import requests
+
+API = "https://api.notion.com/v1"
+NOTION_VERSION = "2025-09-03"
+RETRYABLE = {409, 429, 500, 502, 503, 504}
+
+# Which size of "Équipe EPI" pre-selects the articles of each family.
+SIZE_FIELD_BY_FAMILY = {
+    "T-shirt": "T-shirt",
+    "Pantalon": "Pantalon",
+    "Chaussures": "Chaussures",
+    "Polaire": "Polaire / pull",
+    "Coupe-vent": "Coupe-vent",
+    "Veste hiver": "Manteau",
+    "Gants": "Gants",
+}
+FAMILY_ORDER = ["T-shirt", "Pantalon", "Short", "Polaire", "Coupe-vent", "Veste hiver", "Kit pluie", "Chaussures",
+                "Gants", "Casquette", "Casque", "Lunettes", "Protection auditive", "Chasuble", "Surchaussures",
+                "Harnais", "Outil", "Autre"]
+MOTIFS = ["Nouvel arrivant", "Usure", "Perte", "Casse", "Mauvaise taille", "Saison", "Chantier", "Autre"]
+PENDING_LINE_STATUSES = {None, "", "Demandé"}
+WAITING = "En attente"
+VALIDATED = "Validée"
+REFUSED = "Refusée"
+# What the office can decide for each article when it validates a request.
+# Only "Remis" moves the stock; "À commander" feeds the order list.
+HANDED, TO_ORDER, LINE_REFUSED = "Remis", "À commander", "Refusé"
+LINE_CHOICES = (HANDED, TO_ORDER, LINE_REFUSED)
+
+
+class NotionError(RuntimeError):
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status   # HTTP status of the failed call, when there was one
+
+
+class RequestGone(NotionError):
+    """The request page does not exist, is in the trash, or is not a page of "Demandes EPI"."""
+
+
+class NotionClient:
+    """Minimal REST client: retries rate limits and server errors with backoff."""
+
+    def __init__(self, token: str, session: Optional[requests.Session] = None,
+                 sleep: Callable[[float], None] = time.sleep, attempts: int = 5):
+        self.session = session or requests.Session()
+        self.headers = {"Authorization": f"Bearer {token}", "Notion-Version": NOTION_VERSION,
+                        "Content-Type": "application/json"}
+        self.sleep = sleep
+        self.attempts = attempts
+
+    def call(self, method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        delay = 1.0
+        for attempt in range(1, self.attempts + 1):
+            response = self.session.request(method, f"{API}/{path}", headers=self.headers, json=body, timeout=30)
+            if response.status_code in RETRYABLE and attempt < self.attempts:
+                self.sleep(float(response.headers.get("Retry-After", delay)))
+                delay *= 2
+                continue
+            if response.status_code >= 400:
+                raise NotionError(f"{method} {path} -> {response.status_code}: {response.text[:300]}",
+                                  status=response.status_code)
+            return response.json()
+        raise NotionError(f"{method} {path}: too many retries")  # pragma: no cover
+
+    def query_all(self, data_source_id: str, body: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        body = dict(body or {}, page_size=100)
+        pages: List[Dict[str, Any]] = []
+        while True:
+            result = self.call("POST", f"data_sources/{data_source_id}/query", body)
+            pages.extend(result.get("results", []))
+            if not result.get("has_more"):
+                return pages
+            body["start_cursor"] = result["next_cursor"]
+
+    def create_page(self, data_source_id: str, properties: Dict[str, Any]) -> Dict[str, Any]:
+        return self.call("POST", "pages", {"parent": {"data_source_id": data_source_id}, "properties": properties})
+
+    def update_page(self, page_id: str, properties: Dict[str, Any]) -> Dict[str, Any]:
+        return self.call("PATCH", f"pages/{page_id}", {"properties": properties})
+
+    def get_page(self, page_id: str) -> Dict[str, Any]:
+        return self.call("GET", f"pages/{page_id}")
+
+    def trash_page(self, page_id: str) -> Dict[str, Any]:
+        return self.call("PATCH", f"pages/{page_id}", {"in_trash": True})
+
+    def users(self) -> List[Dict[str, Any]]:
+        found, cursor = [], None
+        while True:
+            result = self.call("GET", "users?page_size=100" + (f"&start_cursor={cursor}" if cursor else ""))
+            found.extend(u for u in result.get("results", []) if u.get("type") == "person")
+            if not result.get("has_more"):
+                return found
+            cursor = result["next_cursor"]
+
+
+# --------------------------------------------------------------------- values
+def plain(prop: Optional[Dict[str, Any]]) -> Any:
+    """Python value of a Notion property as returned by the API."""
+    kind = (prop or {}).get("type")
+    value = (prop or {}).get(kind)
+    if kind in ("title", "rich_text"):
+        return "".join(part.get("plain_text", "") for part in value or [])
+    if kind in ("select", "status"):
+        return (value or {}).get("name")
+    if kind == "people":
+        return [person["id"] for person in value or []]
+    if kind == "relation":
+        return [item["id"] for item in value or []]
+    if kind == "date":
+        return (value or {}).get("start")
+    if kind in ("number", "checkbox", "url", "created_time"):
+        return value
+    if kind in ("formula", "rollup"):
+        return (value or {}).get((value or {}).get("type"))
+    if kind == "unique_id":
+        return f"{value.get('prefix')}-{value.get('number')}" if value and value.get("prefix") else (value or {}).get("number")
+    return None
+
+
+def _prop(page: Dict[str, Any], name: str) -> Any:
+    return plain((page.get("properties") or {}).get(name))
+
+
+def _text(value: str) -> Dict[str, Any]:
+    chunks = [value[i:i + 1900] for i in range(0, len(value), 1900)] if value else []
+    return {"rich_text": [{"text": {"content": chunk}} for chunk in chunks]}
+
+
+def _title(value: str) -> Dict[str, Any]:
+    return {"title": [{"text": {"content": value[:200]}}]}
+
+
+def _select(name: Optional[str]) -> Dict[str, Any]:
+    return {"select": {"name": name} if name else None}
+
+
+def _people(user_ids: Iterable[Optional[str]]) -> Dict[str, Any]:
+    return {"people": [{"object": "user", "id": uid} for uid in user_ids if uid]}
+
+
+def _relation(page_ids: Iterable[Optional[str]]) -> Dict[str, Any]:
+    return {"relation": [{"id": pid} for pid in page_ids if pid]}
+
+
+def _date(day: date) -> Dict[str, Any]:
+    return {"date": {"start": day.isoformat()}}
+
+
+# ---------------------------------------------------------------------- reads
+def load_team(client: NotionClient, equipe_ds: str) -> List[Dict[str, Any]]:
+    """Active people with their sizes and Notion account, sorted by name."""
+    pages = client.query_all(equipe_ds, {"filter": {"property": "Statut", "select": {"equals": "Actif"}}})
+    team = []
+    for page in pages:
+        name = (_prop(page, "Nom") or "").strip()
+        if not name:
+            continue
+        accounts = _prop(page, "Compte Notion") or []
+        team.append({
+            "id": page["id"],
+            "name": name,
+            "user_id": accounts[0] if accounts else None,
+            "sizes": {field: _prop(page, field) for field in sorted(set(SIZE_FIELD_BY_FAMILY.values()))},
+        })
+    return sorted(team, key=lambda p: p["name"].casefold())
+
+
+def load_catalogue(client: NotionClient, articles_ds: str) -> List[Dict[str, Any]]:
+    """Active new articles (used ones are handed out by the office), in family order."""
+    pages = client.query_all(articles_ds, {"filter": {"and": [
+        {"property": "Actif", "checkbox": {"equals": True}},
+        {"property": "État", "select": {"does_not_equal": "Usé"}},
+    ]}})
+    rank = {family: i for i, family in enumerate(FAMILY_ORDER)}
+    items = [{
+        "id": page["id"],
+        "title": _prop(page, "Article") or "",
+        "famille": _prop(page, "Famille") or "Autre",
+        "taille": _prop(page, "Taille") or "",
+        "couleur": _prop(page, "Couleur") or "",
+        "mode": _prop(page, "Mode") or "Dotation",
+        "stock": _prop(page, "Stock"),
+        "disponible": _prop(page, "Disponible"),
+        "a_compter": bool(_prop(page, "À compter")),
+    } for page in pages]
+    return sorted(items, key=lambda i: (rank.get(i["famille"], len(rank)), i["title"].casefold()))
+
+
+def summarize(lines: List[Dict[str, Any]]) -> str:
+    """'T-shirt noir · M × 2' per line: the request at a glance, in Notion and in the e-mail."""
+    return "\n".join(f"{line['title']} × {line['qty']}" for line in lines)
+
+
+def stock_label(item: Optional[Dict[str, Any]]) -> str:
+    """Units on the shelf as the office reads them: a number, "à compter" (never counted) or "?"."""
+    if not item:
+        return "?"
+    if item.get("a_compter"):
+        return "à compter"
+    stock = item.get("stock")
+    return "?" if stock is None else f"{stock:g}"
+
+
+def shortage(item: Optional[Dict[str, Any]], qty: float) -> float:
+    """Units missing to hand out qty from the counted stock.
+
+    0 when the stock covers it, and also when the stock was never counted
+    ("à compter"): nobody knows, so the office decides. Example: stock 1,
+    request 3, shortage 2.
+    """
+    if not item or item.get("a_compter") or item.get("stock") is None:
+        return 0
+    return max(0, qty - max(item["stock"], 0))
+
+
+def default_choice(item: Optional[Dict[str, Any]], qty: float) -> str:
+    """Pre-selected decision on the validation page: hand it out, unless the counted stock is short."""
+    return TO_ORDER if shortage(item, qty) else HANDED
+
+
+# --------------------------------------------------------------------- writes
+def create_request(client: NotionClient, demandes_ds: str, registre_ds: str, person: Dict[str, Any],
+                   lines: List[Dict[str, Any]], motif: Optional[str], urgent: bool, commentaire: str,
+                   today: date, links: Optional[Callable[[str], Dict[str, str]]] = None) -> Dict[str, Any]:
+    """Create the request page, then one register line per article (Statut Demandé).
+
+    links(request_id) gives the "valider" and "refuser" URLs stored on the
+    request, which Notion shows as the Valider / Refuser columns.
+    All or nothing: if Notion fails halfway, the pages already created go to
+    the trash, so a retry does not leave a half request behind.
+    """
+    total = sum(line["qty"] for line in lines)
+    title = f"{person['name']} · {today:%d/%m} · {total} article{'s' if total > 1 else ''}"
+    urgence = "Urgent" if urgent else "Normal"
+    page = client.create_page(demandes_ds, {
+        "Demande": _title(title),
+        "Demandeur": _relation([person["id"]]),
+        "Bénéficiaire": _people([person.get("user_id")]),
+        "Statut": _select(WAITING),
+        "Résumé": _text(summarize(lines)),
+        "Nb articles": {"number": total},
+        "Motif": _select(motif),
+        "Urgence": _select(urgence),
+        "Commentaire": _text(commentaire),
+    })
+    created = [page["id"]]
+    try:
+        for line in lines:
+            created.append(client.create_page(registre_ds, {
+                "Détail": _title(line["title"]),
+                "Article": _relation([line["article_id"]]),
+                "Quantité": {"number": line["qty"]},
+                "Bénéficiaire": _people([person.get("user_id")]),
+                "Type": _select("Sortie"),
+                "Statut": _select("Demandé"),
+                "Source": _select("Formulaire web"),
+                "Motif": _select(motif),
+                "Urgence": _select(urgence),
+                "Demande": _relation([page["id"]]),
+            })["id"])
+        if links:
+            urls = links(page["id"])
+            client.update_page(page["id"], {"Lien valider": {"url": urls["valider"]},
+                                            "Lien refuser": {"url": urls["refuser"]}})
+    except Exception:
+        for page_id in reversed(created):
+            try:
+                client.trash_page(page_id)
+            except Exception:  # best effort: the original error matters more
+                pass
+        raise
+    return {"id": page["id"], "number": _prop(page, "N°"), "url": page.get("url"), "title": title, "total": total}
+
+
+def load_request(client: NotionClient, registre_ds: str, demande_id: str,
+                 demandes_ds: Optional[str] = None) -> Dict[str, Any]:
+    """The request and its register lines. RequestGone for a missing, trashed or foreign page."""
+    try:
+        page = client.get_page(demande_id)
+    except NotionError as exc:
+        if exc.status in (400, 404):
+            raise RequestGone(str(exc), exc.status)
+        raise
+    if page.get("in_trash") or page.get("archived"):
+        raise RequestGone("the request is in the trash")
+    parent = (page.get("parent") or {}).get("data_source_id", "")
+    if demandes_ds and parent.replace("-", "") != demandes_ds.replace("-", ""):
+        raise RequestGone("page is not a request of Demandes EPI")
+    lines = client.query_all(registre_ds, {"filter": {"property": "Demande", "relation": {"contains": demande_id}}})
+    return {
+        "id": page["id"],
+        "url": page.get("url"),
+        "title": _prop(page, "Demande"),
+        "number": _prop(page, "N°"),
+        "statut": _prop(page, "Statut"),
+        "motif": _prop(page, "Motif"),
+        "urgence": _prop(page, "Urgence"),
+        "commentaire": _prop(page, "Commentaire") or "",
+        "validated_on": _prop(page, "Validée le"),
+        "lines": [{
+            "id": line["id"],
+            "title": _prop(line, "Détail"),
+            "qty": _prop(line, "Quantité") or 1,
+            "statut": _prop(line, "Statut"),
+            "article_id": (_prop(line, "Article") or [None])[0],
+        } for line in lines],
+    }
+
+
+def decide_request(client: NotionClient, registre_ds: str, demande_id: str, decision: str,
+                   user_id: Optional[str], via: str, today: date,
+                   demandes_ds: Optional[str] = None,
+                   choices: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Validate or refuse a waiting request. A request already decided is left alone.
+
+    Validée: each pending line takes its choice (line id -> Remis, À commander
+    or Refusé; Remis when not given). "Remis" is dated today, so the stock drops.
+    Refusée: every pending line becomes "Refusé".
+    Lines the office already moved by hand in Notion are not touched.
+    A validation where every line ends "Refusé" is recorded as Refusée.
+    """
+    if decision not in (VALIDATED, REFUSED):
+        raise ValueError(decision)
+    wanted = {key.replace("-", ""): value for key, value in (choices or {}).items()}
+    unknown = sorted(set(wanted.values()) - set(LINE_CHOICES))
+    if unknown:
+        raise ValueError(f"unknown line decision: {unknown}")
+    request = load_request(client, registre_ds, demande_id, demandes_ds)
+    if request["statut"] != WAITING:
+        return {"changed": False, "statut": request["statut"], "lines": [], "request": request}
+    moved = []
+    for line in request["lines"]:
+        if line["statut"] not in PENDING_LINE_STATUSES:
+            continue
+        target = LINE_REFUSED if decision == REFUSED else wanted.get(line["id"].replace("-", ""), HANDED)
+        props: Dict[str, Any] = {"Statut": _select(target)}
+        if target == HANDED:
+            props["Remis le"] = _date(today)
+        if user_id:
+            props["Traité par"] = _people([user_id])
+        client.update_page(line["id"], props)
+        moved.append(dict(line, statut=target))
+    final = decision
+    if decision == VALIDATED and moved and all(line["statut"] == LINE_REFUSED for line in moved):
+        final = REFUSED
+    props = {"Statut": _select(final), "Validée le": _date(today), "Traitée via": _select(via)}
+    if user_id:
+        props["Validée par"] = _people([user_id])
+    client.update_page(demande_id, props)
+    return {"changed": True, "statut": final, "lines": moved, "request": request}

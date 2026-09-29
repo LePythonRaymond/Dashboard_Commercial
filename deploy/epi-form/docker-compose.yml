@@ -1,0 +1,53 @@
+# Side-car compose file: builds + runs the EPI form service (epi_form/) and
+# registers it with the existing Traefik reverse proxy (/root/docker-compose.yml).
+#
+# Needs in the shared .env (next to the Myrium settings):
+#   EPI_FORM_KEY        secret part of the form link  (/f/<key>), 16+ characters
+#   EPI_SIGNING_SECRET  signs the Valider / Refuser links, 16+ characters
+#   EPI_PUBLIC_URL      https://epi.srv1082911.hstgr.cloud
+#   EPI_NOTIFY_EMAILS   comma-separated office e-mails that receive the requests
+# plus NOTION_API_KEY and SMTP_* already used by Myrium.
+#
+# Deploy:
+#   cd /root/Customs/Dashboard_Commercial/deploy/epi-form
+#   docker compose up -d --build
+#
+# Logs:
+#   docker compose logs -f
+
+services:
+  epi-form:
+    build:
+      context: ../..
+      dockerfile: epi_form/Dockerfile
+    image: epi-form:latest
+    container_name: epi-form
+    restart: unless-stopped
+
+    # Same .env as the Myrium pipeline and dashboard: one file, no drift.
+    env_file:
+      - ../../.env
+
+    networks:
+      - merci_net
+
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=root_merci_net
+      - traefik.http.routers.epi-form.rule=Host(`epi.srv1082911.hstgr.cloud`)
+      - traefik.http.routers.epi-form.tls=true
+      - traefik.http.routers.epi-form.entrypoints=web,websecure
+      - traefik.http.routers.epi-form.tls.certresolver=mytlschallenge
+      - traefik.http.services.epi-form.loadbalancer.server.port=8000
+      - traefik.http.middlewares.epi-form-headers.headers.SSLRedirect=true
+      - traefik.http.middlewares.epi-form-headers.headers.STSSeconds=315360000
+      - traefik.http.middlewares.epi-form-headers.headers.STSIncludeSubdomains=true
+      - traefik.http.middlewares.epi-form-headers.headers.STSPreload=true
+      - traefik.http.middlewares.epi-form-headers.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.epi-form-headers.headers.forceSTSHeader=true
+      - traefik.http.routers.epi-form.middlewares=epi-form-headers@docker
+
+networks:
+  merci_net:
+    external: true
+    name: root_merci_net
