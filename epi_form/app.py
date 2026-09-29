@@ -15,7 +15,8 @@ deciding). The signature covers id, action and <who>: see security.py.
 
 In the background, every MAINTENANCE_SECONDS, the service dates the register
 lines whose status was changed by hand in Notion ("Remis le", "Rendu le"), so
-no paid Notion automation is needed.
+no paid Notion automation is needed, and turns each line set "À remplacer"
+into Hors d'usage plus a replacement request (motif Usure).
 
 Run locally:  uvicorn epi_form.app:app --port 8765   (settings: see config.py)
 """
@@ -23,7 +24,7 @@ Run locally:  uvicorn epi_form.app:app --port 8765   (settings: see config.py)
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import date, datetime
 from html import escape
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -237,15 +238,80 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
                 print(f"[epi-form] warm-up of {name} failed: {exc}")
 
     def maintain() -> Dict[str, int]:
-        """One pass of the date keeper: see notion.fill_missing_dates."""
+        """One background pass: date the lines changed by hand, then replace the lines set "À remplacer"."""
+        result = {"remis": 0, "rendus": 0, "remplacements": 0}
         try:
-            filled = notion.fill_missing_dates(api, cfg.registre_ds, now().date())
+            result.update(notion.fill_missing_dates(api, cfg.registre_ds, now().date()))
         except Exception as exc:  # try again at the next pass
             print(f"[epi-form] date keeper failed: {exc}")
-            return {"remis": 0, "rendus": 0}
-        if filled["remis"] or filled["rendus"]:
-            print(f"[epi-form] dates filled: {filled['remis']} « Remis le », {filled['rendus']} « Rendu le »")
-        return filled
+        try:
+            result["remplacements"] = replace_worn()
+        except Exception as exc:
+            print(f"[epi-form] replacements failed: {exc}")
+        if result["remis"] or result["rendus"]:
+            print(f"[epi-form] dates filled: {result['remis']} « Remis le », {result['rendus']} « Rendu le »")
+        return result
+
+    unresolved: set = set()   # lines already reported as impossible to replace (said once in the logs)
+
+    def person_of(line: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Who holds a register line: the requester of its request, else its Notion account."""
+        people = team()
+        by_id = {_norm(p["id"]): p for p in people}
+        for request_id in line["request_ids"][:1]:
+            requester = notion.requester_of(api, request_id)
+            if requester and _norm(requester) in by_id:
+                return by_id[_norm(requester)]
+        by_user = {p["user_id"]: p for p in people if p.get("user_id")}
+        return next((by_user[uid] for uid in line["user_ids"] if uid in by_user), None)
+
+    def new_equivalent(article_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """The article to hand out instead: the same one if still offered, else the new one of the
+        same family and size (a worn line may point to a "usé" article, which is not offered)."""
+        offered = {_norm(item["id"]): item for item in catalogue()}
+        if not article_id:
+            return None
+        if _norm(article_id) in offered:
+            return offered[_norm(article_id)]
+        page = api.get_page(article_id)
+        read = lambda name: notion.plain((page.get("properties") or {}).get(name))
+        by_title = {item["title"].casefold(): item for item in offered.values()}
+        same = by_title.get((read("Article") or "").replace(" usé", "").casefold())
+        if same:
+            return same
+        candidates = [item for item in offered.values()
+                      if item["famille"] == read("Famille") and item["taille"] == (read("Taille") or "")]
+        return candidates[0] if len(candidates) == 1 else None
+
+    def replace_worn() -> int:
+        """Lines set "À remplacer": Hors d'usage, plus a replacement request (motif Usure) sent as usual."""
+        replaced = 0
+        for line in notion.lines_to_replace(api, cfg.registre_ds):
+            person, article = person_of(line), new_equivalent(line["article_id"])
+            if person is None or article is None:
+                if line["id"] not in unresolved:
+                    unresolved.add(line["id"])
+                    missing = "la personne" if person is None else "l'article neuf équivalent"
+                    print(f"[epi-form] « {line['title']} » à remplacer : {missing} introuvable, demande à faire à la main")
+                continue
+            when = now()
+            notion.set_worn_out(api, line["id"], when.date())   # first, so a later pass cannot replace it twice
+            handed = (f", remis le {date.fromisoformat(line['handed_on'][:10]):%d/%m/%Y}"
+                      if line.get("handed_on") else "")
+            commentaire = f"Remplacement automatique de « {line['title']} »{handed}, passé en « À remplacer »."
+            lines = [{"article_id": article["id"], "title": article["title"], "qty": line["qty"]}]
+            try:
+                created = notion.create_request(api, cfg.demandes_ds, cfg.registre_ds, person, lines, "Usure",
+                                                False, commentaire, when.date(), source="Remplacement")
+            except Exception as exc:
+                notion.set_worn_out(api, line["id"], None)       # back to "À remplacer": the next pass retries
+                print(f"[epi-form] replacement of « {line['title']} » failed, retried at the next pass: {exc}")
+                continue
+            print(f"[epi-form] request {created.get('number')}: replacement of « {line['title']} » for {person['name']}")
+            follow_up({"created": created, "person": person, "lines": lines, "motif": "Usure", "urgent": False,
+                       "commentaire": commentaire, "when": when})
+            replaced += 1
+        return replaced
 
     def maintenance_loop(stop: threading.Event) -> None:
         delay = 30   # first pass soon after start, then every MAINTENANCE_SECONDS

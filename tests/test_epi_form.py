@@ -529,12 +529,66 @@ def test_the_date_keeper_dates_lines_changed_by_hand(env):
 
     handed, dated = line("Remis"), line("Remis", **{"Remis le": "2026-01-15"})
     returned, lost, waiting = line("Rendu"), line("Perdu"), line("Demandé")
-    assert env.client.app.state.maintain() == {"remis": 1, "rendus": 2}
+    assert env.client.app.state.maintain() == {"remis": 1, "rendus": 2, "remplacements": 0}
     assert env.fake.value(handed, "Remis le") == "2026-09-29"
     assert env.fake.value(dated, "Remis le") == "2026-01-15"               # an existing date is kept
     assert env.fake.value(returned, "Rendu le") == env.fake.value(lost, "Rendu le") == "2026-09-29"
     assert env.fake.value(waiting, "Remis le") is None
-    assert env.client.app.state.maintain() == {"remis": 0, "rendus": 0}    # nothing left to date
+    assert env.client.app.state.maintain() == {"remis": 0, "rendus": 0, "remplacements": 0}   # nothing left
+
+
+# ------------------------------------------------------------ "À remplacer"
+def worn_line(env, article, qty=1, user=ALICE_USER, handed_on="2025-06-01"):
+    """A handed-out line the office has just set to "À remplacer" (entered by hand, no request)."""
+    props = {"Détail": title(f"{article} porté"), "Article": {"type": "relation", "relation": [{"id": env.ids[article]}]},
+             "Quantité": {"type": "number", "number": qty}, "Type": select("Sortie"), "Statut": select("À remplacer"),
+             "Bénéficiaire": people([user] if user else []), "Remis le": {"type": "date", "date": {"start": handed_on}}}
+    return env.fake.add(REGISTRE, props)
+
+
+def test_a_line_set_to_replace_becomes_a_replacement_request(env):
+    submit(env, [("tshirt", 1)])
+    env.client.post(links_in(env.sent[0][1])["valider"])                  # handed out through the form
+    old = line_of(env, "tshirt")
+    env.fake.pages[old]["properties"]["Statut"] = select("À remplacer")   # the office judges it worn
+    env.sent.clear()
+    assert env.client.app.state.maintain()["remplacements"] == 1
+    assert (env.fake.value(old, "Statut"), env.fake.value(old, "Rendu le")) == ("Hors d'usage", "2026-09-29")
+    new_request = next(i for i in env.fake.ids(DEMANDES) if env.fake.value(i, "Statut") == "En attente")
+    assert env.fake.value(new_request, "Motif") == "Usure"
+    assert env.fake.value(new_request, "Demandeur") == [env.ids["alice"]]
+    assert "Remplacement automatique" in env.fake.value(new_request, "Commentaire")
+    new_line = next(i for i in env.fake.ids(REGISTRE) if env.fake.value(i, "Demande") == [new_request])
+    assert env.fake.value(new_line, "Article") == [env.ids["tshirt"]]
+    assert (env.fake.value(new_line, "Source"), env.fake.value(new_line, "Statut")) == ("Remplacement", "Demandé")
+    assert [to for to, _ in env.sent] == [LEA, PRISCILLA]                  # the office is told, as for any request
+    assert env.client.app.state.maintain()["remplacements"] == 0          # never twice
+
+
+def test_a_worn_used_article_is_replaced_by_the_new_one(env):
+    line = worn_line(env, "used", qty=2)
+    assert env.client.app.state.maintain()["remplacements"] == 1
+    new_line = next(i for i in env.fake.ids(REGISTRE) if i != line)
+    assert env.fake.value(new_line, "Article") == [env.ids["tshirt"]]     # same family and size, new
+    assert env.fake.value(new_line, "Quantité") == 2
+    request = only(env, DEMANDES)
+    assert env.fake.value(request, "Demandeur") == [env.ids["alice"]]     # found through her Notion account
+    assert "remis le 01/06/2025" in env.fake.value(request, "Commentaire")
+
+
+def test_a_line_whose_holder_is_unknown_stays_to_replace(env):
+    line = worn_line(env, "tshirt", user=None)
+    assert env.client.app.state.maintain()["remplacements"] == 0
+    assert env.fake.value(line, "Statut") == "À remplacer" and env.fake.ids(DEMANDES) == []
+
+
+def test_a_failed_replacement_puts_the_line_back(env):
+    line = worn_line(env, "tshirt")
+    env.fake.fail = lambda kind, target: kind == "create" and target == DEMANDES
+    assert env.client.app.state.maintain()["remplacements"] == 0
+    assert (env.fake.value(line, "Statut"), env.fake.value(line, "Rendu le")) == ("À remplacer", None)
+    env.fake.fail = None
+    assert env.client.app.state.maintain()["remplacements"] == 1          # the next pass succeeds
 
 
 # ------------------------------------------------------------ speed
