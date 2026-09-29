@@ -1,0 +1,636 @@
+{
+  "id": "DevisStatutNtoF1",
+  "name": "🔁 Statut des devis : Notion vers Furious",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 🔁 Statut des devis : Notion vers Furious\nDans **Devis à suivre**, l'équipe change le **Statut** (brief, en cours, envoyée(s) attente réponse). Toutes les 2 minutes, ce workflow envoie le changement à Furious.\n\n- **gagné** reste dans Notion (accord du client, signature pas encore reçue). À la signature, le devis se passe en gagné **dans Furious**, comme avant.\n- **Perdu** et gagné se font dans Furious : choisis dans Notion, ils sont remis comme avant, avec un message dans **Retour Furious**.\n- **Statut Furious** (caché) = le statut que Furious a. **À envoyer à Furious** (formule) = coché tant qu'un changement attend. C'est ce que lit ce workflow.\n- Furious refuse un changement (ex. « BU est requis ») : statut remis, raison dans **Retour Furious**. Furious ne répond pas : nouvel essai au passage suivant.\n- Pause de 06:00 à 06:19 UTC (8 h en été, 7 h en hiver à Paris) : la synchro Myrium lit Furious puis écrit Notion à ce moment-là.\n\n**Mise en route** : créer un credential *Custom Auth* nommé « Furious API (Myrium) » avec le JSON\n`{\"body\": {\"data\": {\"username\": \"…\", \"password\": \"…\"}}}`\n(n8n l'ajoute au corps de la connexion), le choisir dans **Furious : connexion**, puis activer.\nSi Furious refuse la connexion, les statuts en attente sont remis comme avant et l'exécution s'arrête en erreur (pas de nouvel essai toutes les 2 minutes, qui pourrait bloquer le compte Furious).",
+        "height": 560,
+        "width": 700
+      },
+      "id": "87bda641-4f76-520e-9cf1-cf56115f0f02",
+      "name": "Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -700
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/2 0-5,7-23 * * *"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "20-58/2 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "c6a5657d-4fb4-5723-b2a6-e7a366b3a743",
+      "name": "Toutes les 2 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/data_sources/2ced9278-02d7-802a-8642-000be714240f/query",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2025-09-03"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"filter\": {\n    \"property\": \"À envoyer à Furious\",\n    \"formula\": {\n      \"checkbox\": {\n        \"equals\": true\n      }\n    }\n  },\n  \"sorts\": [\n    {\n      \"timestamp\": \"last_edited_time\",\n      \"direction\": \"ascending\"\n    }\n  ],\n  \"page_size\": 100\n}",
+        "options": {
+          "timeout": 30000,
+          "lowercaseHeaders": false
+        }
+      },
+      "id": "c98e2d8c-9513-58a7-be70-d162f9ae08a9",
+      "name": "Notion : lire les statuts à envoyer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "notionApi": {
+          "id": "ciGEF85fAeNKNsVu",
+          "name": "Notion Rapport"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node \"Préparer les changements\" (Code, run once for all items).\n// Input: the Notion query of \"Devis à suivre\" rows whose \"À envoyer à Furious\" is\n// checked, i.e. \"Statut\" was changed in Notion and differs from \"Statut Furious\".\n// Output: one item per row. action \"envoyer\" when the new status has a Furious\n// pipe (with the query that reads the devis); action \"annuler\" (status put back,\n// message in \"Retour Furious\") otherwise. Bodies and queries are built here\n// because they contain \"}}\", which ends an n8n expression.\n\nconst PIPES = {\n  'brief': 5,\n  'en cours': 0,\n  'envoyée(s) attente réponse': 4,\n  'envoyée(s) en attente de réponse': 4,\n};\n\nconst plain = (prop) => (prop?.rich_text ?? prop?.title ?? []).map((part) => part?.plain_text ?? '').join('').trim();\nconst key = (name) => String(name ?? '').normalize('NFC').trim().toLowerCase();\n\n// Properties to write on the row: \"Statut Furious\" confirmed, \"Statut\" put back\n// to what Furious has, \"Retour Furious\" set to the message (only when it changes).\nfunction notionProperties(row, { confirm = false, revert = false, message = '' }) {\n  const properties = {};\n  if (confirm) properties['Statut Furious'] = { select: { name: row.statut } };\n  if (revert && row.statut_furious) properties['Statut'] = { status: { name: row.statut_furious } };\n  const text = String(message).slice(0, 1900);\n  if (text !== row.retour_actuel) {\n    properties['Retour Furious'] = { rich_text: text ? [{ type: 'text', text: { content: text } }] : [] };\n  }\n  return properties;\n}\n\nconst out = [];\nfor (const item of $input.all()) {\n  for (const page of item.json.results ?? []) {\n    const props = page.properties ?? {};\n    const row = {\n      page_id: page.id,\n      devis_id: plain(props['ID Devis']),\n      titre: plain(props['Name']),\n      statut: props['Statut']?.status?.name ?? '',\n      statut_furious: props['Statut Furious']?.select?.name ?? '',\n      retour_actuel: plain(props['Retour Furious']),\n    };\n    row.pipe_cible = PIPES[key(row.statut)] ?? null;\n    let refusal = '';\n    if (!/^\\d+$/.test(row.devis_id)) {\n      refusal = \"Pas d'ID Devis sur cette ligne : statut non envoyé à Furious.\";\n    } else if (row.pipe_cible === null) {\n      refusal = `« ${row.statut} » ne se choisit pas dans Notion : un devis perdu ou signé se marque dans Furious. `\n        + 'Dans Notion : brief, en cours, envoyée(s) attente réponse, ou gagné en attendant la signature.';\n    }\n    if (!refusal) {\n      const query = `{ Proposal(limit: 1, offset: 0, filter: {id: {eq: \"${row.devis_id}\"}})`\n        + '{ id, statut, pipe, cf_bu, cf_typologie_de_devis, cf_typologie_myrium } }';\n      out.push({ json: { ...row, action: 'envoyer', furious_query: query } });\n      continue;\n    }\n    const properties = notionProperties(row, { revert: true, message: refusal });\n    if (Object.keys(properties).length) out.push({ json: { ...row, action: 'annuler', notion_body: { properties } } });\n  }\n}\nreturn out;\n"
+      },
+      "id": "17229556-12a4-5c5d-8830-96e64e7bcd85",
+      "name": "Préparer les changements",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "6afe0997-101e-535f-8da3-5da56057775f",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "envoyer",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "837455ee-4d73-567c-8292-13be09438928",
+      "name": "À envoyer à Furious ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://merciraymond.furious-squad.com/api/v2/auth/",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"action\": \"auth\"\n}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "27a35962-0af4-547a-910f-b8c49734abb6",
+      "name": "Furious : connexion",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        -140
+      ],
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node \"Devis à envoyer\" (Code, run once for all items).\n// Runs after \"Furious : connexion\" (one login per run). Returns the rows of the\n// true branch of \"À envoyer à Furious ?\" with action \"envoyer\" when the login\n// worked. When Furious refuses the login (wrong or expired password in the n8n\n// credential), the rows get action \"connexion_refusee\": their status is put back\n// and the run stops in error, so n8n does not retry the login every two minutes\n// (repeated failures could lock the Furious account, which the Myrium sync uses\n// too). When Furious does not answer, the run fails and the rows stay pending.\n\nconst MESSAGE = 'n8n ne peut plus se connecter à Furious (identifiants à mettre à jour dans n8n) : '\n  + 'statut remis comme avant. Le changer dans Furious en attendant.';\n\nfunction notionProperties(row, { confirm = false, revert = false, message = '' }) {\n  const properties = {};\n  if (confirm) properties['Statut Furious'] = { select: { name: row.statut } };\n  if (revert && row.statut_furious) properties['Statut'] = { status: { name: row.statut_furious } };\n  const text = String(message).slice(0, 1900);\n  if (text !== row.retour_actuel) {\n    properties['Retour Furious'] = { rich_text: text ? [{ type: 'text', text: { content: text } }] : [] };\n  }\n  return properties;\n}\n\nconst login = $('Furious : connexion').first().json ?? {};\nconst rows = $('À envoyer à Furious ?').all(0).map((item) => item.json);\nconst status = login.statusCode;\n\nif (login.error || !status || status >= 500 || status === 408 || status === 429) {\n  const why = status ?? login.error?.message ?? 'pas de réponse';\n  throw new Error(`Furious ne répond pas à la connexion (${why}) : nouvel essai au prochain passage.`);\n}\nif (login.body?.success === true && login.body?.token) {\n  return rows.map((row) => ({ json: { ...row, action: 'envoyer' } }));\n}\nreturn rows.map((row) => ({\n  json: { ...row, action: 'connexion_refusee', notion_body: { properties: notionProperties(row, { revert: true, message: MESSAGE }) } },\n}));\n"
+      },
+      "id": "b02a36d7-cf1d-5c8b-9d7f-9737a756716a",
+      "name": "Devis à envoyer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        -140
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "50741989-f6f9-5b12-8fe9-cf40e7d75b30",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "envoyer",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "440f50d5-bcad-5a3e-8781-9a622ae89561",
+      "name": "Connexion acceptée ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        -140
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://merciraymond.furious-squad.com/api/v2/proposal/",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "={{ $json.furious_query }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "F-Auth-Token",
+              "value": "={{ $('Furious : connexion').first().json.body.token }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 200
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "5ad48bb5-a563-5fd2-ad5e-11316ea6f3cc",
+      "name": "Furious : lire le devis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        -260
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node \"Décider\" (Code, run once for all items).\n// Input: the answers of \"Furious : lire le devis\", paired with the rows of the true\n// branch of \"Connexion acceptée ?\". For each devis, compares what Furious has now\n// with the status chosen in Notion:\n//   maj        Furious must change: the update body is prepared (item goes on)\n//   a_jour     Furious already has that status: \"Statut Furious\" is confirmed\n//   annuler    the change cannot be made: status put back, message written\n//   reessayer  Furious did not answer: row left pending, message written once\n// Every update re-sends the three custom fields of the devis (Furious refuses an\n// update without them). \"Typologie Myrium\" is read back truncated (\"PA \" for\n// \"PA <= 15 000€\"), so it is mapped to its full label.\n\nconst WAITING = { '5': 'Brief', '0': 'En cours', '4': 'Envoyée(s) attente réponse' };\nconst TYPOLOGIE_MYRIUM = [['PA', 'PA <= 15 000€'], ['CH', 'CH >= 15 000€']];\nconst RETRY = 'Furious ne répond pas : nouvel essai automatique dans quelques minutes.';\n\nconst decode = (text) => String(text ?? '')\n  .replace(/&#0*39;|&apos;/g, \"'\").replace(/&quot;/g, '\"').replace(/&lt;/g, '<')\n  .replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');\nconst first = (value) => (Array.isArray(value) ? value[0] : value);\nconst pairedIndex = (item, i) => {\n  const paired = Array.isArray(item.pairedItem) ? item.pairedItem[0] : item.pairedItem;\n  return typeof paired?.item === 'number' ? paired.item : i;\n};\nconst transient = (res) => Boolean(res?.error) || !res?.statusCode || res.statusCode >= 500\n  || [401, 403, 408, 429].includes(res.statusCode) || typeof res.body !== 'object' || res.body === null;\n\nfunction notionProperties(row, { confirm = false, revert = false, message = '' }) {\n  const properties = {};\n  if (confirm) properties['Statut Furious'] = { select: { name: row.statut } };\n  if (revert && row.statut_furious) properties['Statut'] = { status: { name: row.statut_furious } };\n  const text = String(message).slice(0, 1900);\n  if (text !== row.retour_actuel) {\n    properties['Retour Furious'] = { rich_text: text ? [{ type: 'text', text: { content: text } }] : [] };\n  }\n  return properties;\n}\n\nconst rows = $('Connexion acceptée ?').all(0);\nconst out = [];\nconst settle = (row, action, options) => {\n  const properties = notionProperties(row, options);\n  if (Object.keys(properties).length) out.push({ json: { ...row, action, notion_body: { properties } } });\n};\n\n$input.all().forEach((item, i) => {\n  const row = { ...rows[pairedIndex(item, i)].json };\n  const res = item.json ?? {};\n  const found = res.body?.data?.Proposal;\n  if (transient(res) || !Array.isArray(found)) return settle(row, 'reessayer', { message: RETRY });\n\n  const proposal = found.find((p) => String(p?.id ?? '') === row.devis_id);\n  if (!proposal) {\n    return settle(row, 'annuler', { revert: true, message: `Devis ${row.devis_id} introuvable dans Furious : statut remis comme avant.` });\n  }\n  const pipe = String(proposal.pipe ?? '');\n  if (!(pipe in WAITING)) {\n    return settle(row, 'annuler', {\n      revert: true,\n      message: `Ce devis est déjà « ${decode(proposal.statut) || pipe} » dans Furious : statut remis comme avant. `\n        + 'La synchro du matin mettra la ligne à jour.',\n    });\n  }\n  if (Number(pipe) === row.pipe_cible) return settle(row, 'a_jour', { confirm: true });\n\n  const customFields = [];\n  const bu = decode(first(proposal.cf_bu)).trim();\n  if (bu) customFields.push({ name: 'bu', value: bu });\n  const typologies = (Array.isArray(proposal.cf_typologie_de_devis)\n    ? proposal.cf_typologie_de_devis\n    : String(proposal.cf_typologie_de_devis ?? '').split(/\\|#\\||,/))\n    .map((value) => decode(value).trim()).filter(Boolean);\n  if (typologies.length) customFields.push({ name: 'typologie_de_devis', value: typologies });\n  const myriumRead = decode(first(proposal.cf_typologie_myrium)).trim();\n  if (myriumRead) {\n    const myrium = TYPOLOGIE_MYRIUM.find(([prefix]) => myriumRead.toUpperCase().startsWith(prefix));\n    if (!myrium) {\n      return settle(row, 'annuler', {\n        revert: true,\n        message: `Typologie Myrium « ${myriumRead} » inconnue de l'automatisation : statut remis comme avant, le changer dans Furious.`,\n      });\n    }\n    customFields.push({ name: 'typologie_myrium', value: myrium[1] });\n  }\n  out.push({\n    json: {\n      ...row,\n      action: 'maj',\n      statut_furious_actuel: WAITING[pipe],\n      furious_body: { action: 'update', data: { id: Number(row.devis_id), pipe: row.pipe_cible, custom_fields: customFields } },\n    },\n  });\n});\nreturn out;\n"
+      },
+      "id": "5982d34c-01ab-574c-9470-936eb717f6b1",
+      "name": "Décider",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "0f6cefdf-6a84-5a47-b02a-e476436b9bc0",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "maj",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3e3912f9-ff0a-55d5-b29d-ae4705022b44",
+      "name": "Mettre à jour Furious ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://merciraymond.furious-squad.com/api/v2/proposal/",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "F-Auth-Token",
+              "value": "={{ $('Furious : connexion').first().json.body.token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.furious_body) }}",
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 300
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "e037b4da-7039-5921-b71f-2ed7c6824913",
+      "name": "Furious : changer le statut",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        -380
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node \"Lire la réponse de Furious\" (Code, run once for all items).\n// Input: the answers of \"Furious : changer le statut\", paired with the rows of the\n// true branch of \"Mettre à jour Furious ?\". Furious answers HTTP 200 in both cases:\n// {\"success\": true, \"id\": ...} when the status changed, {\"success\": false,\n// \"message\": [...]} when it refused (e.g. \"BU est requis\", \"Pipe invalide\").\n//   ok         \"Statut Furious\" confirmed, message cleared\n//   annuler    refused: status put back, Furious's reason in \"Retour Furious\"\n//   reessayer  no usable answer: row left pending (the next run reads the devis\n//              again, so an update that did go through is only confirmed)\n\nconst RETRY = 'Furious ne répond pas : nouvel essai automatique dans quelques minutes.';\n\nconst decode = (text) => String(text ?? '')\n  .replace(/&#0*39;|&apos;/g, \"'\").replace(/&quot;/g, '\"').replace(/&lt;/g, '<')\n  .replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');\nconst pairedIndex = (item, i) => {\n  const paired = Array.isArray(item.pairedItem) ? item.pairedItem[0] : item.pairedItem;\n  return typeof paired?.item === 'number' ? paired.item : i;\n};\nconst transient = (res) => Boolean(res?.error) || !res?.statusCode || res.statusCode >= 500\n  || [401, 403, 408, 429].includes(res.statusCode) || typeof res.body !== 'object' || res.body === null;\n\nfunction reason(body) {\n  const raw = body?.message ?? body?.error ?? '';\n  const parts = (Array.isArray(raw) ? raw : [raw])\n    .map((part) => decode(typeof part === 'string' ? part : (part?.message ?? JSON.stringify(part))).trim())\n    .filter(Boolean);\n  return parts.join(' ; ').slice(0, 600) || 'réponse inattendue';\n}\n\nfunction notionProperties(row, { confirm = false, revert = false, message = '' }) {\n  const properties = {};\n  if (confirm) properties['Statut Furious'] = { select: { name: row.statut } };\n  if (revert && row.statut_furious) properties['Statut'] = { status: { name: row.statut_furious } };\n  const text = String(message).slice(0, 1900);\n  if (text !== row.retour_actuel) {\n    properties['Retour Furious'] = { rich_text: text ? [{ type: 'text', text: { content: text } }] : [] };\n  }\n  return properties;\n}\n\nconst rows = $('Mettre à jour Furious ?').all(0);\nconst out = [];\nconst settle = (row, action, options) => {\n  const properties = notionProperties(row, options);\n  if (Object.keys(properties).length) out.push({ json: { ...row, action, notion_body: { properties } } });\n};\n\n$input.all().forEach((item, i) => {\n  const { furious_body, ...row } = rows[pairedIndex(item, i)].json;\n  const res = item.json ?? {};\n  if (transient(res)) return settle(row, 'reessayer', { message: RETRY });\n  if (res.body.success === true) return settle(row, 'ok', { confirm: true });\n  return settle(row, 'annuler', {\n    revert: true,\n    message: `Furious a refusé le changement : ${reason(res.body)}. Statut remis comme avant.`,\n  });\n});\nreturn out;\n"
+      },
+      "id": "1a596d75-6a38-5100-a240-06e175bcfb11",
+      "name": "Lire la réponse de Furious",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2420,
+        -380
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.notion.com/v1/pages/{{ $json.page_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2025-09-03"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.notion_body) }}",
+        "options": {
+          "timeout": 30000,
+          "lowercaseHeaders": false,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 350
+            }
+          }
+        }
+      },
+      "id": "f633e1b7-9d3b-56e6-8616-0fa3a1b7f1ec",
+      "name": "Notion : écrire le résultat",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2660,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "notionApi": {
+          "id": "ciGEF85fAeNKNsVu",
+          "name": "Notion Rapport"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.notion.com/v1/pages/{{ $json.page_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2025-09-03"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.notion_body) }}",
+        "options": {
+          "timeout": 30000,
+          "lowercaseHeaders": false,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 350
+            }
+          }
+        }
+      },
+      "id": "6a273d6a-85d8-59c6-b0df-ff335a0dddb5",
+      "name": "Notion : remettre les statuts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        60
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "notionApi": {
+          "id": "ciGEF85fAeNKNsVu",
+          "name": "Notion Rapport"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "errorMessage": "Furious refuse la connexion de n8n : mettre à jour le credential « Furious API (Myrium) ». Les statuts envoyés ont été remis comme avant dans Notion, avec un message dans « Retour Furious »."
+      },
+      "id": "ea40f641-e775-5540-aa15-15ac7454e253",
+      "name": "Arrêt : connexion refusée",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1760,
+        60
+      ]
+    }
+  ],
+  "connections": {
+    "Toutes les 2 minutes": {
+      "main": [
+        [
+          {
+            "node": "Notion : lire les statuts à envoyer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notion : lire les statuts à envoyer": {
+      "main": [
+        [
+          {
+            "node": "Préparer les changements",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer les changements": {
+      "main": [
+        [
+          {
+            "node": "À envoyer à Furious ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "À envoyer à Furious ?": {
+      "main": [
+        [
+          {
+            "node": "Furious : connexion",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notion : écrire le résultat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Furious : connexion": {
+      "main": [
+        [
+          {
+            "node": "Devis à envoyer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Devis à envoyer": {
+      "main": [
+        [
+          {
+            "node": "Connexion acceptée ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Connexion acceptée ?": {
+      "main": [
+        [
+          {
+            "node": "Furious : lire le devis",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notion : remettre les statuts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notion : remettre les statuts": {
+      "main": [
+        [
+          {
+            "node": "Arrêt : connexion refusée",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Furious : lire le devis": {
+      "main": [
+        [
+          {
+            "node": "Décider",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Décider": {
+      "main": [
+        [
+          {
+            "node": "Mettre à jour Furious ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mettre à jour Furious ?": {
+      "main": [
+        [
+          {
+            "node": "Furious : changer le statut",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notion : écrire le résultat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Furious : changer le statut": {
+      "main": [
+        [
+          {
+            "node": "Lire la réponse de Furious",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire la réponse de Furious": {
+      "main": [
+        [
+          {
+            "node": "Notion : écrire le résultat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true,
+    "executionTimeout": 240
+  },
+  "pinData": {},
+  "tags": []
+}

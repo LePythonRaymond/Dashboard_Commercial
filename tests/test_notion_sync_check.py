@@ -95,6 +95,17 @@ def test_followup_table_reports_missing_extra_mismatch_and_duplicates():
     assert check.duplicates == ["6"] and check.drift and not check.ok
 
 
+def test_followup_check_accepts_gagne_and_reports_a_status_stuck_in_notion():
+    df = pd.DataFrame([_devis("1", "Brief"), _devis("2", "Brief"), _devis("3", "Brief")])
+    pages = [_followup_page("1", "gagné"), _followup_page("2", "en cours"), _followup_page("3", "brief")]
+    for page in pages:
+        page["properties"]["Statut Furious"] = {"type": "select", "select": {"name": "brief"}}
+
+    check = check_followup_table(df, pages)
+
+    assert [(m["id"], m["field"]) for m in check.mismatches] == [("2", "Statut changé dans Notion, pas encore dans Furious")]
+
+
 def test_devis_created_today_are_skipped_even_without_an_update_date():
     df = pd.DataFrame([dict(_devis("1", "Brief", updated="2026-09-20"), created_at=pd.Timestamp("2026-09-28")),
                        dict(_devis("2", "Brief"), created_at=pd.Timestamp("2026-09-01"))])

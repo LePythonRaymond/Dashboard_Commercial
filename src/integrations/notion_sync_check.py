@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 import pandas as pd
 
 from config.settings import settings, STATUS_WAITING, STATUS_WON
-from .notion_alerts_sync import NotionAlertsSync
+from .notion_alerts_sync import FURIOUS_STATUS_PROP, NotionAlertsSync, is_notion_only_status
 from .notion_values import page_value
 from .notion_lost_devis_sync import LOST_DATE_PROP, REASON_PROP, NotionLostDevisSync, select_lost_devis
 from .notion_scope import SCOPE_PROP
@@ -189,11 +189,18 @@ def check_followup_table(df: pd.DataFrame, pages: Iterable[Dict[str, Any]],
                                    "furious": row.get("statut"),
                                    "notion": _hidden_state(by_id.get(devis_id), "Statut")})
             continue
+        # "Statut" may hold a status set in Notion (see notion_alerts_sync): Furious is
+        # compared with the hidden "Statut Furious" when the table has it.
+        in_notion = page_value(page, "Statut")
+        last_known = page_value(page, FURIOUS_STATUS_PROP)
         result.mismatches += _compare(devis_id, page, [
             ("Montant", page_value(page, "Montant"), _amount(row.get("amount"))),
-            ("Statut", _status(page_value(page, "Statut")), _status(row.get("statut"))),
+            ("Statut", _status(last_known if last_known else in_notion), _status(row.get("statut"))),
             ("Date", page_value(page, "Date"), _day(row.get("date"))),
         ])
+        if last_known and _status(in_notion) != _status(last_known) and not is_notion_only_status(in_notion):
+            result.mismatches.append({"id": devis_id, "field": "Statut changé dans Notion, pas encore dans Furious",
+                                      "notion": in_notion, "furious": row.get("statut"), "title": _title(page)})
 
     for devis_id, page in shown.items():
         if devis_id in expected:

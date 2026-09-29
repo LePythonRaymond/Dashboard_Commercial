@@ -19,7 +19,7 @@ from src.integrations.notion_alerts_sync import NotionAlertsSync
 TODAY = date(2026, 9, 25)
 
 STATUS_OPTIONS = ["Perdu", "Unknown", "brief", "en cours", "envoyée(s) attente réponse",
-                  "gagnés en cours", "gagnés et finis"]
+                  "gagnés en cours", "gagnés et finis", "gagné"]
 FOLLOWUP_SCHEMA = {
     "Name": {"type": "title"},
     "ID Devis": {"type": "rich_text"},
@@ -33,6 +33,7 @@ FOLLOWUP_SCHEMA = {
     "Dans le périmètre": {"type": "checkbox"},
     "Archivé par la synchro": {"type": "checkbox"},
     "Date archivage": {"type": "date"},
+    "Statut Furious": {"type": "select"},
 }
 ARCHIVED_TODAY = {"Dans le périmètre": {"checkbox": False}, "Pris en charge": {"checkbox": True},
                   "Archivé par la synchro": {"checkbox": True}, "Date archivage": {"date": {"start": "2026-09-25"}}}
@@ -71,6 +72,8 @@ def _as_page(page_id, payload, **team):
             props[name] = {"type": "number", "number": value["number"]}
         elif "status" in value:
             props[name] = {"type": "status", "status": value["status"]}
+        elif "select" in value:
+            props[name] = {"type": "select", "select": value["select"]}
         elif "date" in value:
             props[name] = {"type": "date", "date": value["date"]}
         elif "url" in value:
@@ -164,8 +167,10 @@ def test_devis_that_left_the_list_is_relabelled_and_archived():
 
     assert stats["relabelled"] == 2 and stats["orphans"] == 1 and stats["left_scope"] == 2 and stats["errors"] == 0
     assert dict(updated) == {
-        "page-456": {"Statut": {"status": {"name": "Perdu"}}, **ARCHIVED_TODAY},
-        "page-789": {"Statut": {"status": {"name": "gagnés en cours"}}, "Dans le périmètre": {"checkbox": False}},
+        "page-456": {"Statut": {"status": {"name": "Perdu"}}, "Statut Furious": {"select": {"name": "Perdu"}},
+                     **ARCHIVED_TODAY},
+        "page-789": {"Statut": {"status": {"name": "gagnés en cours"}},
+                     "Statut Furious": {"select": {"name": "gagnés en cours"}}, "Dans le périmètre": {"checkbox": False}},
         "page-654": ARCHIVED_TODAY,
     }
 
@@ -183,6 +188,67 @@ def test_devis_back_in_scope_loses_only_the_sync_s_tick():
                    "Pris en charge": {"checkbox": False}, "Date archivage": {"date": None}},
         "page-2": {"Dans le périmètre": {"checkbox": True}},
     }
+
+
+def _with_status(page, statut=None, statut_furious=None):
+    """Set "Statut" (as a person would in Notion) and/or the hidden "Statut Furious" on a stored page."""
+    if statut is not None:
+        page["properties"]["Statut"] = {"type": "status", "status": {"name": statut}}
+    if statut_furious is not None:
+        page["properties"]["Statut Furious"] = {"type": "select", "select": {"name": statut_furious}}
+    return page
+
+
+def test_a_devis_marked_gagne_in_notion_keeps_it_until_the_signature():
+    """"gagné" exists in Notion only: the sync keeps it while Furious still has the devis waiting."""
+    page = _with_status(_as_page("page-123", _stored(_item()), scope=True), statut="gagné")
+    sync, _, updated = _followup_sync([page])
+
+    stats = sync.sync_followup_alerts({"owner1": [_item()]}, status_by_id={}, today=TODAY)
+
+    assert stats["unchanged"] == 1 and updated == []
+
+
+def test_a_status_changed_in_notion_and_not_yet_in_furious_is_kept():
+    page = _with_status(_as_page("page-123", _stored(_item(statut="Brief")), scope=True), statut="en cours")
+    sync, _, updated = _followup_sync([page])
+
+    stats = sync.sync_followup_alerts({"owner1": [_item(statut="Brief", amount=6000)]}, status_by_id={}, today=TODAY)
+
+    assert updated == [("page-123", {"Montant": {"number": 6000.0}})]   # "Statut" left as the person set it
+
+
+def test_a_status_changed_in_furious_reaches_notion():
+    page = _as_page("page-123", _stored(_item(statut="Brief")), scope=True)   # Statut == Statut Furious
+    sync, _, updated = _followup_sync([page])
+
+    sync.sync_followup_alerts({"owner1": [_item(statut="En cours")]}, status_by_id={}, today=TODAY)
+
+    assert updated == [("page-123", {"Statut": {"status": {"name": "en cours"}},
+                                     "Statut Furious": {"select": {"name": "en cours"}}})]
+
+
+def test_first_run_fills_the_hidden_furious_status():
+    stored = _stored(_item())
+    stored.pop("Statut Furious")
+    page = _as_page("page-123", stored, scope=True)
+    sync, _, updated = _followup_sync([page])
+
+    sync.sync_followup_alerts({"owner1": [_item()]}, status_by_id={}, today=TODAY)
+
+    assert updated == [("page-123", {"Statut Furious": {"select": {"name": "envoyée(s) attente réponse"}}})]
+
+
+def test_signature_takes_a_gagne_devis_out_of_the_list():
+    """Marked won in Furious (signature received): relabelled and archived, even if Notion said "gagné"."""
+    current = _as_page("page-123", _stored(_item()), scope=True)
+    signed = _with_status(_as_page("page-456", _stored(_item("456")), scope=True), statut="gagné")
+    sync, _, updated = _followup_sync([current, signed])
+
+    sync.sync_followup_alerts({"owner1": [_item()]}, status_by_id={"456": "Gagnés en cours"}, today=TODAY)
+
+    assert dict(updated)["page-456"] == {"Statut": {"status": {"name": "gagnés en cours"}},
+                                         "Statut Furious": {"select": {"name": "gagnés en cours"}}, **ARCHIVED_TODAY}
 
 
 def test_leftover_without_furious_statuses_is_archived_but_not_relabelled():
