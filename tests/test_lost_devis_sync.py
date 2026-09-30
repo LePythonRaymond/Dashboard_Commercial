@@ -203,22 +203,28 @@ def test_a_devis_marked_lost_from_notion_is_dated_the_day_it_was_marked():
 
     by_id = {item["id"]: item for item in items}
     assert sorted(by_id) == ["1", "2"]
-    assert by_id["1"]["date"] == pd.Timestamp("2026-09-30") and by_id["1"]["notion_loss_date"] == "2026-09-30"
-    assert by_id["2"]["date"] == pd.Timestamp("2026-09-29")   # the later of the two
+    assert by_id["1"]["date"] == pd.Timestamp("2026-09-30") and by_id["1"]["date_from_notion"]
+    assert by_id["2"]["date"] == pd.Timestamp("2026-09-29") and "date_from_notion" not in by_id["2"]   # the later one
     props = _sync(FakeClient())._build_page_properties(by_id["1"], schema=SCHEMA_WITH_LOSS_DAY)
-    assert props["Date perdu"] == {"date": {"start": "2026-09-30"}} and props["Perdu le"] == {"date": {"start": "2026-09-30"}}
+    assert props["Date perdu"] == {"date": {"start": "2026-09-30"}}
+    assert "Perdu le" not in props   # "Devis perdus" keeps a single loss date
 
 
-def test_perdu_le_is_never_cleared():
-    props = _sync(FakeClient())._build_page_properties(_devis("1"), schema=SCHEMA_WITH_LOSS_DAY)
-    assert "Perdu le" not in props
-
-
-def test_loss_dates_keep_the_latest_day_of_each_devis_over_both_tables():
-    def page(devis_id, day):
+def test_loss_dates_take_the_latest_day_over_perdu_le_and_date_perdu():
+    """"Perdu le" of "Devis à suivre", then "Date perdu" of "Devis perdus": the date
+    survives the follow-up row being trashed, and never moves back."""
+    def page(devis_id, prop, day):
         return {"properties": {"ID Devis": {"type": "rich_text", "rich_text": [_text(devis_id)]},
-                               "Perdu le": {"type": "date", "date": {"start": day} if day else None}}}
+                               prop: {"type": "date", "date": {"start": day} if day else None}}}
 
-    pages = [page("1", "2026-09-30"), page("1", "2026-06-01"), page("2", None), page("3", "2026-08-15")]
-    assert loss_dates_from_pages(pages, NotionWonDevisSync._extract_id_devis_from_page) == {
-        "1": "2026-09-30", "3": "2026-08-15"}
+    extract = NotionWonDevisSync._extract_id_devis_from_page
+    followup = [page("1", "Perdu le", "2026-09-30"), page("2", "Perdu le", None), page("4", "Perdu le", "2026-06-01")]
+    lost = [page("1", "Date perdu", "2025-01-10"), page("3", "Date perdu", "2026-09-30"), page("4", "Date perdu", "2026-11-15")]
+
+    dates = loss_dates_from_pages(lost, extract, "Date perdu", into=loss_dates_from_pages(followup, extract))
+
+    assert dates == {"1": "2026-09-30", "3": "2026-09-30", "4": "2026-11-15"}
+    # Devis 3 was marked lost from Notion months ago, its follow-up row is gone: still dated 30/09.
+    df = pd.DataFrame([_devis("3", date=pd.Timestamp("2025-01-10"))])
+    items, _ = select_lost_devis(df, pd.Timestamp("2025-10-01"), {}, dates)
+    assert [(i["id"], i["date"]) for i in items] == [("3", pd.Timestamp("2026-09-30"))]

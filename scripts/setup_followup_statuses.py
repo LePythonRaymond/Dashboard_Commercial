@@ -22,13 +22,13 @@ and the win are still set in Furious.
   Perdu le             date, hidden     the day n8n marked the devis lost from a
                                         "Perdu : <raison>" status (Furious keeps the old
                                         devis date when a loss comes through its API);
-                                        also created in "Devis perdus", where the sync
-                                        copies it (see notion_lost_devis_sync)
+                                        "Date perdu" of "Devis perdus" uses it (see
+                                        notion_lost_devis_sync)
 (A column "Retour Furious" existed on 2026-09-29 only: refusals are now explained
 in a comment on the page.)
 
---apply-views hides them in every table view of both tables (linked views on
-other pages included); columns that are already there are left as the team set them, nothing
+--apply-views hides them in every table view (linked views on other pages
+included) and drops the entries views keep for deleted properties; columns that are already there are left as the team set them, nothing
 else changes. It also creates the view "🤝 Gagnés, en attente de signature" on the
 database when no view has that name. Run the follow-up sync once in between, so
 that "Statut Furious" is filled before n8n starts reading the formula.
@@ -148,23 +148,6 @@ def hide_in_views(label: str, data_source_id: str, pid: Dict[str, str], apply: b
     return names
 
 
-def ensure_lost_table(apply: bool, apply_views: bool) -> None:
-    """"Perdu le" in "Devis perdus", hidden in its views (the lost devis sync fills it)."""
-    database_id = settings.notion_lost_devis_database_id.replace("-", "")
-    if not database_id:
-        print("Devis perdus: NOTION_LOST_DEVIS_DATABASE_ID not set, skipped")
-        return
-    data_source_id = data_source_of(database_id)
-    props = notion_call("GET", f"data_sources/{data_source_id}")["properties"]
-    if NOTION_LOSS_PROP not in props:
-        print(f"Devis perdus: {'creating' if apply else 'would create'} {NOTION_LOSS_PROP!r}")
-        if apply:
-            props = notion_call("PATCH", f"data_sources/{data_source_id}", {"properties": {NOTION_LOSS_PROP: {
-                "date": {}, "description": DESCRIPTIONS[NOTION_LOSS_PROP]}}})["properties"]
-    if NOTION_LOSS_PROP in props:
-        hide_in_views("Devis perdus", data_source_id, {n: p["id"] for n, p in props.items()}, apply_views)
-
-
 def apply_views(database_id: str, data_source_id: str, props: Dict[str, Any], apply: bool) -> None:
     missing = [name for name in (FURIOUS_STATUS_PROP, TO_SEND_PROP) if name not in props]
     if missing:
@@ -197,7 +180,6 @@ def main() -> int:
     props = notion_call("GET", f"data_sources/{data_source_id}")["properties"]
     props = ensure_properties(data_source_id, props, args.add_properties)
     apply_views(database_id, data_source_id, props, args.apply_views)
-    ensure_lost_table(args.add_properties, args.apply_views)
     return 0
 
 
