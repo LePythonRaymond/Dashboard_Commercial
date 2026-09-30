@@ -40,6 +40,11 @@ def is_notion_only_status(name: Any) -> bool:
     return str(name or "").strip().lower() in NOTION_ONLY_STATUSES
 
 
+def is_lost_status(name: Any) -> bool:
+    """"Perdu", or one of the "Perdu : <raison>" statuses the team chooses in Notion."""
+    return str(name or "").strip().lower().startswith("perdu")
+
+
 def edited_since(page: Dict[str, Any], moment: datetime) -> bool:
     """True when the page was edited at or after `moment`.
 
@@ -818,9 +823,12 @@ class NotionAlertsSync:
                     stats["orphans"] += 1
                 else:
                     payload = self._status_payload(furious_status, schema)
-                    if payload is not None and value_from_payload(payload) != page_value(page, "Statut"):
+                    # A devis marked lost from Notion keeps its "Perdu : <raison>" (Furious says "Perdu").
+                    kept = is_lost_status(furious_status) and is_lost_status(page_value(page, "Statut"))
+                    if payload is not None and not kept and value_from_payload(payload) != page_value(page, "Statut"):
                         changes["Statut"] = payload
                     if (payload is not None and FURIOUS_STATUS_PROP in (schema or {})
+                            and not (is_lost_status(furious_status) and is_lost_status(page_value(page, FURIOUS_STATUS_PROP)))
                             and value_from_payload(payload) != page_value(page, FURIOUS_STATUS_PROP)):
                         changes[FURIOUS_STATUS_PROP] = self._furious_status_payload(payload)
             leaving = scope_changes(page, False, schema, today)

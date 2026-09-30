@@ -3,7 +3,9 @@
 // true branch of "Mettre à jour Furious ?". Furious answers HTTP 200 in both cases:
 // {"success": true, "id": ...} when the status changed, {"success": false,
 // "message": [...]} when it refused (e.g. "BU est requis", "Pipe invalide").
-//   ok        "Statut Furious" confirmed
+//   ok        "Statut Furious" confirmed; for a loss also "Perdu le" = today (Paris):
+//             Furious keeps the old devis date when a devis is lost through its API,
+//             Myrium uses this day as the loss date in "Devis perdus"
 //   annuler   refused: status put back, Furious's reason in a comment
 //   (none)    no usable answer: nothing written, the row stays pending; the hourly
 //             catch-up reads the devis again, so an update that did go through is
@@ -38,6 +40,14 @@ function commentBody(row, text) {
   return { parent: { page_id: row.page_id }, rich_text: [{ type: 'text', text: { content: content.slice(0, 1900) } }] };
 }
 
+function parisToday() {
+  try {
+    return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Paris' }).format(new Date());   // YYYY-MM-DD
+  } catch (error) {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
 const rows = $('Mettre à jour Furious ?').all(0);
 const out = [];
 
@@ -46,7 +56,9 @@ $input.all().forEach((item, i) => {
   const res = item.json ?? {};
   if (transient(res)) return;   // pending: the hourly catch-up tries again
   if (res.body.success === true) {
-    out.push({ json: { ...row, action: 'ok', notion_body: notionBody(row, { confirm: true }) } });
+    const notion_body = notionBody(row, { confirm: true });
+    if (row.pipe_cible === 1) notion_body.properties['Perdu le'] = { date: { start: parisToday() } };
+    out.push({ json: { ...row, action: 'ok', notion_body } });
     return;
   }
   out.push({ json: { ...row, action: 'annuler', notion_body: notionBody(row, { revert: true }),

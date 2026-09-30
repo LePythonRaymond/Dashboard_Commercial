@@ -22,7 +22,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 OUT = Path(__file__).resolve().parent.parent / "docs" / "Regles_tables_Notion.pdf"
-UPDATED = "29/09/2026"
+UPDATED = "30/09/2026"
 
 # Arial covers the French accents, the euro sign and "≥"; Helvetica is the fallback.
 FONTS = Path("/System/Library/Fonts/Supplemental")
@@ -161,7 +161,8 @@ def build() -> Path:
              "avenant récent.",
              "Plus de 12 mois, ou n'est plus gagné dans Furious."],
             ["Devis perdus",
-             "Les devis perdus depuis 12 mois (la date du devis est la date de perte), sauf "
+             "Les devis perdus depuis 12 mois (date de perte : le jour du passage en perdu, dans Furious ou "
+             "depuis Notion), sauf "
              f"{q('Devis en doublon')}.",
              "Plus de 12 mois, ou rouvert dans Furious."],
         ], [31 * mm, 88 * mm, width - 119 * mm]),
@@ -196,7 +197,10 @@ def build() -> Path:
             f"le devis en attente). Vue {q('Gagnés, en attente de signature')}.",
             "<b>Signature reçue</b> : passez le devis en gagné dans Furious, comme avant (le projet se crée). "
             "Le lendemain matin, il quitte Devis à suivre et arrive dans Devis gagnés, à la date de signature.",
-            "<b>Perdu</b> : dans Furious, avec la raison de la perte. Choisi dans Notion, il est remis comme avant.",
+            "<b>Perdu : raison</b> (budget trop élevé, sans réponse du client, projet abandonné, concurrent retenu, "
+            "garde son prestataire, groupement, doublon, on ne se positionne pas, réponse trop tardive, autre) : "
+            "le devis passe en perdu dans Furious avec cette raison, et arrive le lendemain dans Devis perdus, "
+            "daté du jour. « Perdu » sans raison est refusé.",
             "Furious refuse (ex. « BU est requis » : champ à remplir dans Furious) : le statut revient comme avant, "
             "avec un commentaire sur la page qui dit pourquoi.",
             "Un statut changé dans Furious arrive dans Notion le lendemain matin, sauf sur une ligne en gagné.",
@@ -210,7 +214,7 @@ def build() -> Path:
             f"Vues : {q('Signés (12 derniers mois)')}, {q('Signés cette année')} (passe seule à l'année suivante "
             f"le 1<super>er</super> janvier) et le graphique {q('Montant signé par mois')}.",
             f"Les graphiques comptent toutes les lignes du périmètre, y compris celles {q('Pris en charge')}.",
-            "Gagné et perdu se marquent dans Furious ; Notion les affiche le lendemain matin.",
+            "Gagné (signé) se marque dans Furious ; Notion l'affiche le lendemain matin.",
         ]),
         Paragraph("Je ne vois pas un devis : à vérifier dans l'ordre", H),
         *bullets([

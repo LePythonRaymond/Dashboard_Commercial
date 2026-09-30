@@ -40,7 +40,8 @@ import pandas as pd
 from config.settings import settings, STATUS_WAITING, STATUS_WON
 from .notion_alerts_sync import FURIOUS_STATUS_PROP, NotionAlertsSync, is_notion_only_status
 from .notion_values import page_value
-from .notion_lost_devis_sync import LOST_DATE_PROP, REASON_PROP, NotionLostDevisSync, select_lost_devis
+from .notion_lost_devis_sync import (LOST_DATE_PROP, REASON_PROP, NotionLostDevisSync, loss_dates_from_pages,
+                                      select_lost_devis)
 from .notion_scope import SCOPE_PROP
 from .notion_won_devis_sync import PARENT_PROP, SIGNATURE_PROP, NotionWonDevisSync, build_won_rows, furious_status_by_id
 
@@ -397,8 +398,11 @@ def check_notion_tables(
             checks.append(TableCheck(LOST_TABLE, error="loss reasons unavailable from Furious"))
         else:
             def lost() -> TableCheck:
-                items, status_by_id = select_lost_devis(df_processed, window_start, lost_tags)
                 pages = (lost_loader or NotionLostDevisSync().list_all_pages)()
+                # Loss dates of devis marked lost from Notion, as the sync copied them into
+                # "Devis perdus" ("Perdu le"); one lost today is skipped anyway (modified today).
+                loss_dates = loss_dates_from_pages(pages, NotionAlertsSync._extract_id_devis_from_page)
+                items, status_by_id = select_lost_devis(df_processed, window_start, lost_tags, loss_dates)
                 return check_lost_table(items, status_by_id, pages, window_start, skip)
             run(LOST_TABLE, lost)
     return checks

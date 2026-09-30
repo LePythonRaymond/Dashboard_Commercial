@@ -437,3 +437,15 @@ def test_a_row_edited_before_furious_was_read_gets_the_furious_status():
     assert updated == [("page-123", {"Statut": {"status": {"name": "en cours"}},
                                      "Statut Furious": {"select": {"name": "en cours"}}})]
     assert stats["edited_since_furious_read"] == 0
+
+
+
+def test_a_devis_marked_lost_from_notion_keeps_its_reason_when_it_leaves_the_list():
+    current = _as_page("page-123", _stored(_item()), scope=True)
+    lost = _with_status(_as_page("page-456", _stored(_item("456")), scope=True),
+                        statut="Perdu : budget trop élevé", statut_furious="Perdu : budget trop élevé")
+    sync, _, updated = _followup_sync([current, lost])
+
+    sync.sync_followup_alerts({"owner1": [_item()]}, status_by_id={"456": "Perdu"}, today=TODAY)
+
+    assert dict(updated)["page-456"] == ARCHIVED_TODAY   # archived, "Perdu : budget trop élevé" kept

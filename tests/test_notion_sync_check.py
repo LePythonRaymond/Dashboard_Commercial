@@ -227,3 +227,17 @@ def test_email_section_lists_problems_in_french():
     assert "⚠️ écart" in html and "Absents de Notion" in html and "Devis &lt;1&gt;" in html
     assert "contrôle impossible" in html
     assert build_checks_html([]) == ""
+
+
+
+def test_lost_check_uses_the_day_a_devis_was_marked_lost_from_notion():
+    df = pd.DataFrame([_devis("3", "Perdu", date="2025-01-10")])   # Furious keeps the old date (API loss)
+    df["title"] = ["Devis 3"]
+    page = _lost_page("3", reasons=["Budget trop élevé"], date="2026-09-30")
+    page["properties"]["Perdu le"] = {"type": "date", "date": {"start": "2026-09-30"}}
+    page["properties"]["Dans le périmètre"] = {"type": "checkbox", "checkbox": True}
+
+    checks = check_notion_tables(df, pd.DataFrame(), pd.Timestamp("2025-09-30"), lost_tags={"3": "Budget trop élevé"},
+                                 lost_loader=lambda: [page], tables=(LOST_TABLE,))
+
+    assert checks[0].ok and checks[0].expected == 1 and not checks[0].mismatches

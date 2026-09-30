@@ -59,7 +59,7 @@ NOTE = f"""## 🔁 Statut des devis : Notion vers Furious
 Dans **Devis à suivre**, l'équipe change le **Statut** (brief, en cours, envoyée(s) attente réponse). L'automatisation Notion « Statut modifié » appelle ce workflow, qui envoie le changement à Furious en quelques secondes.
 
 - **gagné** reste dans Notion (accord du client, signature pas encore reçue). À la signature, le devis se passe en gagné **dans Furious**, comme avant.
-- **Perdu** et gagné se font dans Furious : choisis dans Notion, ils sont remis comme avant, avec un commentaire sur la page.
+- **Perdu : raison** (une option de statut par raison de perte Furious) : n8n passe le devis en perdu dans Furious avec cette raison et note le jour dans **Perdu le** (caché : Furious garde l'ancienne date quand la perte vient de l'API, Myrium prend ce jour dans Devis perdus). « Perdu » sans raison est refusé ; gagné (signé) se fait dans Furious.
 - Furious refuse (ex. « BU est requis ») : statut remis comme avant, raison en commentaire. Furious ne répond pas : le rattrapage de chaque heure (h:30 UTC) renvoie.
 - **{FURIOUS_STATUS_PROP}** (caché) = le statut que Furious a. **{TO_SEND_PROP}** (formule cachée) = coché tant qu'un changement attend : c'est ce que lit le rattrapage.
 - Si Notion n'arrive pas à appeler ce workflow, il met son automatisation en pause : le rattrapage continue d'envoyer, mais il faut la réactiver dans Notion.

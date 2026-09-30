@@ -153,10 +153,30 @@ def test_only_real_pending_changes_are_sent():
 
 @needs_node
 def test_a_status_notion_cannot_send_is_put_back_with_a_comment():
-    out = run("preparer.js", [{"json": {"results": [page("a", statut="Perdu", statut_furious="en cours")]}}])
+    out = run("preparer.js", [{"json": {"results": [page("a", statut="gagnés en cours", statut_furious="en cours")]}}])
     assert out[0]["action"] == "annuler" and "furious_query" not in out[0]
     assert props(out[0]) == {"Statut": {"status": {"name": "en cours"}}}
-    assert comment(out[0]).startswith("🔁 Statut remis à « en cours » : « Perdu » ne se choisit pas dans Notion")
+    assert comment(out[0]).startswith("🔁 Statut remis à « en cours » : « gagnés en cours » ne se choisit pas dans Notion")
+
+
+@needs_node
+def test_a_loss_reason_status_marks_the_devis_lost_with_that_reason():
+    pages = [page("a", statut="Perdu : budget trop élevé"), page("b", statut="perdu: Budget trop eleve"),
+             page("c", statut="Perdu :  sans  réponse du client"), page("d", statut="Perdu : doublon"),
+             page("e", statut="Perdu : autre")]
+    out = run("preparer.js", [{"json": {"results": pages}}])
+    assert [(o["page_id"], o["action"], o["pipe_cible"], o["lost_reason_id"]) for o in out] == [
+        ("a", "envoyer", 1, 9), ("b", "envoyer", 1, 9), ("c", "envoyer", 1, 42), ("d", "envoyer", 1, 37),
+        ("e", "envoyer", 1, 20)]
+
+
+@needs_node
+@pytest.mark.parametrize("statut", ["Perdu", "Perdu : trop cher"])
+def test_a_loss_without_a_known_reason_is_refused_with_the_choices(statut):
+    out = run("preparer.js", [{"json": {"results": [page("a", statut=statut)]}}])
+    assert out[0]["action"] == "annuler" and "lost_reason_id" not in out[0]
+    assert "choisir la raison dans le statut : « Perdu : budget trop élevé »" in comment(out[0])
+    assert "« Perdu : autre »" in comment(out[0])
 
 
 @needs_node
@@ -251,6 +271,33 @@ def test_devis_not_found_in_furious_is_put_back():
 
 
 @needs_node
+@pytest.mark.parametrize("read,sent", [("PA ", "PA <= 15 000€"), ("PA", "PA"), ("CH >= 15 000€", "CH >= 15 000€"),
+                                       ("pa ", "PA <= 15 000€")])
+def test_typologie_myrium_is_sent_back_as_the_option_it_is(read, sent):
+    """The API cuts "PA <= 15 000€" at "<" ("PA "), while the option "PA" reads "PA"."""
+    out = decide([answer(proposal(myrium=read))], [row()])
+    assert out[0]["furious_body"]["data"]["custom_fields"][-1] == {"name": "typologie_myrium", "value": sent}
+
+
+@needs_node
+def test_a_loss_is_sent_with_its_reason():
+    out = decide([answer(proposal(pipe="4", statut="Envoyée(s) attente réponse"))],
+                 [dict(row(statut="Perdu : budget trop élevé", pipe=1), lost_reason_id=9)])
+    assert out[0]["action"] == "maj"
+    data = out[0]["furious_body"]["data"]
+    assert (data["id"], data["pipe"], data["lost_reason_id"]) == (263219, 1, 9) and len(data["custom_fields"]) == 3
+
+
+@needs_node
+def test_a_devis_already_lost_in_furious_is_only_confirmed_and_a_won_one_is_left_alone():
+    lost_row = dict(row(statut="Perdu : autre", pipe=1), lost_reason_id=20)
+    out = decide([answer(proposal(pipe="1", statut="Perdu")), answer(proposal(pipe="3", statut="Gagnés en cours"), index=1)],
+                 [lost_row, dict(lost_row, page_id="p2")])
+    assert out[0]["action"] == "a_jour" and props(out[0]) == {"Statut Furious": {"select": {"name": "Perdu : autre"}}}
+    assert out[1]["action"] == "annuler" and "déjà « Gagnés en cours »" in comment(out[1])
+
+
+@needs_node
 def test_unknown_typologie_myrium_is_never_sent():
     out = decide([answer(proposal(myrium="XL "))], [row()])
     assert out[0]["action"] == "annuler" and "Typologie Myrium « XL »" in comment(out[0])
@@ -284,6 +331,16 @@ def test_success_confirms_the_status():
     out = read_answers([answer({"success": True, "id": 263219})], [row()])
     assert out[0]["action"] == "ok" and "furious_body" not in out[0] and "comment_body" not in out[0]
     assert props(out[0]) == {"Statut Furious": {"select": {"name": "en cours"}}}
+
+
+@needs_node
+def test_a_successful_loss_records_the_day_in_perdu_le():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    out = read_answers([answer({"success": True, "id": 263219})], [row(statut="Perdu : autre", pipe=1)])
+    today = datetime.now(ZoneInfo("Europe/Paris")).date().isoformat()
+    assert props(out[0]) == {"Statut Furious": {"select": {"name": "Perdu : autre"}}, "Perdu le": {"date": {"start": today}}}
 
 
 @needs_node
@@ -363,3 +420,13 @@ def test_deploy_keeps_the_credentials_chosen_in_n8n():
     assert "Ancien nœud" not in nodes and set(body) == {"name", "nodes", "connections", "settings"}
     assert body["settings"]["errorWorkflow"] == builder.ERROR_WORKFLOW
     assert "credentials" not in next(n for n in wanted["nodes"] if n["name"] == "Furious : connexion")   # file untouched
+
+
+
+def test_an_active_workflow_gets_its_new_version_published():
+    import deploy_n8n_statut_workflow as deploy
+
+    assert deploy.needs_publishing({"active": True, "versionId": "new", "activeVersionId": "old"})
+    assert not deploy.needs_publishing({"active": True, "versionId": "new", "activeVersionId": "new"})
+    assert not deploy.needs_publishing({"active": False, "versionId": "new", "activeVersionId": None})
+    assert not deploy.needs_publishing({"active": True, "versionId": "new"})   # n8n 1.x: no versions
