@@ -230,14 +230,17 @@ def test_email_section_lists_problems_in_french():
 
 
 
-def test_lost_check_uses_the_day_a_devis_was_marked_lost_from_notion():
-    df = pd.DataFrame([_devis("3", "Perdu", date="2025-01-10")])   # Furious keeps the old date (API loss)
-    df["title"] = ["Devis 3"]
-    page = _lost_page("3", reasons=["Budget trop élevé"], date="2026-09-30")
-    page["properties"]["Perdu le"] = {"type": "date", "date": {"start": "2026-09-30"}}
-    page["properties"]["Dans le périmètre"] = {"type": "checkbox", "checkbox": True}
+def test_lost_check_accepts_the_day_a_devis_was_marked_lost_from_notion():
+    df = pd.DataFrame([_devis("3", "Perdu", date="2025-01-10"), _devis("4", "Perdu", date="2026-09-20")])
+    df["title"] = ["Devis 3", "Devis 4"]
+    pages = [_lost_page("3", reasons=["Budget trop élevé"], date="2026-09-30"),   # lost from Notion: later, fine
+             _lost_page("4", reasons=["Autre"], date="2026-09-01")]               # older than Furious: a difference
+    for page in pages:
+        page["properties"]["Dans le périmètre"] = {"type": "checkbox", "checkbox": True}
 
-    checks = check_notion_tables(df, pd.DataFrame(), pd.Timestamp("2025-09-30"), lost_tags={"3": "Budget trop élevé"},
-                                 lost_loader=lambda: [page], tables=(LOST_TABLE,))
+    checks = check_notion_tables(df, pd.DataFrame(), pd.Timestamp("2025-09-30"),
+                                 lost_tags={"3": "Budget trop élevé", "4": "Autre"},
+                                 lost_loader=lambda: pages, tables=(LOST_TABLE,))
 
-    assert checks[0].ok and checks[0].expected == 1 and not checks[0].mismatches
+    assert checks[0].expected == 2 and not checks[0].missing
+    assert [(m["id"], m["field"]) for m in checks[0].mismatches] == [("4", "Date perdu")]

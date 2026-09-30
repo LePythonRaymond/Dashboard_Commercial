@@ -573,11 +573,12 @@ class PipelineRunner:
             else:
                 try:
                     lost_sync = NotionLostDevisSync()
-                    # Devis marked lost from Notion: the day n8n recorded ("Perdu le") is their loss date.
+                    # Devis marked lost from Notion: the day n8n recorded ("Perdu le") is their
+                    # loss date; "Date perdu" never moves back once written.
                     loss_dates = lost_sync.load_notion_loss_dates()
                     lost_items, lost_status_by_id = select_lost_devis(df_processed, window_start, lost_tags, loss_dates)
                     logger.info(f"Lost since {window_start:%Y-%m-%d}: {len(lost_items)} devis "
-                                f"({sum(1 for i in lost_items if i.get('notion_loss_date'))} marked lost from Notion)")
+                                f"({sum(1 for i in lost_items if i.get('date_from_notion'))} dated from Notion)")
                     lost_stats = lost_sync.sync_lost_devis(
                         lost_items, lost_status_by_id, team_values=lost_sync.load_followup_team_values()
                     )

@@ -135,7 +135,8 @@ def build() -> Path:
                 f"Quand un devis sort du périmètre, la synchro coche {q('Pris en charge')} et remplit la date "
                 "d'archivage : la ligne disparaît des vues, rien n'est supprimé.",
                 f"Cocher {q('Pris en charge')} vous-même archive la ligne. La synchro ne le décoche jamais. "
-                "Elle ne retire que ses propres coches, si le devis revient dans le périmètre.",
+                f"Elle ne retire que ses propres coches (qu'elle repère grâce à la case cachée "
+                f"{q('Archivé par la synchro')}), si le devis revient dans le périmètre.",
                 "Le 1<super>er</super> de chaque mois, les lignes archivées, hors périmètre et dont la date "
                 "d'archivage a plus de 6 mois partent à la corbeille Notion (récupérables 30 jours).",
                 "Horaires, heure de Paris : synchro vers 8 h, Pipe travaux vers 8 h 15 (7 h et 7 h 15 en hiver). "

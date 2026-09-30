@@ -38,9 +38,11 @@ deploy/n8n marks the devis lost in Furious with that reason. Furious re-stamps
 the devis date when a devis is marked lost in its interface, not through its API
 (tested on 2026-09-30 on test devis 263219: date, display_date and lost_date are
 ignored). So n8n also writes the day in the hidden date "Perdu le" of "Devis à
-suivre", this sync copies it into "Perdu le" of "Devis perdus" (kept there after
-the follow-up row is gone), and the loss date of a devis is the later of its
-Furious date and its "Perdu le" (select_lost_devis, and the check).
+suivre", and "Date perdu" is the later of the Furious date and that day.
+"Devis perdus" keeps a single date ("Perdu le" there was dropped on 2026-09-30:
+two loss dates side by side confused the team): once written, "Date perdu"
+never moves back, so it keeps the day after the follow-up row is trashed. It
+still moves forward, e.g. when a reopened devis is lost again in Furious.
 
 Example: devis 263329 is marked "Perdu" on 22/09/2026 with the
 reason "Poursuite avec le prestataire actuel à proposition équivalente". Next
@@ -75,15 +77,19 @@ REASON_PROP = "Motif de perte"
 LOST_DATE_PROP = "Date perdu"
 CREATED_PROP = "Créé le"
 PEOPLE_PROPS = ("Commercial", "Chef de projet")
-NOTION_LOSS_PROP = "Perdu le"   # day a devis was marked lost from Notion (see above)
+NOTION_LOSS_PROP = "Perdu le"   # in "Devis à suivre": day a devis was marked lost from Notion (see above)
 
 
-def loss_dates_from_pages(pages: Iterable[Dict[str, Any]], extract_id: Callable[[Dict[str, Any]], str]) -> Dict[str, str]:
-    """The latest "Perdu le" (YYYY-MM-DD) of each devis over these pages ("Devis à suivre", "Devis perdus")."""
-    dates: Dict[str, str] = {}
+def loss_dates_from_pages(pages: Iterable[Dict[str, Any]], extract_id: Callable[[Dict[str, Any]], str],
+                          prop: str = NOTION_LOSS_PROP, into: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """The latest date (YYYY-MM-DD) found in `prop` for each devis, merged into `into`.
+
+    Used with "Perdu le" of "Devis à suivre" and "Date perdu" of "Devis perdus".
+    """
+    dates: Dict[str, str] = dict(into or {})
     for page in pages:
         devis_id = extract_id(page)
-        day = str(page_value(page, NOTION_LOSS_PROP) or "")[:10]
+        day = str(page_value(page, prop) or "")[:10]
         if devis_id and day and day > dates.get(devis_id, ""):
             dates[devis_id] = day
     return dates
@@ -105,9 +111,9 @@ def select_lost_devis(
 
     lost_tags comes from ProposalsClient.fetch_lost_tags(). Each item gets
     "lost_reasons" (list) and its own amount (avenants added by the pipeline are
-    taken out, as in the won table). loss_dates ("Perdu le" by ID Devis, see
-    loss_dates_from_pages): a lost devis's date is the later of its Furious date
-    and that day, which the item also carries as "notion_loss_date".
+    taken out, as in the won table). loss_dates (by ID Devis, see
+    load_notion_loss_dates): a lost devis's date is the later of its Furious date
+    and that day; "date_from_notion" says when the later one is Notion's.
     """
     if df is None or df.empty:
         return [], {}
@@ -133,10 +139,9 @@ def select_lost_devis(
             continue
         merged = _to_number(row.get("addon_amount")) or 0.0
         item = dict(row, id=devis_id, lost_reasons=reasons, amount=(_to_number(row.get("amount")) or 0.0) - merged)
-        if (loss_dates or {}).get(devis_id):
-            item["notion_loss_date"] = loss_dates[devis_id]
-            if later[index]:
-                item["date"] = dates[index]
+        if later[index]:
+            item["date"] = dates[index]
+            item["date_from_notion"] = True
         items.append(item)
     if duplicates:
         print(f"    {duplicates} lost devis tagged \"Devis en doublon\" left out (duplicates, not losses).")
@@ -192,8 +197,6 @@ class NotionLostDevisSync(NotionWonDevisSync):
             if allow(prop_name):
                 value = self._format_date(item.get(key))
                 props[prop_name] = {"date": {"start": value} if value else None}
-        if allow(NOTION_LOSS_PROP) and item.get("notion_loss_date"):   # never cleared
-            props[NOTION_LOSS_PROP] = {"date": {"start": item["notion_loss_date"]}}
         if allow("Lien Furious"):
             props["Lien Furious"] = {"url": self._build_furious_url(devis_id) or None}
         if self.write_people:
@@ -205,9 +208,13 @@ class NotionLostDevisSync(NotionWonDevisSync):
         return props
 
     def load_notion_loss_dates(self) -> Dict[str, str]:
-        """"Perdu le" by ID Devis, from "Devis à suivre" and from this table (see loss_dates_from_pages)."""
+        """By ID Devis, the later of "Perdu le" in "Devis à suivre" and "Date perdu" in this table.
+
+        The second one is why "Date perdu" never moves back (see the module docstring).
+        """
         own = self.list_all_pages() if self.database_id else []
-        return loss_dates_from_pages(list(self.list_followup_pages()) + list(own), self._extract_id_devis_from_page)
+        dates = loss_dates_from_pages(self.list_followup_pages(), self._extract_id_devis_from_page)
+        return loss_dates_from_pages(own, self._extract_id_devis_from_page, LOST_DATE_PROP, into=dates)
 
     def sync_lost_devis(
         self,

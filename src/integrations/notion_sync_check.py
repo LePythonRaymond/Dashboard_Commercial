@@ -399,9 +399,10 @@ def check_notion_tables(
         else:
             def lost() -> TableCheck:
                 pages = (lost_loader or NotionLostDevisSync().list_all_pages)()
-                # Loss dates of devis marked lost from Notion, as the sync copied them into
-                # "Devis perdus" ("Perdu le"); one lost today is skipped anyway (modified today).
-                loss_dates = loss_dates_from_pages(pages, NotionAlertsSync._extract_id_devis_from_page)
+                # As in the sync, "Date perdu" never moves back (devis marked lost from
+                # Notion keep the day they were marked lost): only a date older than
+                # Furious's is a difference. A devis lost today is skipped anyway.
+                loss_dates = loss_dates_from_pages(pages, NotionAlertsSync._extract_id_devis_from_page, LOST_DATE_PROP)
                 items, status_by_id = select_lost_devis(df_processed, window_start, lost_tags, loss_dates)
                 return check_lost_table(items, status_by_id, pages, window_start, skip)
             run(LOST_TABLE, lost)
