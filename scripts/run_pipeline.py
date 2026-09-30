@@ -572,9 +572,12 @@ class PipelineRunner:
                 self._log_step("notion_lost_devis_sync", "skipped", {"reason": reason})
             else:
                 try:
-                    lost_items, lost_status_by_id = select_lost_devis(df_processed, window_start, lost_tags)
-                    logger.info(f"Lost since {window_start:%Y-%m-%d}: {len(lost_items)} devis")
                     lost_sync = NotionLostDevisSync()
+                    # Devis marked lost from Notion: the day n8n recorded ("Perdu le") is their loss date.
+                    loss_dates = lost_sync.load_notion_loss_dates()
+                    lost_items, lost_status_by_id = select_lost_devis(df_processed, window_start, lost_tags, loss_dates)
+                    logger.info(f"Lost since {window_start:%Y-%m-%d}: {len(lost_items)} devis "
+                                f"({sum(1 for i in lost_items if i.get('notion_loss_date'))} marked lost from Notion)")
                     lost_stats = lost_sync.sync_lost_devis(
                         lost_items, lost_status_by_id, team_values=lost_sync.load_followup_team_values()
                     )

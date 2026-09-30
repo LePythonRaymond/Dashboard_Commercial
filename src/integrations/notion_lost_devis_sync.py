@@ -31,6 +31,17 @@ turned off in that property's settings, and the API cannot change that setting.
 Commercial and Chef de projet are therefore only written when
 LOST_DEVIS_WRITE_PEOPLE=1, which is set once the setting is off in Notion.
 
+Devis marked lost from Notion
+-----------------------------
+In "Devis à suivre" the team can choose "Perdu : <raison>"; the n8n workflow of
+deploy/n8n marks the devis lost in Furious with that reason. Furious re-stamps
+the devis date when a devis is marked lost in its interface, not through its API
+(tested on 2026-09-30 on test devis 263219: date, display_date and lost_date are
+ignored). So n8n also writes the day in the hidden date "Perdu le" of "Devis à
+suivre", this sync copies it into "Perdu le" of "Devis perdus" (kept there after
+the follow-up row is gone), and the loss date of a devis is the later of its
+Furious date and its "Perdu le" (select_lost_devis, and the check).
+
 Example: devis 263329 is marked "Perdu" on 22/09/2026 with the
 reason "Poursuite avec le prestataire actuel à proposition équivalente". Next
 morning its page appears with Date perdu = 22/09/2026, that reason in Motif de
@@ -39,13 +50,13 @@ perte, and the comment typed on it in "Devis à suivre".
 
 import time
 from datetime import date
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
 from config.settings import settings
 from .notion_scope import ARCHIVED_PROP, scope_changes, scope_on_create
-from .notion_values import value_from_page, value_from_payload
+from .notion_values import page_value, value_from_page, value_from_payload
 from .notion_won_devis_sync import (
     COPIED_FROM_FOLLOWUP,
     ID_PROP,
@@ -64,6 +75,18 @@ REASON_PROP = "Motif de perte"
 LOST_DATE_PROP = "Date perdu"
 CREATED_PROP = "Créé le"
 PEOPLE_PROPS = ("Commercial", "Chef de projet")
+NOTION_LOSS_PROP = "Perdu le"   # day a devis was marked lost from Notion (see above)
+
+
+def loss_dates_from_pages(pages: Iterable[Dict[str, Any]], extract_id: Callable[[Dict[str, Any]], str]) -> Dict[str, str]:
+    """The latest "Perdu le" (YYYY-MM-DD) of each devis over these pages ("Devis à suivre", "Devis perdus")."""
+    dates: Dict[str, str] = {}
+    for page in pages:
+        devis_id = extract_id(page)
+        day = str(page_value(page, NOTION_LOSS_PROP) or "")[:10]
+        if devis_id and day and day > dates.get(devis_id, ""):
+            dates[devis_id] = day
+    return dates
 
 
 def loss_reasons(value: Any) -> List[str]:
@@ -76,17 +99,23 @@ def select_lost_devis(
     df: pd.DataFrame,
     start_date: Any,
     lost_tags: Dict[str, str],
+    loss_dates: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
     """Lost devis of the window with their reasons, and the Furious status of every devis.
 
     lost_tags comes from ProposalsClient.fetch_lost_tags(). Each item gets
     "lost_reasons" (list) and its own amount (avenants added by the pipeline are
-    taken out, as in the won table).
+    taken out, as in the won table). loss_dates ("Perdu le" by ID Devis, see
+    loss_dates_from_pages): a lost devis's date is the later of its Furious date
+    and that day, which the item also carries as "notion_loss_date".
     """
     if df is None or df.empty:
         return [], {}
     ids = df["id"].astype(str).str.strip()
-    dates = pd.to_datetime(df["date"], errors="coerce")
+    furious_dates = pd.to_datetime(df["date"], errors="coerce")
+    notion_dates = pd.to_datetime(ids.map(loss_dates or {}), errors="coerce")
+    later = notion_dates.notna() & (furious_dates.isna() | (notion_dates > furious_dates))
+    dates = furious_dates.where(~later, notion_dates)
     mask = (
         (df["statut_clean"] == LOST_STATUS)
         & (dates >= pd.Timestamp(start_date))
@@ -96,15 +125,19 @@ def select_lost_devis(
     )
     items: List[Dict[str, Any]] = []
     duplicates = 0
-    for row in df.loc[mask].to_dict("records"):
+    for index, row in zip(df.index[mask], df.loc[mask].to_dict("records")):
         devis_id = str(row["id"]).strip()
         reasons = loss_reasons((lost_tags or {}).get(devis_id, ""))
         if any(reason.lower() == DUPLICATE_REASON for reason in reasons):
             duplicates += 1
             continue
         merged = _to_number(row.get("addon_amount")) or 0.0
-        items.append(dict(row, id=devis_id, lost_reasons=reasons,
-                          amount=(_to_number(row.get("amount")) or 0.0) - merged))
+        item = dict(row, id=devis_id, lost_reasons=reasons, amount=(_to_number(row.get("amount")) or 0.0) - merged)
+        if (loss_dates or {}).get(devis_id):
+            item["notion_loss_date"] = loss_dates[devis_id]
+            if later[index]:
+                item["date"] = dates[index]
+        items.append(item)
     if duplicates:
         print(f"    {duplicates} lost devis tagged \"Devis en doublon\" left out (duplicates, not losses).")
     return items, furious_status_by_id(df)
@@ -159,6 +192,8 @@ class NotionLostDevisSync(NotionWonDevisSync):
             if allow(prop_name):
                 value = self._format_date(item.get(key))
                 props[prop_name] = {"date": {"start": value} if value else None}
+        if allow(NOTION_LOSS_PROP) and item.get("notion_loss_date"):   # never cleared
+            props[NOTION_LOSS_PROP] = {"date": {"start": item["notion_loss_date"]}}
         if allow("Lien Furious"):
             props["Lien Furious"] = {"url": self._build_furious_url(devis_id) or None}
         if self.write_people:
@@ -168,6 +203,11 @@ class NotionLostDevisSync(NotionWonDevisSync):
             if allow("Chef de projet"):
                 props["Chef de projet"] = self._build_people_property(chefs)
         return props
+
+    def load_notion_loss_dates(self) -> Dict[str, str]:
+        """"Perdu le" by ID Devis, from "Devis à suivre" and from this table (see loss_dates_from_pages)."""
+        own = self.list_all_pages() if self.database_id else []
+        return loss_dates_from_pages(list(self.list_followup_pages()) + list(own), self._extract_id_devis_from_page)
 
     def sync_lost_devis(
         self,

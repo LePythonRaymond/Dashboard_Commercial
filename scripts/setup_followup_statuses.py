@@ -19,11 +19,16 @@ and the win are still set in Furious.
                                         push (written by the sync and by n8n only)
   À envoyer à Furious  formula, hidden  checked while "Statut" holds a change n8n has
                                         to send or refuse: what its hourly catch-up reads
-(A third column, "Retour Furious", existed on 2026-09-29 only: refusals are now
-explained in a comment on the page.)
+  Perdu le             date, hidden     the day n8n marked the devis lost from a
+                                        "Perdu : <raison>" status (Furious keeps the old
+                                        devis date when a loss comes through its API);
+                                        also created in "Devis perdus", where the sync
+                                        copies it (see notion_lost_devis_sync)
+(A column "Retour Furious" existed on 2026-09-29 only: refusals are now explained
+in a comment on the page.)
 
---apply-views hides the two in every table view (linked views on other pages
-included); columns that are already there are left as the team set them, nothing
+--apply-views hides them in every table view of both tables (linked views on
+other pages included); columns that are already there are left as the team set them, nothing
 else changes. It also creates the view "🤝 Gagnés, en attente de signature" on the
 database when no view has that name. Run the follow-up sync once in between, so
 that "Statut Furious" is filled before n8n starts reading the formula.
@@ -33,7 +38,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 from urllib.parse import unquote
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -41,6 +46,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.settings import settings
 from src.integrations.notion_alerts_sync import FURIOUS_STATUS_PROP, NOTION_ONLY_STATUSES, TO_SEND_PROP
+from src.integrations.notion_lost_devis_sync import NOTION_LOSS_PROP
 from src.integrations.notion_scope import SCOPE_PROP
 from src.integrations.notion_views import data_source_of, notion_call, same_property, views_of_data_source, writable
 
@@ -63,7 +69,10 @@ DESCRIPTIONS = {
                           "ou au dernier envoi. Ne pas modifier."),
     TO_SEND_PROP: ("Coché tant que « Statut » a été changé dans Notion et pas encore envoyé à Furious "
                    "(n8n l'envoie en quelques secondes). « gagné » reste dans Notion."),
+    NOTION_LOSS_PROP: ("Écrit par n8n : le jour où le devis a été passé en perdu depuis Notion (Furious garde "
+                       "l'ancienne date quand la perte vient de l'API). Sert de date de perte dans Devis perdus."),
 }
+HIDDEN = (FURIOUS_STATUS_PROP, TO_SEND_PROP, NOTION_LOSS_PROP)
 
 
 def ensure_properties(data_source_id: str, props: Dict[str, Any], apply: bool) -> Dict[str, Any]:
@@ -77,6 +86,8 @@ def ensure_properties(data_source_id: str, props: Dict[str, Any], apply: bool) -
     if TO_SEND_PROP not in props:
         changes[TO_SEND_PROP] = {"formula": {"expression": TO_SEND_EXPRESSION},
                                  "description": DESCRIPTIONS[TO_SEND_PROP]}
+    if NOTION_LOSS_PROP not in props:
+        changes[NOTION_LOSS_PROP] = {"date": {}, "description": DESCRIPTIONS[NOTION_LOSS_PROP]}
     if not changes:
         print("properties ok")
         return props
@@ -86,14 +97,14 @@ def ensure_properties(data_source_id: str, props: Dict[str, Any], apply: bool) -
     return notion_call("PATCH", f"data_sources/{data_source_id}", {"properties": changes})["properties"]
 
 
-def with_status_columns(columns: List[Dict[str, Any]], pid: Dict[str, str]) -> List[Dict[str, Any]]:
-    """The view columns plus the missing new ones, hidden."""
+def with_status_columns(columns: List[Dict[str, Any]], pid: Dict[str, str], names=HIDDEN) -> List[Dict[str, Any]]:
+    """The view columns plus the missing new ones (those of `names` the table has), hidden."""
     def present(name: str) -> bool:
         return any(same_property(c["property_id"], pid[name]) for c in columns)
 
     out = list(columns)
-    for name in (FURIOUS_STATUS_PROP, TO_SEND_PROP):
-        if not present(name):
+    for name in names:
+        if name in pid and not present(name):
             out.append({"property_id": unquote(pid[name]), "visible": False})
     return out
 
@@ -114,27 +125,53 @@ def won_view_body(database_id: str, data_source_id: str, pid: Dict[str, str]) ->
     }
 
 
-def apply_views(database_id: str, data_source_id: str, props: Dict[str, Any], apply: bool) -> None:
-    missing = [name for name in (FURIOUS_STATUS_PROP, TO_SEND_PROP) if name not in props]
-    if missing:
-        print(f"views left alone: {missing} missing (run --add-properties first)")
-        return
-    pid = {name: prop["id"] for name, prop in props.items()}
+def hide_in_views(label: str, data_source_id: str, pid: Dict[str, str], apply: bool) -> Set[str]:
+    """Hide the new columns in every table view of a table; returns the names of its views."""
     names = set()
     for view in views_of_data_source(data_source_id):
         names.add(view.get("name"))
         config = view.get("configuration") or {}
         if view.get("type") != "table" or config.get("type") != "table":
             continue
-        columns = writable(config.get("properties") or [])
+        listed = writable(config.get("properties") or [])
+        # A view keeps the entries of deleted properties (e.g. "Retour Furious"), and
+        # Notion refuses an update that still names them: they are dropped.
+        columns = [c for c in listed if any(same_property(c["property_id"], p) for p in pid.values())]
         wanted = with_status_columns(columns, pid)
-        if wanted == columns:
-            print(f"{view['name']}: unchanged")
+        if wanted == listed:
+            print(f"{label} / {view['name']}: unchanged")
             continue
         if apply:
             notion_call("PATCH", f"views/{view['id']}", {"configuration": dict(writable(config), properties=wanted)})
-        print(f"{view['name']}: {'updated' if apply else 'would update'} "
-              f"({len(wanted) - len(columns)} column(s) added)")
+        print(f"{label} / {view['name']}: {'updated' if apply else 'would update'} "
+              f"({len(wanted) - len(columns)} column(s) added, hidden; {len(listed) - len(columns)} stale entry(ies) dropped)")
+    return names
+
+
+def ensure_lost_table(apply: bool, apply_views: bool) -> None:
+    """"Perdu le" in "Devis perdus", hidden in its views (the lost devis sync fills it)."""
+    database_id = settings.notion_lost_devis_database_id.replace("-", "")
+    if not database_id:
+        print("Devis perdus: NOTION_LOST_DEVIS_DATABASE_ID not set, skipped")
+        return
+    data_source_id = data_source_of(database_id)
+    props = notion_call("GET", f"data_sources/{data_source_id}")["properties"]
+    if NOTION_LOSS_PROP not in props:
+        print(f"Devis perdus: {'creating' if apply else 'would create'} {NOTION_LOSS_PROP!r}")
+        if apply:
+            props = notion_call("PATCH", f"data_sources/{data_source_id}", {"properties": {NOTION_LOSS_PROP: {
+                "date": {}, "description": DESCRIPTIONS[NOTION_LOSS_PROP]}}})["properties"]
+    if NOTION_LOSS_PROP in props:
+        hide_in_views("Devis perdus", data_source_id, {n: p["id"] for n, p in props.items()}, apply_views)
+
+
+def apply_views(database_id: str, data_source_id: str, props: Dict[str, Any], apply: bool) -> None:
+    missing = [name for name in (FURIOUS_STATUS_PROP, TO_SEND_PROP) if name not in props]
+    if missing:
+        print(f"views left alone: {missing} missing (run --add-properties first)")
+        return
+    pid = {name: prop["id"] for name, prop in props.items()}
+    names = hide_in_views("Devis à suivre", data_source_id, pid, apply)
     if WON_VIEW in names:
         print(f"{WON_VIEW}: exists, left as it is")
         return
@@ -160,6 +197,7 @@ def main() -> int:
     props = notion_call("GET", f"data_sources/{data_source_id}")["properties"]
     props = ensure_properties(data_source_id, props, args.add_properties)
     apply_views(database_id, data_source_id, props, args.apply_views)
+    ensure_lost_table(args.add_properties, args.apply_views)
     return 0
 
 

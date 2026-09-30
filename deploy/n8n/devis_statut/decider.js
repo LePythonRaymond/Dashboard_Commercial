@@ -8,11 +8,25 @@
 //   (none)     Furious did not answer: nothing written, the row stays pending and
 //              the hourly catch-up tries again
 // Every update re-sends the three custom fields of the devis (Furious refuses an
-// update without them). "Typologie Myrium" is read back truncated ("PA " for
-// "PA <= 15 000€"), so it is mapped to its full label.
+// update without them). "Typologie Myrium" has three options, "PA <= 15 000€",
+// "CH >= 15 000€" and "PA"; the API cuts a value at "<", so "PA <= 15 000€" is read
+// back as "PA " (with its space) while the option "PA" reads "PA". A value that
+// cannot be told apart is never sent.
+// A loss ("Perdu : <raison>") is sent as pipe 1 with the Furious loss reason; a devis
+// already lost in Furious is only confirmed.
 
 const WAITING = { '5': 'Brief', '0': 'En cours', '4': 'Envoyée(s) attente réponse' };
-const TYPOLOGIE_MYRIUM = [['PA', 'PA <= 15 000€'], ['CH', 'CH >= 15 000€']];
+const LOST_PIPE = '1';
+
+function typologieMyrium(read) {
+  const raw = String(read ?? '');
+  const text = raw.trim().toUpperCase();
+  if (!text) return { value: null };
+  if (text.startsWith('CH')) return { value: 'CH >= 15 000€' };
+  if (text === 'PA' && raw === raw.trimEnd()) return { value: 'PA' };
+  if (text.startsWith('PA')) return { value: 'PA <= 15 000€' };
+  return { unknown: raw.trim() };
+}
 
 const decode = (text) => String(text ?? '')
   .replace(/&#0*39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<')
@@ -53,6 +67,7 @@ $input.all().forEach((item, i) => {
   const proposal = found.find((p) => String(p?.id ?? '') === row.devis_id);
   if (!proposal) return settle(row, 'annuler', { revert: true, reason: `devis ${row.devis_id} introuvable dans Furious.` });
   const pipe = String(proposal.pipe ?? '');
+  if (row.pipe_cible === Number(LOST_PIPE) && pipe === LOST_PIPE) return settle(row, 'a_jour', { confirm: true });
   if (!(pipe in WAITING)) {
     return settle(row, 'annuler', {
       revert: true,
@@ -69,23 +84,22 @@ $input.all().forEach((item, i) => {
     : String(proposal.cf_typologie_de_devis ?? '').split(/\|#\||,/))
     .map((value) => decode(value).trim()).filter(Boolean);
   if (typologies.length) customFields.push({ name: 'typologie_de_devis', value: typologies });
-  const myriumRead = decode(first(proposal.cf_typologie_myrium)).trim();
-  if (myriumRead) {
-    const myrium = TYPOLOGIE_MYRIUM.find(([prefix]) => myriumRead.toUpperCase().startsWith(prefix));
-    if (!myrium) {
-      return settle(row, 'annuler', {
-        revert: true,
-        reason: `Typologie Myrium « ${myriumRead} » inconnue de l'automatisation, changer le statut dans Furious.`,
-      });
-    }
-    customFields.push({ name: 'typologie_myrium', value: myrium[1] });
+  const myrium = typologieMyrium(decode(first(proposal.cf_typologie_myrium)));
+  if (myrium.unknown) {
+    return settle(row, 'annuler', {
+      revert: true,
+      reason: `Typologie Myrium « ${myrium.unknown} » inconnue de l'automatisation, changer le statut dans Furious.`,
+    });
   }
+  if (myrium.value) customFields.push({ name: 'typologie_myrium', value: myrium.value });
+  const data = { id: Number(row.devis_id), pipe: row.pipe_cible };
+  if (row.lost_reason_id) data.lost_reason_id = row.lost_reason_id;
   out.push({
     json: {
       ...row,
       action: 'maj',
       statut_furious_actuel: WAITING[pipe],
-      furious_body: { action: 'update', data: { id: Number(row.devis_id), pipe: row.pipe_cible, custom_fields: customFields } },
+      furious_body: { action: 'update', data: { ...data, custom_fields: customFields } },
     },
   });
 });

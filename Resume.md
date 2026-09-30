@@ -1131,9 +1131,23 @@ See original documentation for details on performance, security, error handling,
 
 **"Devis à normaliser" off**: `NOTION_WEIRD_DATABASE_ID` commented out in the VPS `.env` (backup `.env.bak.20260929-before-weird-off`, mode 600); the sync, the setup scripts and the monthly archive job skip a table that is not configured. Its 404 since 2026-09-29 06:05 UTC had stopped step 9 (fixed by PR #15: each table synced on its own) and, first in `SCOPED_TABLES`, it would have stopped the whole archive job of 1 October: `archive_old_pages.py` now reports a failing table and goes on with the others (exit code 1).
 
-**Found, not changed (Tadd to decide)**: the active n8n workflow **"Archivage suivi commercial"** (`aAO2fHt9xkJ2sv7k`, since March 2026, Fridays 22:00 Paris) trashes every row of "Devis à suivre", "Pipe travaux" and "Devis à normaliser" whose "Pris en charge" is ticked, whatever its archive date. Since the scope rule of §18.19 keeps that tick, it overrides the 6-month retention of `archive_old_pages.py`, and a devis a person ticks while still waiting is trashed on Friday and recreated without its Commentaire by the next sync. On 2026-09-25 it trashed 5 follow-up rows (all won or lost, no comment), 41 "Devis à normaliser" rows and 4 "Pipe travaux" rows. Its "Devis à normaliser" node will fail from 2026-10-02.
+**Found, not changed (Tadd unpublished it on 2026-09-30, §18.23)**: the active n8n workflow **"Archivage suivi commercial"** (`aAO2fHt9xkJ2sv7k`, since March 2026, Fridays 22:00 Paris) trashes every row of "Devis à suivre", "Pipe travaux" and "Devis à normaliser" whose "Pris en charge" is ticked, whatever its archive date. Since the scope rule of §18.19 keeps that tick, it overrides the 6-month retention of `archive_old_pages.py`, and a devis a person ticks while still waiting is trashed on Friday and recreated without its Commentaire by the next sync. On 2026-09-25 it trashed 5 follow-up rows (all won or lost, no comment), 41 "Devis à normaliser" rows and 4 "Pipe travaux" rows. Its "Devis à normaliser" node will fail from 2026-10-02.
 
 **Recap PDF** (rules of 29/09/2026): 4 tables; status sent within seconds, refusals explained in a comment.
+
+### 18.23 "Perdu : raison" from Notion, loss date kept in Notion, Friday archive workflow off (September 2026)
+
+**Decisions (Tadd, 2026-09-30)**: a devis can be marked lost from "Devis à suivre" with **one status per Furious loss reason** ("Perdu : budget trop élevé"...), no extra column. The Friday n8n workflow "Archivage suivi commercial" (§18.22) is **unpublished** by Tadd: `archive_old_pages.py` (6 months) is the only clean-up.
+
+**Furious test** (test devis 263219, Tadd's go, 2026-09-30, restored after: Perdu, "Autre", 2026-05-12): `POST /proposal/ update` with `pipe: 1` and `lost_reason_id` marks the devis lost with that reason, but the devis `date` is **not** re-stamped as in the interface: `date`, `display_date` (a documented write field) and `lost_date` are accepted and ignored. The proposal history only logs "update" (author "unidentified" for API calls), not the loss. So the loss date is kept in Notion.
+
+**Loss reasons** (tag ids, from the lost devis on 2026-09-30): Abandon du projet par le client 25, Budget trop élevé 9, Autre 20, Absence de réponse du client 42, Devis perdu par le groupement 224, Devis en doublon 37, Proposition moins pertinente qu'un concurrent 19, Poursuite avec le prestataire actuel 155, Refus de positionnement de Merci Raymond 50, Réponse tardive ou inexistante de Merci Raymond 211 (two one-off tags, 229 and 230, ignored). Notion status options (created by hand: neither the API nor the Notion MCP can create status options): "Perdu : budget trop élevé", "Perdu : sans réponse du client", "Perdu : projet abandonné", "Perdu : concurrent retenu", "Perdu : garde son prestataire", "Perdu : groupement", "Perdu : doublon", "Perdu : on ne se positionne pas", "Perdu : réponse trop tardive", "Perdu : autre".
+
+**n8n** (`preparer.js`, `decider.js`, `lire_reponse.js`): the text after "Perdu :" is matched without accents, case or extra spaces (`LOSS_REASONS`); "Perdu" alone or an unknown reason is refused with the list in the comment. The update sends `pipe: 1, lost_reason_id`; a devis already lost in Furious is only confirmed; after a successful loss n8n writes the hidden date **"Perdu le"** (today, Europe/Paris) with "Statut Furious". Also fixed: "Typologie Myrium" has a third option "PA" (read "PA", while "PA <= 15 000€" reads "PA " cut at "<"): it was about to be rewritten as "PA <= 15 000€".
+
+**Myrium**: "Perdu le" (hidden date) exists in "Devis à suivre" and in "Devis perdus" (`scripts/setup_followup_statuses.py`, which also drops the view entries left by the deleted "Retour Furious"). `select_lost_devis(..., loss_dates)`: a lost devis's date is the later of its Furious date and its "Perdu le" (so a devis sent long ago and lost today from Notion is in the window, dated today); the sync writes "Perdu le" into "Devis perdus" (never cleared), so the date survives the follow-up row being trashed; `NotionLostDevisSync.load_notion_loss_dates()` reads both tables (pipeline step 12); the check reads "Perdu le" from "Devis perdus" only (a devis lost today is skipped anyway). A row that leaves "Devis à suivre" keeps its "Perdu : raison" instead of being relabelled "Perdu".
+
+**Tests**: 411 pass; the loss scenario (reason sent, "Perdu le" written, "PA" kept) and the five scenarios of §18.22 pass in a throwaway n8n 1.76.
 
 ---
 
@@ -1150,7 +1164,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.48
+**Document Version**: 1.49
 **Last Updated**: September 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System

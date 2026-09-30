@@ -13,9 +13,9 @@ imported on 2026-09-29 with `n8n import:workflow`).
 
 The credentials chosen in n8n (the Furious "Custom Auth" one in particular) are
 kept: for every node of the new definition, the credentials of the live node with
-the same name win over the file, which holds none for Furious. The active state is
-not changed unless --activate is given (n8n refuses to activate while a node
-misses its credential).
+the same name win over the file, which holds none for Furious. An inactive
+workflow stays inactive unless --activate is given; an active one gets its new
+version published (n8n 2.x keeps running the published version until then).
 """
 
 import argparse
@@ -83,10 +83,21 @@ def main() -> int:
         return 0
     updated = api("PUT", f"workflows/{WORKFLOW_ID}", body)
     print(f"updated: {len(updated.get('nodes', []))} nodes, active={updated.get('active')}")
-    if args.activate:
-        activated = api("POST", f"workflows/{WORKFLOW_ID}/activate")
-        print(f"active={activated.get('active')}; Notion automation URL: {WEBHOOK_URL}")
+    after = api("GET", f"workflows/{WORKFLOW_ID}")
+    if args.activate or needs_publishing(after):
+        # n8n 2.x runs the published version: an active workflow keeps running the old
+        # one until the new one is published (the public API's "activate").
+        api("POST", f"workflows/{WORKFLOW_ID}/activate")
+        after = api("GET", f"workflows/{WORKFLOW_ID}")
+        print(f"published: active={after.get('active')}, running the new version: {not needs_publishing(after)}; "
+              f"Notion automation URL: {WEBHOOK_URL}")
     return 0
+
+
+def needs_publishing(workflow: Dict[str, Any]) -> bool:
+    """Active, but running an older version than the one saved (n8n 2.x publishing)."""
+    active_version = workflow.get("activeVersionId")
+    return bool(workflow.get("active")) and active_version is not None and active_version != workflow.get("versionId")
 
 
 if __name__ == "__main__":

@@ -7,7 +7,8 @@ from datetime import date
 
 import pandas as pd
 
-from src.integrations.notion_lost_devis_sync import NotionLostDevisSync, loss_reasons, select_lost_devis
+from src.integrations.notion_lost_devis_sync import (NotionLostDevisSync, loss_dates_from_pages, loss_reasons,
+                                                     select_lost_devis)
 from src.integrations.notion_won_devis_sync import NotionWonDevisSync
 
 SCHEMA = {name: {"type": kind} for name, kind in {
@@ -182,3 +183,42 @@ def test_an_empty_database_id_never_falls_back_to_another_table(monkeypatch):
     monkeypatch.setattr(settings, "notion_maintenance_won_database_id", "maintenance-db")
     assert NotionLostDevisSync(api_key="x", user_mapper=FakeMapper()).database_id == ""
     assert NotionWonDevisSync(api_key="x", user_mapper=FakeMapper()).database_id == ""
+
+
+
+# ---------------------------------------------------------------- devis marked lost from Notion (2026-09-30)
+
+SCHEMA_WITH_LOSS_DAY = dict(SCHEMA, **{"Perdu le": {"type": "date"}})
+
+
+def test_a_devis_marked_lost_from_notion_is_dated_the_day_it_was_marked():
+    """Furious keeps the old devis date when a devis is marked lost through its API."""
+    df = pd.DataFrame([_devis("1", date=pd.Timestamp("2025-01-10")),       # sent long ago, lost today from Notion
+                       _devis("2", date=pd.Timestamp("2026-09-29")),       # lost again in Furious after the Notion loss
+                       _devis("3", date=pd.Timestamp("2025-01-10")),       # plain old loss: stays out of the window
+                       _devis("4", statut="Brief", statut_clean="brief")])  # not lost: a stray date changes nothing
+    loss_dates = {"1": "2026-09-30", "2": "2026-06-01", "4": "2026-09-30"}
+
+    items, _ = select_lost_devis(df, pd.Timestamp("2025-09-30"), {}, loss_dates)
+
+    by_id = {item["id"]: item for item in items}
+    assert sorted(by_id) == ["1", "2"]
+    assert by_id["1"]["date"] == pd.Timestamp("2026-09-30") and by_id["1"]["notion_loss_date"] == "2026-09-30"
+    assert by_id["2"]["date"] == pd.Timestamp("2026-09-29")   # the later of the two
+    props = _sync(FakeClient())._build_page_properties(by_id["1"], schema=SCHEMA_WITH_LOSS_DAY)
+    assert props["Date perdu"] == {"date": {"start": "2026-09-30"}} and props["Perdu le"] == {"date": {"start": "2026-09-30"}}
+
+
+def test_perdu_le_is_never_cleared():
+    props = _sync(FakeClient())._build_page_properties(_devis("1"), schema=SCHEMA_WITH_LOSS_DAY)
+    assert "Perdu le" not in props
+
+
+def test_loss_dates_keep_the_latest_day_of_each_devis_over_both_tables():
+    def page(devis_id, day):
+        return {"properties": {"ID Devis": {"type": "rich_text", "rich_text": [_text(devis_id)]},
+                               "Perdu le": {"type": "date", "date": {"start": day} if day else None}}}
+
+    pages = [page("1", "2026-09-30"), page("1", "2026-06-01"), page("2", None), page("3", "2026-08-15")]
+    assert loss_dates_from_pages(pages, NotionWonDevisSync._extract_id_devis_from_page) == {
+        "1": "2026-09-30", "3": "2026-08-15"}

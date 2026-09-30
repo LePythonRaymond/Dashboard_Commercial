@@ -385,9 +385,14 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
 
         Returns {} (and copies nothing) when the table is not configured or cannot be read.
         """
+        pages = self.list_followup_pages(followup_database_id)
+        return team_values_from_pages(pages, self._extract_id_devis_from_page) if pages else {}
+
+    def list_followup_pages(self, followup_database_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Every page of "Devis à suivre" ([] when the table is not configured or cannot be read)."""
         database_id = self._format_database_id(followup_database_id or settings.notion_followup_database_id)
         if not database_id:
-            return {}
+            return []
         try:
             database = self._with_retry(lambda: self.client.databases.retrieve(database_id=database_id))
             data_source_id = database["data_sources"][0]["id"]
@@ -400,9 +405,9 @@ class NotionWonDevisSync(NotionMaintenanceWonSync):
                     break
                 params["start_cursor"] = response.get("next_cursor")
         except Exception as exc:
-            print(f"    Warning: could not read \"Devis à suivre\"; team columns are not copied: {exc}")
-            return {}
-        return team_values_from_pages(pages, self._extract_id_devis_from_page)
+            print(f"    Warning: could not read \"Devis à suivre\" (team columns and Notion loss dates not used): {exc}")
+            return []
+        return pages
 
     # -------------------------------------------------------------------- sync
     def sync_won_devis(
