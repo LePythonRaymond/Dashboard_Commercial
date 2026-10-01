@@ -430,3 +430,23 @@ def test_an_active_workflow_gets_its_new_version_published():
     assert not deploy.needs_publishing({"active": True, "versionId": "new", "activeVersionId": "new"})
     assert not deploy.needs_publishing({"active": False, "versionId": "new", "activeVersionId": None})
     assert not deploy.needs_publishing({"active": True, "versionId": "new"})   # n8n 1.x: no versions
+
+
+
+def test_deploy_never_erases_a_login_typed_in_the_node():
+    """2026-10-01: the Furious login was typed in the login node instead of a credential."""
+    import deploy_n8n_statut_workflow as deploy
+
+    wanted = builder.build()
+    typed = {"method": "POST", "url": "https://merciraymond.furious-squad.com/api/v2/auth/", "sendBody": True,
+             "specifyBody": "json", "jsonBody": '{"action": "auth", "data": {"username": "u", "password": "p"}}'}
+    live = {"nodes": [{"name": "Furious : connexion", "parameters": typed}]}
+
+    assert deploy.login_set_in_node(live)
+    body = deploy.merged_definition(wanted, live, keep_live_login=True)
+    login = next(n for n in body["nodes"] if n["name"] == "Furious : connexion")
+    assert login["parameters"] == typed and "credentials" not in login
+    others = [n for n in body["nodes"] if n["name"] != "Furious : connexion"]
+    assert others == [n for n in wanted["nodes"] if n["name"] != "Furious : connexion"]
+    assert not deploy.login_set_in_node({"nodes": [{"name": "Furious : connexion", "parameters": {},
+                                                    "credentials": {"httpCustomAuth": {"id": "x"}}}]})
