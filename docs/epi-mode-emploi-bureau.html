@@ -1,0 +1,518 @@
+<!doctype html>
+<!--
+  Source of the HTML block "Mode d'emploi" in Notion (Espace Bureaux, under the
+  heading "Mode d'emploi"). Works without JavaScript (CSS tabs, <details>), since
+  Notion shows it in a sandboxed frame. To update: edit this file, upload it with
+  the Notion MCP (notion-create-file-upload, then POST the file), and replace the
+  embed block on the page. Never write an em dash here.
+-->
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mode d'emploi EPI · Bureau</title>
+<style>
+  :root {
+    --bg: #f7f6f2; --card: #ffffff; --text: #1d1d1b; --muted: #66655f; --line: #e5e3dc;
+    --accent: #2f6b4f; --accent-soft: #e4f0e9;
+    --bureau: #2f6b4f; --bureau-soft: #e4f0e9;
+    --notion: #3f4a5a; --notion-soft: #e8ebf0;
+    --mail: #6a4c93; --mail-soft: #efe9f7;
+    --ok-soft: #e7f3ec; --ok-line: #9cc9ae;
+    --ex-soft: #eaf1fb; --ex-line: #a9c3e8;
+    --warn: #9a4b05; --warn-soft: #fdf1e3; --warn-line: #f0c28c;
+    --chip-wait: #f3e8c8; --chip-wait-t: #6b5200;
+    --chip-go: #dbeafe; --chip-go-t: #1e4e8c;
+    --chip-hand: #d8efe1; --chip-hand-t: #1f5c3c;
+    --chip-back: #ececec; --chip-back-t: #444;
+    --chip-out: #f8dcdc; --chip-out-t: #8a1f1f;
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #191918; --card: #222220; --text: #edece7; --muted: #a6a59f; --line: #393833;
+      --accent: #63b38a; --accent-soft: #23372c;
+      --bureau: #63b38a; --bureau-soft: #23372c;
+      --notion: #a9b6c9; --notion-soft: #2a3039;
+      --mail: #c3a6ea; --mail-soft: #33293f;
+      --ok-soft: #1f3328; --ok-line: #3f7a59;
+      --ex-soft: #1f2a3a; --ex-line: #3d5f8f;
+      --warn: #f4b26b; --warn-soft: #3a2a19; --warn-line: #8a5a24;
+      --chip-wait: #463c1c; --chip-wait-t: #f3dd8f;
+      --chip-go: #1f3150; --chip-go-t: #b9d4fb;
+      --chip-hand: #1f3a2b; --chip-hand-t: #a9e0bf;
+      --chip-back: #34342f; --chip-back-t: #d9d8d2;
+      --chip-out: #452222; --chip-out-t: #f3b4b4;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body { font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 20px 16px 28px; }
+  h1 { font-size: 22px; line-height: 1.25; margin: 0; }
+  h2 { font-size: 17px; margin: 22px 0 8px; }
+  h3 { font-size: 15px; margin: 16px 0 6px; }
+  p { margin: 6px 0; }
+  ul, ol { margin: 6px 0; padding-left: 22px; }
+  li { margin: 3px 0; }
+  .sub { color: var(--muted); margin: 4px 0 14px; }
+  b, strong { font-weight: 650; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; }
+
+  /* the three tools */
+  .tools { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .tool { display: flex; flex-direction: column; gap: 4px; }
+  .tool .t { font-weight: 650; display: flex; gap: 8px; align-items: center; }
+  .tool .t .ico { font-size: 20px; }
+  .tool p { color: var(--muted); font-size: 14px; margin: 0; }
+  .tool .where { font-size: 13px; margin-top: auto; padding-top: 4px; }
+  .rule1 { margin: 12px 0 4px; border-left: 4px solid var(--accent); background: var(--accent-soft);
+           border-radius: 8px; padding: 10px 12px; }
+
+  /* tabs without JavaScript: radio buttons + labels */
+  .tabs-input { position: absolute; opacity: 0; pointer-events: none; }
+  .tabbar { display: flex; flex-wrap: wrap; gap: 6px; margin: 18px 0 12px; border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+  .tabbar label { cursor: pointer; padding: 7px 12px; border-radius: 999px; border: 1px solid var(--line);
+                  background: var(--card); font-weight: 600; font-size: 14px; user-select: none; }
+  .tabbar label:hover { border-color: var(--accent); }
+  .panel { display: none; }
+  #tab-cas:checked ~ .tabbar label[for="tab-cas"],
+  #tab-depart:checked ~ .tabbar label[for="tab-depart"],
+  #tab-stock:checked ~ .tabbar label[for="tab-stock"],
+  #tab-regles:checked ~ .tabbar label[for="tab-regles"],
+  #tab-admin:checked ~ .tabbar label[for="tab-admin"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #tab-cas:checked ~ .panels .p-cas,
+  #tab-depart:checked ~ .panels .p-depart,
+  #tab-stock:checked ~ .panels .p-stock,
+  #tab-regles:checked ~ .panels .p-regles,
+  #tab-admin:checked ~ .panels .p-admin { display: block; }
+  .tabs-input:focus-visible ~ .tabbar { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 8px; }
+
+  /* situations */
+  .group { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 16px 0 6px; font-weight: 650; }
+  details.case { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 8px; }
+  details.case > summary { list-style: none; cursor: pointer; padding: 11px 14px; display: grid;
+                           grid-template-columns: 28px 1fr auto 16px; gap: 10px; align-items: center; }
+  details.case > summary::-webkit-details-marker { display: none; }
+  details.case > summary .ico { font-size: 20px; text-align: center; }
+  details.case > summary .q { font-weight: 650; }
+  details.case > summary::after { content: "›"; font-size: 20px; color: var(--muted); transform: rotate(90deg); transition: transform .15s; text-align: center; }
+  details.case[open] > summary::after { transform: rotate(-90deg); }
+  details.case[open] > summary { border-bottom: 1px solid var(--line); }
+  .body { padding: 10px 16px 14px; }
+  .tag { font-size: 12px; font-weight: 650; border-radius: 999px; padding: 2px 9px; white-space: nowrap; }
+  .tag.bureau { background: var(--bureau-soft); color: var(--bureau); }
+  .tag.notion { background: var(--notion-soft); color: var(--notion); }
+  .tag.mail { background: var(--mail-soft); color: var(--mail); }
+  .box { border-radius: 8px; padding: 8px 12px; margin: 10px 0 2px; border: 1px solid; }
+  .box .k { font-weight: 650; display: block; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
+  .box.ok { background: var(--ok-soft); border-color: var(--ok-line); }
+  .box.ex { background: var(--ex-soft); border-color: var(--ex-line); }
+  .box.warn { background: var(--warn-soft); border-color: var(--warn-line); }
+  .box.warn .k { color: var(--warn); }
+  .path { font-weight: 650; }
+  .btn { display: inline-block; font-size: 13px; font-weight: 650; border: 1px solid var(--line); border-radius: 6px;
+         padding: 0 7px; background: var(--bg); white-space: nowrap; }
+
+  /* statuses */
+  .chip { display: inline-block; font-size: 12.5px; font-weight: 650; border-radius: 6px; padding: 1px 8px; margin: 2px 0; white-space: nowrap; }
+  .c-wait { background: var(--chip-wait); color: var(--chip-wait-t); }
+  .c-go { background: var(--chip-go); color: var(--chip-go-t); }
+  .c-hand { background: var(--chip-hand); color: var(--chip-hand-t); }
+  .c-back { background: var(--chip-back); color: var(--chip-back-t); }
+  .c-out { background: var(--chip-out); color: var(--chip-out-t); }
+  .flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; }
+  .flow .arrow { color: var(--muted); }
+
+  table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 14px; }
+  th, td { text-align: left; vertical-align: top; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  th { font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  td.num { font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap; }
+  .plus { color: var(--accent); } .minus { color: #c0392b; } .zero { color: var(--muted); }
+  @media (prefers-color-scheme: dark) { .minus { color: #f38b7f; } }
+
+  ol.steps { counter-reset: s; list-style: none; padding-left: 0; }
+  ol.steps > li { counter-increment: s; position: relative; padding-left: 34px; margin: 8px 0; }
+  ol.steps > li::before { content: counter(s); position: absolute; left: 0; top: 0; width: 24px; height: 24px; border-radius: 50%;
+                          background: var(--accent); color: #fff; font-size: 13px; font-weight: 700; display: grid; place-items: center; }
+  .check li { list-style: none; position: relative; }
+  .check { padding-left: 4px; }
+  .check li::before { content: "☐"; margin-right: 8px; color: var(--muted); }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .foot { color: var(--muted); font-size: 13px; margin-top: 22px; border-top: 1px solid var(--line); padding-top: 10px; }
+  @media (max-width: 640px) {
+    .tools, .cols { grid-template-columns: 1fr; }
+    details.case > summary { grid-template-columns: 24px 1fr 16px; }
+    details.case > summary .tag { grid-column: 2; justify-self: start; }
+    details.case > summary::after { grid-row: 1; grid-column: 3; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>🦺 Mode d'emploi EPI, côté bureau</h1>
+  <p class="sub">Version du 1er octobre 2026. Ouvre la situation qui t'arrive&nbsp;: chaque fiche dit où aller et ce qui se passe ensuite.</p>
+
+  <div class="tools">
+    <div class="card tool">
+      <div class="t"><span class="ico">👷</span>Formulaire jardinier</div>
+      <p>Chacun demande ses EPI depuis son téléphone. Le bureau reçoit un e-mail et valide.</p>
+      <div class="where"><span class="tag mail">lien dans Espace Terrain</span></div>
+    </div>
+    <div class="card tool">
+      <div class="t"><span class="ico">🗂️</span>Formulaire bureau</div>
+      <p>Tout ce que le bureau enregistre&nbsp;: livraison, remise de vive voix, état des lieux, comptage, perte, retour, départ.</p>
+      <div class="where"><span class="tag bureau">lien en haut de cette page</span></div>
+    </div>
+    <div class="card tool">
+      <div class="t"><span class="ico">📒</span>Notion</div>
+      <p>Pour voir et suivre&nbsp;: demandes, cartes par personne, stock, commandes. Et quelques gestes&nbsp;: glisser une carte, trois boutons.</p>
+      <div class="where"><span class="tag notion">les 3 pages ci-dessus</span></div>
+    </div>
+  </div>
+
+  <div class="rule1"><b>Règle n°1.</b> On ne tape plus de ligne à la main dans le registre. Tout passe par un des deux formulaires, par la page de validation, ou par les boutons des cartes. Le stock, les cartes et les dates suivent alors tout seuls.</div>
+
+  <input class="tabs-input" type="radio" name="tab" id="tab-cas" checked>
+  <input class="tabs-input" type="radio" name="tab" id="tab-depart">
+  <input class="tabs-input" type="radio" name="tab" id="tab-stock">
+  <input class="tabs-input" type="radio" name="tab" id="tab-regles">
+  <input class="tabs-input" type="radio" name="tab" id="tab-admin">
+  <div class="tabbar">
+    <label for="tab-cas">🧭 Que faire si…</label>
+    <label for="tab-depart">🚀 Démarrage</label>
+    <label for="tab-stock">🧮 Comprendre le stock</label>
+    <label for="tab-regles">⚠️ Règles</label>
+    <label for="tab-admin">🔧 Administrateur</label>
+  </div>
+
+  <div class="panels">
+
+  <!-- ================================================================ SITUATIONS -->
+  <section class="panel p-cas">
+
+    <div class="group">Demandes et remises</div>
+
+    <details class="case">
+      <summary><span class="ico">📨</span><span class="q">Quelqu'un a fait une demande avec le formulaire</span><span class="tag mail">E-mail ou Notion</span></summary>
+      <div class="body">
+        <ol class="steps">
+          <li>Ouvre l'e-mail et clique <span class="btn">Valider la demande</span>, ou dans <span class="path">🧥 Demandes &amp; Commandes › 📨 Demandes reçues</span> clique <span class="btn">✅ Valider</span>.</li>
+          <li>Une page s'ouvre avec le stock de chaque article, lu à l'instant&nbsp;:
+            <ul>
+              <li>«&nbsp;Stock&nbsp;: 9 → 7 après remise&nbsp;» en vert&nbsp;: il y en a assez&nbsp;;</li>
+              <li>«&nbsp;il en manque 1&nbsp;» en rouge&nbsp;: <span class="chip c-go">À commander</span> est déjà choisi&nbsp;;</li>
+              <li>«&nbsp;stock pas encore compté&nbsp;»&nbsp;: à toi de voir sur l'étagère.</li>
+            </ul>
+          </li>
+          <li>Pour chaque article, choisis <span class="chip c-hand">Remis</span> (la personne l'a en main), <span class="chip c-go">À commander</span> ou <span class="chip c-out">Refusé</span>, puis confirme. Rien ne change avant.</li>
+        </ol>
+        <div class="box ok"><span class="k">Ce qui se passe</span>Remis&nbsp;: le stock baisse, l'article apparaît sur la carte de la personne, daté du jour. À commander&nbsp;: l'article entre dans la 🛒 Liste de commande, le stock ne bouge pas.</div>
+        <div class="box warn"><span class="k">Attention</span>Ne transfère jamais cet e-mail&nbsp;: ses boutons valident sans mot de passe. <span class="btn">✖ Refuser</span> refuse toute la demande d'un coup.</div>
+      </div>
+    </details>
+
+    <details class="case">
+      <summary><span class="ico">🗣️</span><span class="q">Quelqu'un demande de vive voix ou par message</span><span class="tag bureau">Bureau · Remettre ou commander</span></summary>
+      <div class="body">
+        <ol class="steps">
+          <li>Dans le formulaire bureau, choisis ton nom en haut, puis la tuile <span class="btn">🤝 Remettre ou commander</span>.</li>
+          <li>Choisis la personne, ajoute les articles avec <span class="btn">+</span>. Sous chaque article&nbsp;: <span class="chip c-hand">Remis</span> si elle l'a en main maintenant, <span class="chip c-go">À commander</span> sinon. Si le stock ne suffit pas, «&nbsp;À commander&nbsp;» est choisi tout seul.</li>
+          <li>Un motif si utile (Usure, Perte, Mauvaise taille…), puis <span class="btn">Enregistrer</span>.</li>
+        </ol>
+        <div class="box ok"><span class="k">Ce qui se passe</span>Les lignes sont créées au nom de la personne, avec toi comme «&nbsp;Traité par&nbsp;». Pas de validation à faire&nbsp;: c'est le bureau qui saisit.</div>
+        <div class="box ex"><span class="k">Bon à savoir</span>Les vêtements usés sont proposés aussi (badge «&nbsp;usé&nbsp;»)&nbsp;: c'est ainsi qu'on ressort un vêtement du stock usé. Ils ne se commandent jamais.</div>
+      </div>
+    </details>
+
+    <details class="case">
+      <summary><span class="ico">🙋</span><span class="q">La personne vient chercher un article «&nbsp;Prêt à récupérer&nbsp;»</span><span class="tag notion">Notion · Demandes à traiter</span></summary>
+      <div class="body">
+        <ol class="steps">
+          <li>Ouvre <span class="path">🧥 Demandes &amp; Commandes › 📥 Demandes à traiter</span>.</li>
+          <li>Fais glisser sa carte de la colonne <span class="chip c-go">Prêt à récupérer</span> vers <span class="chip c-hand">Remis</span>.</li>
+        </ol>
+        <div class="box ok"><span class="k">Ce qui se passe</span>La carte quitte ce tableau et rejoint la carte de la personne dans 🪪 Cartes par personne. Le stock baisse, la date de remise se remplit dans les 5 minutes.</div>
+      </div>
+    </details>
+
+    <details class="case">
+      <summary><span class="ico">🆕</span><span class="q">Un nouvel arrivant</span><span class="tag notion">Notion puis Bureau</span></summary>
+      <div class="body">
+        <ol class="steps">
+          <li>Ajoute sa fiche dans <span class="path">💽 Gestion Équipes &amp; Prêts › 👷 Équipe, tailles et état des lieux</span>&nbsp;: nom, Statut <b>Actif</b>, ses tailles, et son <b>Compte Notion</b>.</li>
+          <li>Une à deux minutes plus tard, recharge le formulaire bureau&nbsp;: son nom y est. Fais sa dotation avec <span class="btn">🤝 Remettre ou commander</span>, motif «&nbsp;Nouvel arrivant&nbsp;».</li>
+        </ol>
+        <div class="box warn"><span class="k">Attention</span>Sans Compte Notion, ses articles n'apparaissent sur aucune carte. Le formulaire bureau écrit alors son nom dans le titre de la ligne pour garder une trace.</div>
+      </div>
+    </details>
+
+    <div class="group">Stock et fournisseur</div>
+
+    <details class="case">
+      <summary><span class="ico">📦</span><span class="q">Le fournisseur a livré</span><span class="tag bureau">Bureau · Livraison</span></summary>
+      <div class="body">
+        <ol class="steps">
+          <li>Tuile <span class="btn">📦 Livraison</span>. Chaque taille est un article&nbsp;: cherche «&nbsp;polaire&nbsp;», puis mets les quantités reçues taille par taille.</li>
+          <li>Laisse cochée la case «&nbsp;Passer les commandes en attente en Prêt à récupérer&nbsp;».</li>
+          <li><span class="btn">Enregistrer la livraison</span>.</li>
+        </ol>
+        <div class="box ok"><span class="k">Ce qui se passe</span>Le stock monte. Les lignes <span class="chip c-go">À commander</span> de ces articles passent en <span class="chip c-go">Prêt à récupérer</span>, les plus anciennes d'abord, tant que la quantité livrée suffit. Il ne reste qu'à prévenir les personnes.</div>
+        <div class="box ex"><span class="k">Exemple</span>4 polaires M arrivent. Alex en attend 1 depuis lundi, Zoé 1 depuis mardi&nbsp;: leurs deux lignes passent en Prêt à récupérer. Le stock monte de 4, dont 2 réservées pour Alex et Zoé jusqu'à ce qu'elles passent en Remis.</div>
+      </div>
+    </details>
+
+    <details class="case">
+      <summary><span class="ico">🔍</span><span class="q">Le stock affiché ne correspond pas à l'étagère</span><span class="tag bureau">Bureau · Comptage</span></summary>
+      <div class="body">
+        <ol class="steps">
+          <li>Tuile <span class="btn">🔍 Comptage du stock</span>, puis la famille à compter.</li>
+          <li>Tape ce que tu comptes vraiment. L'écart avec Notion s'affiche à côté&nbsp;: «&nbsp;+2&nbsp;», «&nbsp;−1&nbsp;» ou «&nbsp;juste&nbsp;». Laisse vide ce que tu n'as pas compté.</li>
+          <li><span class="btn">Enregistrer le comptage</span>.</li>
+        </ol>
+        <div class="box ok"><span class="k">Ce qui se passe</span>Une ligne «&nbsp;Ajustement inventaire&nbsp;» par écart (par exemple −2), et la case «&nbsp;À compter&nbsp;» se décoche. Le stock affiché devient exactement ce que tu as compté.</div>
+        <div class="box warn"><span class="k">Attention</span>Ne corrige jamais le stock en tapant dans «&nbsp;Stock initial&nbsp;»&nbsp;: les remises déjà faites seraient comptées deux fois.</div>
+      </div>
+    </details>
+
+    <details class="case">
+      <summary><span class="ico">💔</span><span class="q">Un article est abîmé ou perdu au dépôt</span><span class="tag bureau">Bureau · Perte ou casse</span></summary>
+      <div class="body">
+        <ol class="steps">
+          <li>Tuile <span class="btn">💔 Perte ou casse au dépôt</span>, les articles et les quantités.</li>
+          <li>Ce qui s'est passé, si utile («&nbsp;carton mouillé&nbsp;»), puis <span class="btn">Enregistrer la perte</span>.</li>
+        </ol>
+        <div class="box warn"><span class="k">Seulement si personne ne l'avait</span>Un article qu'une personne avait se traite dans <span class="btn">↩️ Retour ou départ</span> (Perdu ou Hors d'usage).</div>
+      </div>
+    </details>
+
+    <details class="case">
+      <summary><span class="ico">➕</span><span class="q">Ajouter un article ou une taille</span><span class="tag notion">Notion · Stock par article</span></summary>
+      <div class="body">
+        <ol class="steps">
+          <li>Dans <span class="path">🥍 Stock et Historique › 📦 Stock par article et par taille</span>, duplique une ligne proche et change le nom et la taille. Garde la forme «&nbsp;Modèle · Taille&nbsp;» («&nbsp;Polaire · XL&nbsp;»).</li>
+          <li>Règle «&nbsp;Mode&nbsp;» (Dotation ou Prêt), «&nbsp;Renouveler après (mois)&nbsp;», «&nbsp;Seuil mini&nbsp;» et, pour un prêt, «&nbsp;Durée de prêt (jours)&nbsp;».</li>
+          <li>Laisse «&nbsp;Stock initial&nbsp;» vide. Une à deux minutes plus tard, recharge le formulaire bureau et compte l'article avec l'écran <span class="btn">🔍 Comptage du stock</span>.</li>
+        </ol>
+        <div class="box ex"><span class="k">Article usé</span>Même nom avec «&nbsp;usé&nbsp;» avant la taille («&nbsp;T-shirt gris usé · M&nbsp;») et État «&nbsp;Usé&nbsp;»&nbsp;: c'est ainsi que les retours usés retrouvent leur article.</div>
+        <div class="box warn"><span class="k">Retirer un article</span>Décoche «&nbsp;Actif&nbsp;»&nbsp;: il disparaît des formulaires mais garde son historique. Ne supprime jamais la ligne, les cartes des personnes qui l'ont en dépendent.</div>
+      </div>
+    </details>
+
+    <div class="group">Usure, retours et départs</div>
+
+    <details class="case">
+      <summary><span class="ico">🟠</span><span class="q">Un article passe en orange «&nbsp;Usure à vérifier&nbsp;»</span><span class="tag notion">Notion · Cartes par personne</span></summary>
+      <div class="body">
+        <p>Chaque article a une durée d'usure, «&nbsp;Renouveler après (mois)&nbsp;»&nbsp;: 12 mois pour t-shirt, pantalon, chaussures, casquette&nbsp;; 24 pour polaire, coupe-vent, veste d'hiver&nbsp;; aucune pour gants, casque, gilet orange. Passé ce délai depuis la remise, la ligne passe en orange.</p>
+        <ol class="steps">
+          <li>Regarde l'article avec la personne, puis ouvre sa carte dans <span class="path">💽 Gestion Équipes &amp; Prêts › 🪪 Cartes par personne</span>.</li>
+          <li><b>Encore bon&nbsp;:</b> bouton <span class="btn">Usure OK</span>. La ligne repasse en vert («&nbsp;OK, vérifié le …&nbsp;») et l'orange reviendra après la même durée.</li>
+          <li><b>À changer&nbsp;:</b> bouton <span class="btn">À remplacer</span>. Ton clic est la décision, rien d'autre à valider.</li>
+        </ol>
+        <div class="box ok"><span class="k">Ce qui se passe après «&nbsp;À remplacer&nbsp;»</span>Dans les 5 minutes, la ligne passe <span class="chip c-out">Hors d'usage</span> et un remplacement (même article, même taille) apparaît dans 📥 Demandes à traiter&nbsp;: <span class="chip c-go">Prêt à récupérer</span> si un neuf est sur l'étagère, sinon <span class="chip c-go">À commander</span>, donc dans la liste de commande.</div>
+        <div class="box warn"><span class="k">Si la ligne reste «&nbsp;À remplacer&nbsp;»</span>Après 10 minutes, le système n'a pas retrouvé la personne ou l'article neuf&nbsp;: fais la remise avec <span class="btn">🤝 Remettre ou commander</span>.</div>
+      </div>
+    </details>
+
+    <details class="case">
+      <summary><span class="ico">↩️</span><span class="q">Quelqu'un rend un article, l'a perdu ou l'a cassé</span><span class="tag bureau">Bureau · Retour ou départ</span></summary>
+      <div class="body">
+        <p><b>Cas simple</b>&nbsp;: toute la ligne revient en bon état. Bouton <span class="btn">Rendu</span> sur sa carte, c'est tout.</p>
+        <p><b>Tous les autres cas</b>&nbsp;:</p>
+        <ol class="steps">
+          <li>Tuile <span class="btn">↩️ Retour ou départ</span>, puis la personne&nbsp;: ce qu'elle a en main s'affiche.</li>
+          <li>Pour chaque article, choisis ce qu'il devient (tableau ci-dessous). «&nbsp;Garde&nbsp;» ne change rien.</li>
+          <li>Si les pièces d'une même ligne finissent différemment, touche «&nbsp;Répartir les N pièces&nbsp;» et répartis-les avec les + et −.</li>
+          <li>S'il lui en faut un neuf&nbsp;: <span class="btn">🤝 Remettre ou commander</span>, motif «&nbsp;Perte&nbsp;» ou «&nbsp;Casse&nbsp;».</li>
+        </ol>
+        <table>
+          <tr><th>Choix</th><th>Quand</th><th>Effet</th></tr>
+          <tr><td><span class="chip c-hand">Garde</span></td><td>la personne le garde</td><td>rien ne change</td></tr>
+          <tr><td><span class="chip c-back">Rendu</span></td><td>il revient comme neuf</td><td>retour au stock neuf (+1)</td></tr>
+          <tr><td><span class="chip c-back">Rendu usé</span></td><td>usé mais encore portable</td><td>rejoint le stock usé (+1 sur l'article «&nbsp;usé&nbsp;»)</td></tr>
+          <tr><td><span class="chip c-out">Hors d'usage</span></td><td>bon à jeter</td><td>sort pour de bon</td></tr>
+          <tr><td><span class="chip c-out">Perdu</span></td><td>la personne l'a perdu</td><td>sort pour de bon</td></tr>
+        </table>
+        <div class="box ex"><span class="k">Exemple</span>Zoé rend ses 3 t-shirts M&nbsp;: 2 sont fatigués mais portables, 1 est troué. Répartir&nbsp;: Rendu usé 2, Hors d'usage 1. Le stock usé «&nbsp;T-shirt usé · M&nbsp;» monte de 2.</div>
+      </div>
+    </details>
+
+    <details class="case">
+      <summary><span class="ico">📏</span><span class="q">Un échange de taille</span><span class="tag bureau">Bureau</span></summary>
+      <div class="body">
+        <ol class="steps">
+          <li>L'ancienne taille revient&nbsp;: bouton <span class="btn">Rendu</span> sur sa carte (ou <span class="btn">↩️ Retour ou départ</span>).</li>
+          <li>La bonne taille&nbsp;: <span class="btn">🤝 Remettre ou commander</span>, motif «&nbsp;Mauvaise taille&nbsp;».</li>
+        </ol>
+        <div class="box warn"><span class="k">Attention</span>Ne change jamais l'article d'une ligne déjà remise&nbsp;: l'historique serait faux et le compteur d'usure ne repartirait pas de zéro.</div>
+      </div>
+    </details>
+
+    <details class="case">
+      <summary><span class="ico">👋</span><span class="q">Une personne quitte l'équipe</span><span class="tag bureau">Bureau · Retour ou départ</span></summary>
+      <div class="body">
+        <ol class="steps">
+          <li>Tuile <span class="btn">↩️ Retour ou départ</span>, puis la personne.</li>
+          <li>Coche «&nbsp;C'est un départ&nbsp;». Tout est pré-rempli&nbsp;: les prêts en Rendu, ce qui a un stock usé en Rendu usé, le reste en Garde.</li>
+          <li>Ajuste ce qui ne va pas, puis <span class="btn">Enregistrer le départ</span>.</li>
+        </ol>
+        <div class="box ok"><span class="k">Ce qui se passe</span>Ses lignes sont mises à jour, ce qui est rendu usé rejoint le stock usé, et sa fiche passe <b>Parti</b>&nbsp;: son nom disparaît des formulaires. Ce qu'elle garde reste à son nom, c'est l'historique exact.</div>
+      </div>
+    </details>
+
+    <details class="case">
+      <summary><span class="ico">🪢</span><span class="q">Les prêts (harnais, longes, outils)</span><span class="tag notion">Notion · Prêts en retard</span></summary>
+      <div class="body">
+        <p>Un article en mode <b>Prêt</b> doit revenir&nbsp;; un article en <b>Dotation</b> est donné. La durée se règle dans 📦 Stock par article, colonne «&nbsp;Durée de prêt (jours)&nbsp;».</p>
+        <ul>
+          <li>«&nbsp;Retour prévu&nbsp;» = date de remise + durée de prêt.</li>
+          <li>Passé ce jour, si l'article n'est pas revenu, la ligne passe «&nbsp;En retard&nbsp;» et apparaît dans <span class="path">💽 Gestion Équipes &amp; Prêts › ⏰ Prêts en retard</span>.</li>
+          <li>Au retour&nbsp;: bouton <span class="btn">Rendu</span> sur sa carte.</li>
+        </ul>
+        <div class="box ex"><span class="k">Exemple</span>Sécateur remis le 01/09, durée 7 jours&nbsp;: retour prévu le 08/09, en retard à partir du 09/09.</div>
+        <div class="box warn"><span class="k">Aujourd'hui</span>Aucune durée n'est encore renseignée&nbsp;: aucun prêt ne peut être en retard tant qu'elles sont vides.</div>
+      </div>
+    </details>
+
+  </section>
+
+  <!-- ================================================================ STARTUP -->
+  <section class="panel p-depart">
+    <p>À faire une seule fois. L'ordre des deux premières étapes n'a pas d'importance.</p>
+
+    <h2>1. L'état des lieux de chaque personne</h2>
+    <ol class="steps">
+      <li>Formulaire bureau, tuile <span class="btn">🧾 État des lieux</span>.</li>
+      <li>Choisis la personne, la date de remise approximative (le 1er du mois si tu ne sais pas mieux), puis ce qu'elle a déjà.</li>
+    </ol>
+    <div class="box ok"><span class="k">Ce qui se passe</span>Ses articles apparaissent sur sa carte, et l'usure part de la date choisie. <b>Le stock ne bouge pas</b>&nbsp;: ces articles n'étaient déjà plus sur l'étagère. S'ils reviennent un jour comme neufs (Rendu), le stock monte.</div>
+    <p class="sub">Compte environ 2 minutes par personne.</p>
+
+    <h2>2. Compter le stock</h2>
+    <ol class="steps">
+      <li>Formulaire bureau, tuile <span class="btn">🔍 Comptage du stock</span>, famille par famille.</li>
+      <li>Tape ce qu'il y a sur l'étagère. Les articles comptés perdent leur case «&nbsp;À compter&nbsp;».</li>
+    </ol>
+    <p>Tant qu'un article est «&nbsp;À compter&nbsp;», son stock est inconnu&nbsp;: la page de validation affiche «&nbsp;stock pas encore compté&nbsp;», et la liste de commande ne le propose que s'il a une ligne «&nbsp;À commander&nbsp;».</p>
+
+    <h2>3. Le reste, une fois</h2>
+    <ul class="check">
+      <li>Régler le «&nbsp;Seuil mini&nbsp;» des articles courants (par exemple 2 par taille de t-shirt)&nbsp;: sous ce seuil, l'article entre dans la liste de commande.</li>
+      <li>Renseigner «&nbsp;Durée de prêt (jours)&nbsp;» des 8 articles en Prêt.</li>
+      <li>Relier un Compte Notion à chaque fiche. Il manque aujourd'hui celui de Vincent DA SILVA.</li>
+      <li>Quand tout est compté, prévenir Taddeo&nbsp;: la case «&nbsp;À compter&nbsp;» et ses deux calculs d'appoint seront retirés.</li>
+      <li>Facultatif&nbsp;: une automatisation Notion «&nbsp;Statut devient Prêt à récupérer&nbsp;» qui prévient le bénéficiaire (seulement les personnes avec un compte Notion).</li>
+    </ul>
+  </section>
+
+  <!-- ================================================================ STOCK -->
+  <section class="panel p-stock">
+
+    <h2>Les 4 bases</h2>
+    <div class="cols">
+      <div class="card"><b>📦 Articles EPI</b><br>Une ligne par article et par taille, avec son stock. «&nbsp;Polaire · M&nbsp;» et «&nbsp;Polaire · L&nbsp;» sont deux articles.</div>
+      <div class="card"><b>🧾 Registre EPI</b><br>Une ligne par mouvement&nbsp;: demandé, remis, rendu, livré, perdu, compté. Le stock, les cartes et l'usure en découlent.</div>
+      <div class="card"><b>👷 Équipe EPI</b><br>Une ligne par personne&nbsp;: tailles, statut (Actif ou Parti), compte Notion.</div>
+      <div class="card"><b>📨 Demandes EPI</b><br>Une ligne par demande envoyée avec le formulaire jardinier.</div>
+    </div>
+
+    <h2>La vie d'une ligne (les statuts)</h2>
+    <div class="flow">
+      <span class="chip c-wait">Demandé</span><span class="arrow">→</span>
+      <span class="chip c-wait">Validé</span><span class="arrow">→</span>
+      <span class="chip c-go">À commander</span><span class="arrow">→</span>
+      <span class="chip c-go">Prêt à récupérer</span><span class="arrow">→</span>
+      <span class="chip c-hand">Remis</span>
+    </div>
+    <div class="flow">
+      <span class="chip c-hand">Remis</span><span class="arrow">→</span>
+      <span class="chip c-back">Rendu</span><span class="arrow">ou</span>
+      <span class="chip c-back">Rendu usé</span><span class="arrow">ou</span>
+      <span class="chip c-out">À remplacer</span><span class="arrow">→</span><span class="chip c-out">Hors d'usage</span><span class="arrow">ou</span>
+      <span class="chip c-out">Perdu</span>
+    </div>
+    <p>Le cas courant est plus court&nbsp;: <span class="chip c-wait">Demandé</span> puis directement <span class="chip c-hand">Remis</span> quand le stock suffit. «&nbsp;Validé&nbsp;» est facultatif. <span class="chip c-out">Refusé</span>&nbsp;: la demande n'est pas servie, rien ne bouge.</p>
+
+    <h2>Comment le stock est calculé</h2>
+    <p><b>Stock = Stock initial + la somme des effets de toutes ses lignes.</b> Personne ne tape jamais un stock&nbsp;: il se recalcule tout seul.</p>
+    <table>
+      <tr><th>Ligne du registre</th><th>Effet sur le stock</th></tr>
+      <tr><td>Livraison (Entrée stock)</td><td class="num plus">+ quantité</td></tr>
+      <tr><td>Retour au stock usé (Retour)</td><td class="num plus">+ quantité</td></tr>
+      <tr><td>Comptage (Ajustement inventaire)</td><td class="num">l'écart, + ou −</td></tr>
+      <tr><td>Perte ou casse au dépôt</td><td class="num minus">− quantité</td></tr>
+      <tr><td>Sortie Remis, Rendu usé, À remplacer, Hors d'usage, Perdu</td><td class="num minus">− quantité</td></tr>
+      <tr><td>Sortie Demandé, Validé, À commander, Prêt à récupérer</td><td class="num zero">0 (pas encore sorti)</td></tr>
+      <tr><td>Sortie Rendu (revenu comme neuf)</td><td class="num zero">0 (il est revenu)</td></tr>
+      <tr><td>Sortie d'un état des lieux</td><td class="num zero">0, et + quantité si Rendu</td></tr>
+    </table>
+    <div class="box ex"><span class="k">Exemple, polaire M</span>
+      On en compte 9&nbsp;: stock 9. L'état des lieux note qu'Alex en a une depuis 2025&nbsp;: toujours 9. Zoé en reçoit 2&nbsp;: 7. Le fournisseur en livre 5&nbsp;: 12. Zoé en rend une, usée&nbsp;: le neuf reste à 12 et «&nbsp;Polaire usé · M&nbsp;» monte de 1.
+    </div>
+    <h3>Les deux autres chiffres</h3>
+    <ul>
+      <li><b>Disponible</b> = stock − ce qui est demandé et pas encore remis. Exemple&nbsp;: stock 7, 2 demandes en attente&nbsp;: disponible 5.</li>
+      <li><b>Quantité à commander</b> = demandé + seuil mini − stock (si c'est positif). Exemple&nbsp;: 2 demandés + seuil 2 − stock 1 = 3 à commander. Pour un article encore «&nbsp;À compter&nbsp;», seules les lignes «&nbsp;À commander&nbsp;» comptent.</li>
+    </ul>
+
+    <h2>Ce qui se fait tout seul</h2>
+    <ul>
+      <li>Le stock, le disponible, la quantité à commander, l'usure et les retards de prêt.</li>
+      <li>«&nbsp;Remis le&nbsp;» et «&nbsp;Rendu le&nbsp;»&nbsp;: posés par les formulaires, et dans les 5 minutes quand tu changes un statut à la main dans Notion.</li>
+      <li>«&nbsp;À remplacer&nbsp;» devient Hors d'usage plus son remplacement, dans les 5 minutes.</li>
+      <li>À la livraison, les commandes en attente passent en Prêt à récupérer (écran Livraison).</li>
+      <li>Un e-mail au bureau pour chaque demande du formulaire jardinier.</li>
+    </ul>
+  </section>
+
+  <!-- ================================================================ RULES -->
+  <section class="panel p-regles">
+    <h2>Les erreurs faciles à faire</h2>
+    <ol class="steps">
+      <li><b>Pas de ligne tapée à la main dans le registre.</b> Une ligne à la main oublie vite l'article, la personne ou le statut, et n'apparaît dans aucune demande. Les formulaires remplissent tout.</li>
+      <li><b>On ne supprime pas une ligne, on change son statut.</b> Supprimer efface son effet sur le stock et son historique, comme si rien ne s'était passé. Réservé aux lignes créées par erreur.</li>
+      <li><b>On ne change pas l'article d'une ligne déjà remise.</b> Pour une autre taille&nbsp;: Rendu, puis une nouvelle remise.</li>
+      <li><b>Une demande du formulaire jardinier se traite d'abord par «&nbsp;Valider&nbsp;» ou «&nbsp;Refuser&nbsp;».</b> Tant que personne n'a cliqué, elle reste dans 📨 Demandes reçues.</li>
+      <li><b>Un stock négatif</b> veut dire qu'on a remis plus que ce qui était compté&nbsp;: recompte avec l'écran Comptage.</li>
+      <li><b>Ne transfère pas les e-mails de demande</b>&nbsp;: leurs boutons valident sans mot de passe.</li>
+      <li><b>Ne partage pas le lien du formulaire bureau</b>&nbsp;: il écrit directement dans le registre.</li>
+      <li><b>Chaque personne a un Compte Notion</b> relié à sa fiche&nbsp;: sans lui, aucune carte, et «&nbsp;À remplacer&nbsp;» ne la retrouve pas.</li>
+      <li><b>Si tu corriges quand même une ligne à la main</b>&nbsp;: une ligne Sortie a toujours un article et un statut (sans statut, elle compte comme «&nbsp;Demandé&nbsp;»). Quantité vide = 1, sauf pour un Ajustement inventaire où vide = 0.</li>
+    </ol>
+  </section>
+
+  <!-- ================================================================ ADMIN -->
+  <section class="panel p-admin">
+    <h2>Ce qu'il ne faut ni renommer ni supprimer</h2>
+    <p>Les formulaires et le service lisent et écrivent dans Notion par les noms. Renommer ou supprimer l'un de ces éléments les casse, sans message d'erreur dans Notion.</p>
+    <ul>
+      <li><b>Articles EPI</b>&nbsp;: Article, Famille, Taille, Mode, Actif, État (et son option Usé), À compter, Stock, Disponible, Demandé.</li>
+      <li><b>Registre EPI</b>&nbsp;: Détail, Article, Quantité, Bénéficiaire, Type et ses 5 options, Statut et toutes ses options, Source (Formulaire web, Bureau, État des lieux, Remplacement), Motif, Urgence, Demande, Remis le, Rendu le, Traité par.</li>
+      <li><b>Équipe EPI</b>&nbsp;: Nom, Statut (Actif, Parti), Compte Notion, et les tailles T-shirt, Pantalon, Chaussures, Polaire / pull, Coupe-vent, Manteau, Gants.</li>
+      <li><b>Demandes EPI</b>&nbsp;: toutes ses propriétés et options.</li>
+      <li><b>Les familles</b> T-shirt, Pantalon, Chaussures, Polaire, Coupe-vent, Veste hiver et Gants&nbsp;: elles relient un article à la taille de la personne.</li>
+    </ul>
+    <div class="box warn"><span class="k">Supprimer une propriété</span>Les calculs dépendent aussi de propriétés que le service n'utilise pas. Exemple réel&nbsp;: supprimer «&nbsp;Renouveler après&nbsp;» dans le registre a éteint l'orange d'usure pour tout le monde, sans aucun message. Demande au développeur avant de supprimer. Ajouter une propriété, une option, une vue ou un article ne pose aucun problème.</div>
+
+    <h2>Une règle cachée dans «&nbsp;Effet stock&nbsp;»</h2>
+    <p>Une ligne Sortie de Source «&nbsp;État des lieux&nbsp;» ne fait pas baisser le stock tant que la personne a l'article (il n'était plus sur l'étagère), et le fait monter s'il revient «&nbsp;Rendu&nbsp;». Ne change pas la Source d'une ligne après coup.</p>
+
+    <h2>Droits</h2>
+    <p>L'équipe terrain n'a besoin que de la lecture. Avec des droits de modification, n'importe qui pourrait passer ses propres lignes en «&nbsp;Remis&nbsp;» ou valider une demande depuis Notion.</p>
+
+    <h2>Le service</h2>
+    <ul>
+      <li>Les deux formulaires et la page de validation tournent sur epi.srv1082911.hstgr.cloud. Toutes les 5 minutes, il date les lignes changées à la main et traite les «&nbsp;À remplacer&nbsp;».</li>
+      <li>Qui reçoit les demandes&nbsp;: réglage EPI_NOTIFY_EMAILS. Qui peut saisir dans le formulaire bureau&nbsp;: EPI_OFFICE_EMAILS. Les deux se changent dans le fichier .env du serveur.</li>
+      <li>Changer la clé du formulaire bureau (EPI_OFFICE_KEY) change son lien&nbsp;: mets à jour le lien en haut de cette page.</li>
+    </ul>
+  </section>
+
+  </div>
+
+  <p class="foot">Une question, un cas qui n'est pas ici&nbsp;: demande à Taddeo. Ce mode d'emploi remplace la version du 29/09.</p>
+</div>
+</body>
+</html>
