@@ -8,6 +8,9 @@ One page at /b/<EPI_OFFICE_KEY>, six screens:
 - Remise: hand over (Remis, dated today) or order (À commander) for someone,
   new or used articles, without a request to validate.
 - État des lieux: what a person already had before the system, with a date.
+  The stock does not move: the register formula "Effet stock" counts a
+  Sortie line of Source "État des lieux" as 0 while held (it had left the
+  shelf before the count) and +quantity once "Rendu".
 - Comptage: the counted number is typed; the difference with the stock is
   written as an "Ajustement inventaire" line and "À compter" is unticked.
 - Perte au dépôt: "Perte / casse" lines.
