@@ -224,12 +224,13 @@ def load_team(client: NotionClient, equipe_ds: str) -> List[Dict[str, Any]]:
     return sorted(team, key=lambda p: p["name"].casefold())
 
 
-def load_catalogue(client: NotionClient, articles_ds: str) -> List[Dict[str, Any]]:
-    """Active new articles (used ones are handed out by the office), in family order."""
-    pages = client.query_all(articles_ds, {"filter": {"and": [
-        {"property": "Actif", "checkbox": {"equals": True}},
-        {"property": "État", "select": {"does_not_equal": "Usé"}},
-    ]}})
+def load_catalogue(client: NotionClient, articles_ds: str, include_used: bool = False) -> List[Dict[str, Any]]:
+    """Active articles in family order: new ones only for the workers' form, also the used ones
+    for the office form (the office hands out used clothes and keeps their stock)."""
+    conditions: List[Dict[str, Any]] = [{"property": "Actif", "checkbox": {"equals": True}}]
+    if not include_used:
+        conditions.append({"property": "État", "select": {"does_not_equal": "Usé"}})
+    pages = client.query_all(articles_ds, {"filter": {"and": conditions}})
     rank = {family: i for i, family in enumerate(FAMILY_ORDER)}
     items = [{
         "id": page["id"],
@@ -237,6 +238,7 @@ def load_catalogue(client: NotionClient, articles_ds: str) -> List[Dict[str, Any
         "famille": _prop(page, "Famille") or "Autre",
         "taille": _prop(page, "Taille") or "",
         "mode": _prop(page, "Mode") or "Dotation",
+        "etat": _prop(page, "État") or "Neuf",
         "stock": _prop(page, "Stock"),
         "disponible": _prop(page, "Disponible"),
         "pending": _prop(page, "Demandé") or 0,     # units requested and not handed out yet, all requests

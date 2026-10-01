@@ -6,6 +6,10 @@
 #   EPI_SIGNING_SECRET  signs the Valider / Refuser links, 16+ characters
 #   EPI_PUBLIC_URL      https://epi.srv1082911.hstgr.cloud
 #   EPI_NOTIFY_EMAILS   comma-separated office e-mails that receive the requests
+#   EPI_OFFICE_KEY      secret part of the office form link (/b/<key>), 16+ characters;
+#                       without it the office form stays closed
+#   EPI_OFFICE_EMAILS   who may enter something in the office form (comma-separated);
+#                       when empty, the EPI_NOTIFY_EMAILS people
 # plus NOTION_API_KEY and SMTP_* already used by Myrium.
 #
 # Deploy:

@@ -7,6 +7,7 @@ Routes:
 - POST /f/<key>/demande    creates the request in Notion, e-mails the office
 - GET  /v/<id>/<action>/<who>/<signature>   confirmation page, one decision per article
 - POST /v/<id>/<action>/<who>/<signature>   applies the decision in Notion
+- GET  /b/<office key>     the office form (deliveries, hand-outs, counts, returns...: see office.py)
 - GET  /health
 
 <who> is the office e-mail a link was sent to, or "notion" for the links shown
@@ -28,6 +29,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime
 from html import escape
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs
 from zoneinfo import ZoneInfo
@@ -40,7 +42,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import mailer, notion
+from . import mailer, notion, office
 from .config import Config
 from .security import check, decode_recipient, encode_recipient, same_key, sign
 
@@ -231,8 +233,12 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
     def load_catalogue() -> List[Dict[str, Any]]:
         return notion.load_catalogue(api, cfg.articles_ds)
 
+    def load_catalogue_all() -> List[Dict[str, Any]]:   # used articles too, for the office form
+        return notion.load_catalogue(api, cfg.articles_ds, include_used=True)
+
     def warm_up() -> None:
-        for name, load in (("team", load_team), ("catalogue", load_catalogue), ("users", api.users)):
+        for name, load in (("team", load_team), ("catalogue", load_catalogue), ("users", api.users),
+                           ("catalogue_all", load_catalogue_all)):
             try:
                 cache.load(name, load)
             except Exception as exc:  # the first visitor will load it instead
@@ -368,10 +374,10 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
                 found[email] = user
         return found
 
-    def office() -> List[Tuple[str, str]]:
-        """(e-mail, name) of the people who receive and decide the requests."""
+    def office_people(emails: Optional[Tuple[str, ...]] = None) -> List[Tuple[str, str]]:
+        """(e-mail, name) of the people who receive and decide the requests (or of the e-mails given)."""
         known = users_by_email()
-        return [(email, (known.get(email) or {}).get("name") or email) for email in cfg.notify_emails]
+        return [(email, (known.get(email) or {}).get("name") or email) for email in (emails or cfg.notify_emails)]
 
     def require_form_key(key: str) -> None:
         if not same_key(cfg.form_key, key) or len(cfg.form_key) < 16:
@@ -484,7 +490,7 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
         verb = "Valider" if action == "valider" else "Refuser"
         who = ""
         if recipient == NOTION_RECIPIENT:
-            options = "".join(f"<option value='{escape(email)}'>{escape(name)}</option>" for email, name in office())
+            options = "".join(f"<option value='{escape(email)}'>{escape(name)}</option>" for email, name in office_people())
             who = (f"<p><label>Qui {'valide' if action == 'valider' else 'refuse'} ? "
                    f"<select name='par' id='par' required><option value=''>Choisis</option>{options}</select></label></p>")
         effect = ("« Remis » : la personne a l'article, le stock baisse. « À commander » : l'article va dans "
@@ -665,6 +671,23 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
         fields = parse_qs((await request.body()).decode("utf-8", "replace"), keep_blank_values=True)
         return await run_in_threadpool(apply_decision, request_id, action, recipient, fields)
 
+    # ------------------------------------------------------- office form (/b/<key>, see office.py)
+    def office_articles(fresh: bool = False) -> List[Dict[str, Any]]:
+        if fresh:
+            return cache.load("catalogue_all", load_catalogue_all)
+        return cache.get("catalogue_all", CACHE_SECONDS, load_catalogue_all)
+
+    def refresh_stock() -> None:   # after an office entry the stock (and maybe the team) moved
+        cache.refresh_in_background("catalogue", load_catalogue)
+        cache.refresh_in_background("catalogue_all", load_catalogue_all)
+        cache.refresh_in_background("team", load_team)
+
+    office.register(app, SimpleNamespace(cfg=cfg, api=api, team=team, articles=office_articles,
+                                         office=lambda: office_people(cfg.office_emails or cfg.notify_emails),
+                                         users_by_email=users_by_email, now=now, refresh=refresh_stock,
+                                         same_key=same_key))
+    if len(cfg.office_key) < 16:
+        print("[epi-form] EPI_OFFICE_KEY absent ou trop court : le formulaire bureau est fermé")
     return app
 
 

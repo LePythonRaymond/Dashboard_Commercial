@@ -43,6 +43,8 @@ class Config:
     smtp_user: str
     smtp_password: str
     mail_dry_run_dir: str     # when set, e-mails are written there instead of sent
+    office_key: str = ""      # secret part of the office form link: /b/<office_key> (closed when empty)
+    office_emails: Tuple[str, ...] = ()   # who may enter something in the office form; empty: notify_emails
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -61,6 +63,8 @@ class Config:
             smtp_user=_env("SMTP_USER"),
             smtp_password=_env("SMTP_PASSWORD"),
             mail_dry_run_dir=_env("EPI_MAIL_DRY_RUN_DIR"),
+            office_key=_env("EPI_OFFICE_KEY"),
+            office_emails=_emails(_env("EPI_OFFICE_EMAILS")),
         )
 
     def problems(self) -> List[str]:
