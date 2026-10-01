@@ -546,23 +546,35 @@ def worn_line(env, article, qty=1, user=ALICE_USER, handed_on="2025-06-01"):
     return env.fake.add(REGISTRE, props)
 
 
-def test_a_line_set_to_replace_becomes_a_replacement_request(env):
+def test_a_line_set_to_replace_gets_its_replacement_without_a_second_validation(env):
     submit(env, [("tshirt", 1)])
     env.client.post(links_in(env.sent[0][1])["valider"])                  # handed out through the form
     old = line_of(env, "tshirt")
-    env.fake.pages[old]["properties"]["Statut"] = select("À remplacer")   # the office judges it worn
+    env.fake.pages[old]["properties"]["Statut"] = select("À remplacer")   # Léa judges it worn and clicks
+    env.fake.pages[old]["last_edited_by"] = {"object": "user", "id": LEA_ID}
     env.sent.clear()
     assert env.client.app.state.maintain()["remplacements"] == 1
     assert (env.fake.value(old, "Statut"), env.fake.value(old, "Rendu le")) == ("Hors d'usage", "2026-09-29")
-    new_request = next(i for i in env.fake.ids(DEMANDES) if env.fake.value(i, "Statut") == "En attente")
+    new_request = next(i for i in env.fake.ids(DEMANDES) if i != env.fake.value(old, "Demande")[0])
+    assert env.fake.value(new_request, "Statut") == "Validée"             # her click was the decision
+    assert (env.fake.value(new_request, "Validée par"), env.fake.value(new_request, "Traitée via")) == ([LEA_ID], "Notion")
     assert env.fake.value(new_request, "Motif") == "Usure"
     assert env.fake.value(new_request, "Demandeur") == [env.ids["alice"]]
     assert "Remplacement automatique" in env.fake.value(new_request, "Commentaire")
     new_line = next(i for i in env.fake.ids(REGISTRE) if env.fake.value(i, "Demande") == [new_request])
     assert env.fake.value(new_line, "Article") == [env.ids["tshirt"]]
-    assert (env.fake.value(new_line, "Source"), env.fake.value(new_line, "Statut")) == ("Remplacement", "Demandé")
-    assert [to for to, _ in env.sent] == [LEA, PRISCILLA]                  # the office is told, as for any request
+    assert env.fake.value(new_line, "Source") == "Remplacement"
+    assert env.fake.value(new_line, "Statut") == "Prêt à récupérer"       # 5 new ones on the counted shelf
+    assert env.sent == []                                                 # nothing to validate, no e-mail
     assert env.client.app.state.maintain()["remplacements"] == 0          # never twice
+
+
+@pytest.mark.parametrize("article", ["shoes", "gloves"])
+def test_a_replacement_without_stock_goes_to_the_order_list(env, article):
+    worn_line(env, article)                                               # shoes: 0 counted; gloves: not counted
+    assert env.client.app.state.maintain()["remplacements"] == 1
+    new_line = next(i for i in env.fake.ids(REGISTRE) if env.fake.value(i, "Source") == "Remplacement")
+    assert env.fake.value(new_line, "Statut") == "À commander"
 
 
 def test_a_worn_used_article_is_replaced_by_the_new_one(env):
@@ -571,6 +583,7 @@ def test_a_worn_used_article_is_replaced_by_the_new_one(env):
     new_line = next(i for i in env.fake.ids(REGISTRE) if i != line)
     assert env.fake.value(new_line, "Article") == [env.ids["tshirt"]]     # same family and size, new
     assert env.fake.value(new_line, "Quantité") == 2
+    assert env.fake.value(new_line, "Statut") == "Prêt à récupérer"       # 2 needed, 5 on the shelf
     request = only(env, DEMANDES)
     assert env.fake.value(request, "Demandeur") == [env.ids["alice"]]     # found through her Notion account
     assert "remis le 01/06/2025" in env.fake.value(request, "Commentaire")

@@ -47,8 +47,9 @@ REFUSED = "Refusée"
 # Only "Remis" moves the stock; "À commander" feeds the order list.
 HANDED, TO_ORDER, LINE_REFUSED = "Remis", "À commander", "Refusé"
 LINE_CHOICES = (HANDED, TO_ORDER, LINE_REFUSED)
-# Set by the office on a worn item; the service turns it into WORN_OUT plus a replacement request.
-TO_REPLACE, WORN_OUT = "À remplacer", "Hors d'usage"
+# Set by the office on a worn item; the service turns it into WORN_OUT plus a replacement line,
+# directly "À commander" or, when a new one is already on the shelf, "Prêt à récupérer".
+TO_REPLACE, WORN_OUT, READY = "À remplacer", "Hors d'usage", "Prêt à récupérer"
 
 
 class NotionError(RuntimeError):
@@ -289,9 +290,14 @@ def pending_elsewhere(item: Optional[Dict[str, Any]], qty: float) -> float:
 # --------------------------------------------------------------------- writes
 def create_request(client: NotionClient, demandes_ds: str, registre_ds: str, person: Dict[str, Any],
                    lines: List[Dict[str, Any]], motif: Optional[str], urgent: bool, commentaire: str,
-                   today: date, source: str = "Formulaire web") -> Dict[str, Any]:
-    """Create the request page, then its register lines (Statut Demandé), PARALLEL_CALLS at a time.
+                   today: date, source: str = "Formulaire web", line_status: str = "Demandé",
+                   decided: bool = False, decided_by: Optional[str] = None) -> Dict[str, Any]:
+    """Create the request page, then its register lines, PARALLEL_CALLS at a time.
 
+    A worker's request waits for the office (request En attente, lines Demandé).
+    A request the office has already decided (decided=True, for a replacement)
+    is created Validée, its lines directly in line_status (À commander, or
+    Prêt à récupérer), with who decided when known.
     All or nothing: if Notion fails on any line, every page already created
     goes to the trash and the error is raised, so the worker can simply send
     again without leaving a half request behind.
@@ -299,17 +305,21 @@ def create_request(client: NotionClient, demandes_ds: str, registre_ds: str, per
     total = sum(line["qty"] for line in lines)
     title = f"{person['name']} · {today:%d/%m} · {total} article{'s' if total > 1 else ''}"
     urgence = "Urgent" if urgent else "Normal"
-    page = client.create_page(demandes_ds, {
+    request_props: Dict[str, Any] = {
         "Demande": _title(title),
         "Demandeur": _relation([person["id"]]),
         "Bénéficiaire": _people([person.get("user_id")]),
-        "Statut": _select(WAITING),
+        "Statut": _select(VALIDATED if decided else WAITING),
         "Résumé": _text(summarize(lines)),
         "Nb articles": {"number": total},
         "Motif": _select(motif),
         "Urgence": _select(urgence),
         "Commentaire": _text(commentaire),
-    })
+    }
+    if decided:
+        request_props.update({"Validée le": _date(today), "Traitée via": _select("Notion"),
+                              "Validée par": _people([decided_by])})
+    page = client.create_page(demandes_ds, request_props)
 
     def create_line(line: Dict[str, Any]) -> Callable[[], Dict[str, Any]]:
         return lambda: client.create_page(registre_ds, {
@@ -318,11 +328,12 @@ def create_request(client: NotionClient, demandes_ds: str, registre_ds: str, per
             "Quantité": {"number": line["qty"]},
             "Bénéficiaire": _people([person.get("user_id")]),
             "Type": _select("Sortie"),
-            "Statut": _select("Demandé"),
+            "Statut": _select(line_status),
             "Source": _select(source),
             "Motif": _select(motif),
             "Urgence": _select(urgence),
             "Demande": _relation([page["id"]]),
+            "Traité par": _people([decided_by]),
         })
 
     outcomes = in_parallel([create_line(line) for line in lines])
@@ -372,6 +383,7 @@ def lines_to_replace(client: NotionClient, registre_ds: str) -> List[Dict[str, A
         "user_ids": _prop(page, "Bénéficiaire") or [],
         "request_ids": _prop(page, "Demande") or [],
         "handed_on": _prop(page, "Remis le"),
+        "changed_by": (page.get("last_edited_by") or {}).get("id"),   # who clicked "À remplacer", usually
     } for page in pages if (_prop(page, "Type") or "Sortie") == "Sortie"]
 
 
