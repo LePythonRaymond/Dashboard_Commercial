@@ -52,12 +52,32 @@ def api(method: str, path: str, body: Any = None) -> Any:
         raise SystemExit(f"{method} {path} -> {exc.code}: {exc.read().decode()[:400]}")
 
 
-def merged_definition(wanted: Dict[str, Any], live: Dict[str, Any]) -> Dict[str, Any]:
-    """The file's workflow with the live nodes' credentials; the body of the update call."""
-    live_credentials = {node["name"]: node["credentials"] for node in live.get("nodes", []) if node.get("credentials")}
+LOGIN_NODE = "Furious : connexion"
+
+
+def login_set_in_node(live: Dict[str, Any]) -> bool:
+    """True when the live login node has no credential: the Furious login was typed in the node itself.
+
+    Found on 2026-10-01 (the username and password in its JSON body instead of a
+    Custom Auth credential). Pushing the file would then erase them and break the login.
+    """
+    node = next((n for n in live.get("nodes", []) if n["name"] == LOGIN_NODE), None)
+    return node is not None and not node.get("credentials")
+
+
+def merged_definition(wanted: Dict[str, Any], live: Dict[str, Any], keep_live_login: bool = False) -> Dict[str, Any]:
+    """The file's workflow with the live nodes' credentials; the body of the update call.
+
+    keep_live_login: the live login node is kept as it is (parameters and credentials).
+    """
+    live_nodes = {node["name"]: node for node in live.get("nodes", [])}
+    live_credentials = {name: node["credentials"] for name, node in live_nodes.items() if node.get("credentials")}
     nodes = []
     for node in wanted["nodes"]:
         node = dict(node)
+        if keep_live_login and node["name"] == LOGIN_NODE and node["name"] in live_nodes:
+            node["parameters"] = live_nodes[LOGIN_NODE]["parameters"]
+            node.pop("credentials", None)
         if node["name"] in live_credentials:
             node["credentials"] = live_credentials[node["name"]]
         nodes.append(node)
@@ -69,11 +89,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--apply", action="store_true", help="Update the live workflow")
     parser.add_argument("--activate", action="store_true", help="Update, then activate the workflow")
+    parser.add_argument("--keep-live-login", action="store_true",
+                        help=f"Keep the live \"{LOGIN_NODE}\" node as it is (login typed in the node)")
     args = parser.parse_args()
 
     wanted = json.loads(OUTPUT.read_text())
     live = api("GET", f"workflows/{WORKFLOW_ID}")
-    body = merged_definition(wanted, live)
+    if login_set_in_node(live) and not args.keep_live_login:
+        print(f"Refused: \"{LOGIN_NODE}\" has no credential in n8n, the Furious login is typed in the node. "
+              "Pushing the file would erase it. Move it to a Custom Auth credential, or use --keep-live-login.")
+        return 1
+    body = merged_definition(wanted, live, keep_live_login=args.keep_live_login)
     kept = sorted(n["name"] for n in body["nodes"] if n.get("credentials") and not any(
         w["name"] == n["name"] and w.get("credentials") == n["credentials"] for w in wanted["nodes"]))
     print(f"live: {live['name']!r}, active={live.get('active')}, {len(live.get('nodes', []))} nodes")
