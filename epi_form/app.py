@@ -16,7 +16,8 @@ deciding). The signature covers id, action and <who>: see security.py.
 In the background, every MAINTENANCE_SECONDS, the service dates the register
 lines whose status was changed by hand in Notion ("Remis le", "Rendu le"), so
 no paid Notion automation is needed, and turns each line set "À remplacer"
-into Hors d'usage plus a replacement request (motif Usure).
+into Hors d'usage plus its replacement, already decided: "Prêt à récupérer"
+when a new one is on the counted shelf, else "À commander".
 
 Run locally:  uvicorn epi_form.app:app --port 8765   (settings: see config.py)
 """
@@ -284,8 +285,15 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
         return candidates[0] if len(candidates) == 1 else None
 
     def replace_worn() -> int:
-        """Lines set "À remplacer": Hors d'usage, plus a replacement request (motif Usure) sent as usual."""
+        """Lines set "À remplacer": Hors d'usage, plus the replacement, already decided by the office.
+
+        Clicking "À remplacer" is the office's decision, so the replacement skips
+        validation: its line goes straight to "Prêt à récupérer" when a new one is
+        on the counted shelf, else to "À commander" (and so into the order list).
+        Example: t-shirt M with 7 counted, Prêt à récupérer; uncounted gloves, À commander.
+        """
         replaced = 0
+        people_ids = {user["id"] for user in users_by_email().values()}   # humans, not bots
         for line in notion.lines_to_replace(api, cfg.registre_ds):
             person, article = person_of(line), new_equivalent(line["article_id"])
             if person is None or article is None:
@@ -300,16 +308,20 @@ def create_app(config: Optional[Config] = None, client: Optional[notion.NotionCl
                       if line.get("handed_on") else "")
             commentaire = f"Remplacement automatique de « {line['title']} »{handed}, passé en « À remplacer »."
             lines = [{"article_id": article["id"], "title": article["title"], "qty": line["qty"]}]
+            on_shelf = (not article.get("a_compter") and article.get("stock") is not None
+                        and article["stock"] >= line["qty"])
+            target = notion.READY if on_shelf else notion.TO_ORDER
+            decided_by = line.get("changed_by") if line.get("changed_by") in people_ids else None
             try:
                 created = notion.create_request(api, cfg.demandes_ds, cfg.registre_ds, person, lines, "Usure",
-                                                False, commentaire, when.date(), source="Remplacement")
+                                                False, commentaire, when.date(), source="Remplacement",
+                                                line_status=target, decided=True, decided_by=decided_by)
             except Exception as exc:
                 notion.set_worn_out(api, line["id"], None)       # back to "À remplacer": the next pass retries
                 print(f"[epi-form] replacement of « {line['title']} » failed, retried at the next pass: {exc}")
                 continue
-            print(f"[epi-form] request {created.get('number')}: replacement of « {line['title']} » for {person['name']}")
-            follow_up({"created": created, "person": person, "lines": lines, "motif": "Usure", "urgent": False,
-                       "commentaire": commentaire, "when": when})
+            print(f"[epi-form] request {created.get('number')}: replacement of « {line['title']} » "
+                  f"for {person['name']}, {target}")
             replaced += 1
         return replaced
 
