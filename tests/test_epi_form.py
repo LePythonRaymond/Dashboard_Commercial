@@ -81,6 +81,8 @@ def _matches(page, flt):
         return flt["relation"]["contains"] in (value or [])
     if "date" in flt and flt["date"].get("is_empty"):
         return not value
+    if "people" in flt:
+        return flt["people"]["contains"] in (value or [])
     raise NotImplementedError(flt)
 
 
@@ -715,3 +717,253 @@ def test_config_lists_what_is_missing():
     for name in ("NOTION_API_KEY", "EPI_FORM_KEY", "EPI_SIGNING_SECRET", "EPI_NOTIFY_EMAILS", "SMTP_USER"):
         assert name in problems
     assert make_config(smtp_user="u", smtp_password="p").problems() == []
+
+
+# ------------------------------------------------------------ office form
+OFFICE_KEY = "office-key-for-tests-0123456789"
+
+
+@pytest.fixture
+def office_env():
+    fake = FakeNotion()
+    ids = seed(fake)
+    app = app_module.create_app(config=make_config(office_key=OFFICE_KEY), client=fake, send=lambda *a: None,
+                                now=lambda: NOW)
+    return SimpleNamespace(fake=fake, ids=ids, client=TestClient(app))
+
+
+def office_post(env, screen, **body):
+    body.setdefault("submission_id", uuid.uuid4().hex)
+    body.setdefault("by", LEA)
+    return env.client.post(f"/b/{OFFICE_KEY}/{screen}", json=body)
+
+
+def register_line(env, article, statut, qty=1, user=ALICE_USER, handed_on=None, kind="Sortie"):
+    props = {"Détail": title(f"{article} ligne"), "Article": {"type": "relation", "relation": [{"id": env.ids[article]}]},
+             "Quantité": {"type": "number", "number": qty}, "Type": select(kind), "Statut": select(statut),
+             "Bénéficiaire": people([user] if user else [])}
+    if handed_on:
+        props["Remis le"] = {"type": "date", "date": {"start": handed_on}}
+    return env.fake.add(REGISTRE, props)
+
+
+def office_lines(env, **expected):
+    """Register lines whose properties match every expected value."""
+    return [i for i in env.fake.ids(REGISTRE)
+            if all(env.fake.value(i, name) == value for name, value in expected.items())]
+
+
+def test_the_office_form_has_its_own_key(office_env):
+    assert office_env.client.get(f"/b/{OFFICE_KEY}").status_code == 200
+    assert office_env.client.get(f"/b/{FORM_KEY}").status_code == 404          # the workers' key opens nothing here
+    closed = app_module.create_app(config=make_config(), client=FakeNotion(), send=lambda *a: None)
+    assert TestClient(closed).get(f"/b/{OFFICE_KEY}").status_code == 404      # no office key configured: closed
+
+
+def test_office_data_includes_used_articles_and_the_office(office_env):
+    response = office_env.client.get(f"/b/{OFFICE_KEY}/data")
+    data = response.json()
+    titles = [a["title"] for a in data["articles"]]
+    assert "T-shirt usé · M" in titles and "Ancien modèle" not in titles
+    assert [o["name"] for o in data["office"]] == ["Léa WURTZ", "Priscilla"]
+    assert {p["name"]: p["account"] for p in data["team"]} == {"Alice Martin": True, "Zoé Durand": False}
+    assert ALICE_USER not in response.text
+
+
+def test_the_office_people_can_differ_from_the_e_mail_recipients():
+    fake = FakeNotion()
+    ids = seed(fake)
+    app = app_module.create_app(config=make_config(office_key=OFFICE_KEY, office_emails=(PRISCILLA,)),
+                                client=fake, send=lambda *a: None, now=lambda: NOW)
+    env = SimpleNamespace(fake=fake, ids=ids, client=TestClient(app))
+    assert [o["name"] for o in env.client.get(f"/b/{OFFICE_KEY}/data").json()["office"]] == ["Priscilla"]
+    item = [{"article_id": ids["tshirt"], "qty": 1}]
+    assert office_post(env, "perte", by=LEA, items=item).status_code == 400     # Léa receives e-mails, no more
+    assert office_post(env, "perte", by=PRISCILLA, items=item).json()["ok"] is True
+
+
+def test_entries_need_someone_from_the_office(office_env):
+    response = office_post(office_env, "perte", by="alice@example.test",
+                           items=[{"article_id": office_env.ids["tshirt"], "qty": 1}])
+    assert response.status_code == 400 and "qui fait la saisie" in response.json()["error"]
+    assert office_env.fake.ids(REGISTRE) == []
+
+
+def test_a_delivery_adds_stock_and_readies_the_oldest_waiting_orders(office_env):
+    first = register_line(office_env, "tshirt", "À commander", qty=2)
+    second = register_line(office_env, "tshirt", "À commander", qty=1)
+    result = office_post(office_env, "livraison", items=[{"article_id": office_env.ids["tshirt"], "qty": 2}]).json()
+    assert result["ok"] is True
+    delivered = office_lines(office_env, Type="Entrée stock")
+    assert len(delivered) == 1 and office_env.fake.value(delivered[0], "Quantité") == 2
+    assert office_env.fake.value(delivered[0], "Source") == "Bureau"
+    assert office_env.fake.value(delivered[0], "Traité par") == [LEA_ID]
+    assert office_env.fake.value(first, "Statut") == "Prêt à récupérer"        # the oldest, 2 fit in 2
+    assert office_env.fake.value(second, "Statut") == "À commander"            # nothing left for it
+    assert any("Prêt à récupérer pour Alice Martin" in d for d in result["details"])
+
+
+def test_the_same_entry_sent_twice_is_written_once(office_env):
+    body = {"submission_id": "same-submission-123", "items": [{"article_id": office_env.ids["tshirt"], "qty": 3}]}
+    assert office_post(office_env, "livraison", **body).json()["ok"] is True
+    assert office_post(office_env, "livraison", **body).json()["ok"] is True   # double click or retry
+    assert len(office_lines(office_env, Type="Entrée stock")) == 1
+
+
+def test_handing_out_or_ordering_for_someone(office_env):
+    ids = office_env.ids
+    result = office_post(office_env, "remise", person_id=ids["alice"], motif="Perte", items=[
+        {"article_id": ids["tshirt"], "qty": 1, "statut": "Remis"},
+        {"article_id": ids["shoes"], "qty": 1, "statut": "À commander"},
+        {"article_id": ids["used"], "qty": 1, "statut": "Remis"},                # a used one, absent from the workers' form
+    ]).json()
+    assert result["ok"] is True
+    handed = office_lines(office_env, Statut="Remis")
+    assert len(handed) == 2 and all(office_env.fake.value(i, "Remis le") == "2026-09-29" for i in handed)
+    ordered = office_lines(office_env, Statut="À commander")
+    assert len(ordered) == 1 and office_env.fake.value(ordered[0], "Remis le") is None
+    for line_id in handed + ordered:
+        assert office_env.fake.value(line_id, "Bénéficiaire") == [ALICE_USER]
+        assert (office_env.fake.value(line_id, "Source"), office_env.fake.value(line_id, "Type")) == ("Bureau", "Sortie")
+        assert office_env.fake.value(line_id, "Motif") == "Perte"
+
+
+def test_a_start_inventory_keeps_its_date(office_env):
+    ids = office_env.ids
+    ok = office_post(office_env, "etat-des-lieux", person_id=ids["alice"], handed_on="2025-03-01",
+                     items=[{"article_id": ids["tshirt"], "qty": 2}])
+    assert ok.json()["ok"] is True
+    (line_id,) = office_lines(office_env, Source="État des lieux")
+    assert (office_env.fake.value(line_id, "Statut"), office_env.fake.value(line_id, "Remis le")) == ("Remis", "2025-03-01")
+    future = office_post(office_env, "etat-des-lieux", person_id=ids["alice"], handed_on="2026-12-01",
+                         items=[{"article_id": ids["tshirt"], "qty": 1}])
+    assert future.status_code == 400 and "futur" in future.json()["error"]
+
+
+def test_counting_writes_the_difference_and_unticks_a_compter(office_env):
+    ids = office_env.ids
+    result = office_post(office_env, "comptage", counts=[
+        {"article_id": ids["tshirt"], "counted": 3},    # Notion says 5: -2
+        {"article_id": ids["gloves"], "counted": 4},    # never counted (0): +4, and no longer "À compter"
+        {"article_id": ids["shoes"], "counted": 0},     # Notion says 0: nothing to write
+    ]).json()
+    assert result["ok"] is True
+    adjustments = {office_env.fake.value(i, "Article")[0]: office_env.fake.value(i, "Quantité")
+                   for i in office_lines(office_env, Type="Ajustement inventaire")}
+    assert adjustments == {ids["tshirt"]: -2, ids["gloves"]: 4}
+    assert office_env.fake.value(ids["gloves"], "À compter") is False
+    assert "1 article déjà juste." in result["details"]
+
+
+def test_a_loss_at_the_depot(office_env):
+    result = office_post(office_env, "perte", comment="carton mouillé",
+                         items=[{"article_id": office_env.ids["gloves"], "qty": 3}]).json()
+    assert result["ok"] is True
+    (line_id,) = office_lines(office_env, Type="Perte / casse")
+    assert office_env.fake.value(line_id, "Quantité") == 3
+    assert "carton mouillé" in office_env.fake.value(line_id, "Détail")
+
+
+def returns_of(*entries):
+    """(line id, quantity shown, {outcome: pieces}) -> the "returns" the page sends."""
+    return [{"line_id": line_id, "line_qty": qty, "parts": [{"outcome": o, "qty": n} for o, n in parts.items()]}
+            for line_id, qty, parts in entries]
+
+
+def test_a_departure_returns_everything_and_marks_the_person_left(office_env):
+    ids, value = office_env.ids, office_env.fake.value
+    worn = register_line(office_env, "tshirt", "Remis", handed_on="2026-01-10")
+    shoes = register_line(office_env, "shoes", "Remis", handed_on="2026-02-01")
+    held = office_env.client.get(f"/b/{OFFICE_KEY}/held/{ids['alice']}").json()
+    assert {item["line_id"]: item["used"] for item in held["items"]} == {worn: "T-shirt usé · M", shoes: None}
+    result = office_post(office_env, "retour", person_id=ids["alice"], set_left=True, returns=returns_of(
+        (worn, 1, {"Rendu usé": 1}), (shoes, 1, {"Rendu": 1}))).json()
+    assert result["ok"] is True and result["message"] == "Départ enregistré : Alice Martin."
+    assert (value(worn, "Statut"), value(worn, "Rendu le"), value(worn, "Traité par")) == ("Rendu usé", "2026-09-29", [LEA_ID])
+    assert value(shoes, "Statut") == "Rendu"
+    (back,) = office_lines(office_env, Type="Retour")                          # the worn t-shirt joins the used stock
+    assert (value(back, "Article"), value(back, "Quantité")) == ([ids["used"]], 1)
+    assert value(ids["alice"], "Statut") == "Parti"
+
+
+def test_pieces_of_one_line_can_end_differently(office_env):
+    ids, value = office_env.ids, office_env.fake.value
+    line_id = register_line(office_env, "tshirt", "Remis", qty=3, handed_on="2026-01-10")
+    office_env.fake.pages[line_id]["properties"].update({"Source": select("Formulaire web"), "Motif": select("Usure")})
+    result = office_post(office_env, "retour", person_id=ids["alice"], returns=returns_of(
+        (line_id, 3, {"Rendu usé": 1, "Perdu": 1}))).json()                    # the third one stays with Alice
+    assert result["ok"] is True and result["message"] == "Retour enregistré : Alice Martin."
+    assert (value(line_id, "Statut"), value(line_id, "Quantité")) == ("Remis", 1)
+    parts = office_lines(office_env, Statut="Rendu usé") + office_lines(office_env, Statut="Perdu")
+    assert len(parts) == 2
+    for part in parts:                                                         # same holder, request, dates
+        assert value(part, "Quantité") == 1 and value(part, "Bénéficiaire") == [ALICE_USER]
+        assert (value(part, "Remis le"), value(part, "Rendu le")) == ("2026-01-10", "2026-09-29")
+        assert (value(part, "Source"), value(part, "Motif"), value(part, "Type")) == ("Formulaire web", "Usure", "Sortie")
+    (back,) = office_lines(office_env, Type="Retour")
+    assert value(back, "Quantité") == 1
+    assert value(ids["alice"], "Statut") == "Actif"                            # a return is not a departure
+    assert any("1 encore chez la personne" in d for d in result["details"])
+    assert any("Remettre ou commander" in d for d in result["details"])        # something was lost: how to replace it
+
+
+def test_without_kept_pieces_the_line_takes_the_first_outcome(office_env):
+    value = office_env.fake.value
+    line_id = register_line(office_env, "tshirt", "Remis", qty=3)
+    office_post(office_env, "retour", person_id=office_env.ids["alice"],
+                returns=returns_of((line_id, 3, {"Hors d'usage": 1, "Rendu": 2})))
+    assert (value(line_id, "Statut"), value(line_id, "Quantité")) == ("Rendu", 2)   # Rendu comes first
+    (worn_out,) = office_lines(office_env, Statut="Hors d'usage")
+    assert value(worn_out, "Quantité") == 1
+    assert office_lines(office_env, Type="Retour") == []
+
+
+def test_a_line_changed_since_the_page_opened_is_left_alone(office_env):
+    ids, value = office_env.ids, office_env.fake.value
+    line_id = register_line(office_env, "tshirt", "Remis", qty=2)
+    stale = office_post(office_env, "retour", person_id=ids["alice"],
+                        returns=returns_of((line_id, 3, {"Rendu": 3}))).json()   # the page still showed 3
+    assert stale["ok"] is True and value(line_id, "Statut") == "Remis"
+    assert any("a changé entre-temps" in d for d in stale["details"])
+    too_many = office_post(office_env, "retour", person_id=ids["alice"],
+                           returns=returns_of((line_id, 2, {"Rendu": 2, "Perdu": 1})))
+    assert too_many.status_code == 400 and "plus de pièces" in too_many.json()["error"]
+    nothing = office_post(office_env, "retour", person_id=ids["alice"])          # no article and no departure
+    assert nothing.status_code == 400
+    assert office_env.fake.ids(REGISTRE) == [line_id] and value(line_id, "Quantité") == 2
+
+
+def test_a_failed_return_leaves_nothing_behind_and_is_written_once_on_retry(office_env):
+    ids, fake = office_env.ids, office_env.fake
+    line_id = register_line(office_env, "tshirt", "Remis", qty=2)
+    body = dict(submission_id="retour-0001", person_id=ids["alice"],
+                returns=returns_of((line_id, 2, {"Rendu usé": 1, "Hors d'usage": 1})))
+    fake.fail = lambda kind, target: kind == "update" and target == line_id
+    assert office_post(office_env, "retour", **body).status_code == 502
+    assert office_lines(office_env, Type="Retour") == [] and office_lines(office_env, Statut="Hors d'usage") == []
+    fake.fail = None
+    assert office_post(office_env, "retour", **body).json()["ok"] is True     # the same entry, sent again
+    assert len(office_lines(office_env, Type="Retour")) == 1 and len(office_lines(office_env, Statut="Hors d'usage")) == 1
+    body["submission_id"] = "retour-0002"                                     # an old page sends it once more
+    again = office_post(office_env, "retour", **body).json()
+    assert again["message"] == "Rien de plus à enregistrer."
+    assert len(office_lines(office_env, Type="Retour")) == 1
+
+
+def test_someone_without_a_notion_account(office_env):
+    ids, value = office_env.ids, office_env.fake.value
+    office_post(office_env, "remise", person_id=ids["zoe"],
+                items=[{"article_id": ids["tshirt"], "qty": 1, "statut": "Remis"}])
+    (line_id,) = office_lines(office_env, Statut="Remis")
+    assert value(line_id, "Détail") == "T-shirt noir · M · pour Zoé Durand"   # the only trace of who has it
+    assert not value(line_id, "Bénéficiaire")                                # left empty
+    left = office_post(office_env, "retour", person_id=ids["zoe"], set_left=True).json()
+    assert left["ok"] is True and value(ids["zoe"], "Statut") == "Parti"
+
+
+def test_a_used_article_is_never_ordered(office_env):
+    ids = office_env.ids
+    response = office_post(office_env, "remise", person_id=ids["alice"],
+                           items=[{"article_id": ids["used"], "qty": 1, "statut": "À commander"}])
+    assert response.status_code == 400 and "usé" in response.json()["error"]
+    assert office_env.fake.ids(REGISTRE) == []

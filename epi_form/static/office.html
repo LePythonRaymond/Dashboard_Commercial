@@ -1,0 +1,552 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Bureau EPI</title>
+<style>
+  :root { --bg: #f6f5f1; --card: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e4e2dc;
+          --accent: #2f6b4f; --accent-soft: #e3efe8; --danger: #b42318; --warn: #b54708; --radius: 12px; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141413; --card: #1f1f1d; --text: #efeee9; --muted: #a3a29c; --line: #34332f;
+            --accent: #5fae86; --accent-soft: #23372c; --danger: #f97066; --warn: #fdb022; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 16px 16px 120px; }
+  h1 { font-size: 22px; margin: 8px 0 0; }
+  h2 { font-size: 20px; margin: 4px 0; }
+  .sub { color: var(--muted); margin: 0 0 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 12px; }
+  label.field { display: block; font-weight: 600; margin-bottom: 6px; }
+  select, textarea, input[type=text], input[type=date], input[type=search], input[type=number] {
+    width: 100%; font: inherit; color: var(--text); background: var(--card);
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .tile { text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+          padding: 14px; cursor: pointer; font: inherit; color: var(--text); display: flex; flex-direction: column; gap: 4px; }
+  .tile .icon { font-size: 26px; }
+  .tile span:last-child { color: var(--muted); font-size: 14px; }
+  .back { background: none; border: 0; color: var(--accent); font: inherit; padding: 4px 0; cursor: pointer; }
+  details { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 8px; overflow: hidden; }
+  summary { list-style: none; cursor: pointer; padding: 13px 16px; display: flex; justify-content: space-between; font-weight: 600; }
+  summary::-webkit-details-marker { display: none; }
+  summary .hint { color: var(--muted); font-weight: 400; font-size: 14px; }
+  .badge { background: var(--accent); color: #fff; border-radius: 999px; padding: 1px 9px; font-size: 13px; margin-left: 8px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 16px; border-top: 1px solid var(--line); }
+  .row.selected { background: var(--accent-soft); }
+  .name { flex: 1; min-width: 0; }
+  .facts { display: block; color: var(--muted); font-size: 13px; }
+  .tag { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 0 6px; margin-left: 6px; }
+  .tag.used { color: var(--warn); border-color: var(--warn); }
+  .stepper { display: flex; align-items: center; gap: 6px; }
+  .stepper button { width: 42px; height: 42px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg);
+                    color: var(--text); font-size: 22px; line-height: 1; cursor: pointer; }
+  .stepper button:disabled { opacity: .35; cursor: default; }
+  .qty { min-width: 30px; text-align: center; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .choice { display: flex; gap: 6px; padding: 0 16px 10px; }
+  .choice button { flex: 1; border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 8px;
+                   padding: 8px; font: inherit; font-size: 14px; cursor: pointer; }
+  .choice button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .count-row input { width: 90px; text-align: center; }
+  .diff { min-width: 48px; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .diff.plus { color: var(--accent); } .diff.minus { color: var(--danger); }
+  .check { display: flex; gap: 10px; align-items: flex-start; margin: 4px 0; }
+  .check input { width: 20px; height: 20px; margin-top: 2px; }
+  .note { font-size: 14px; color: var(--warn); margin: 6px 0 0; }
+  .card.flush { padding: 0; overflow: hidden; }
+  .card.flush > .row:first-child { border-top: 0; }
+  .flush > .check, .flush > p { padding: 12px 16px; margin: 0; }
+  .ret { border-top: 1px solid var(--line); }
+  .ret .row { border-top: 0; }
+  .ret .note { padding: 0 16px 10px; margin: 0; }
+  .pick { width: 9.5em; flex-shrink: 0; }
+  .link { background: none; border: 0; color: var(--accent); font: inherit; font-size: 14px; padding: 0 16px 10px; cursor: pointer; }
+  .split { margin: 0 16px 12px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+  .split-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 3px 0; }
+  .split-row.keep { color: var(--muted); border-top: 1px dashed var(--line); margin-top: 4px; padding-top: 8px; }
+  .legend { margin: 0; padding: 4px 16px 12px; list-style: none; font-size: 14px; }
+  .legend li { display: grid; grid-template-columns: 7.2em 1fr; gap: 8px; padding: 2px 0; }
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; background: var(--card); border-top: 1px solid var(--line);
+         padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+  .bar-inner { max-width: 680px; margin: 0 auto; display: flex; gap: 12px; align-items: center; justify-content: space-between; }
+  .send { background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 14px 18px; font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; }
+  #count { font-size: 14px; color: var(--muted); }
+  .send:disabled { opacity: .45; cursor: default; }
+  .error { color: var(--danger); margin: 8px 0 0; }
+  #done ul { padding-left: 20px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Bureau EPI</h1>
+  <p class="sub">Tout ce que le formulaire jardinier et Notion ne font pas</p>
+
+  <div id="loading" class="card">Chargement…</div>
+  <div id="load-error" class="card error" hidden>La page n'a pas pu charger les données. Réessaie dans un instant.</div>
+
+  <div id="who" class="card" hidden>
+    <label class="field" for="by">Qui fait la saisie ?</label>
+    <select id="by"><option value="">Choisis ton nom</option></select>
+  </div>
+
+  <section id="home" hidden>
+    <div class="tiles" id="tiles"></div>
+  </section>
+
+  <section id="screen" hidden>
+    <button class="back" id="back" type="button">← Retour aux situations</button>
+    <h2 id="screen-title"></h2>
+    <p class="sub" id="screen-help"></p>
+    <div id="screen-body"></div>
+    <p id="error" class="error" hidden></p>
+  </section>
+
+  <section id="done" class="card" hidden>
+    <h2 id="done-message"></h2>
+    <ul id="done-details"></ul>
+    <button class="send" id="again" type="button">Nouvelle saisie</button>
+  </section>
+</main>
+
+<div class="bar" id="bar" hidden>
+  <div class="bar-inner">
+    <span id="count"></span>
+    <button class="send" id="send" type="button" disabled></button>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var base = location.pathname.replace(/\/+$/, "");
+  var $ = function (id) { return document.getElementById(id); };
+  var MODES = [
+    { key: "livraison", icon: "📦", title: "Livraison", tile: "Le fournisseur a livré",
+      help: "Mets les quantités reçues, toutes tailles confondues. Le stock monte, et les commandes en attente de ces articles passent en « Prêt à récupérer », les plus anciennes d'abord.",
+      send: "Enregistrer la livraison", used: false, person: false },
+    { key: "remise", icon: "🤝", title: "Remettre ou commander", tile: "Pour quelqu'un, de vive voix",
+      help: "Pour chaque article : « Remis » si la personne l'a en main maintenant (daté du jour), « À commander » s'il faut le commander. Les vêtements usés sont proposés aussi.",
+      send: "Enregistrer", used: true, person: true },
+    { key: "etat-des-lieux", icon: "🧾", title: "État des lieux", tile: "Ce qu'une personne a déjà",
+      help: "Ce que la personne avait avant le système. La date de remise compte : l'usure part de là (le 1er du mois si tu ne sais pas mieux).",
+      send: "Enregistrer", used: true, person: true },
+    { key: "comptage", icon: "🔍", title: "Comptage du stock", tile: "Compter ce qu'il y a",
+      help: "Tape ce que tu comptes vraiment. L'écart avec Notion est enregistré tout seul, et « À compter » est décoché. Laisse vide ce que tu n'as pas compté.",
+      send: "Enregistrer le comptage", used: true, person: false },
+    { key: "perte", icon: "💔", title: "Perte ou casse au dépôt", tile: "Abîmé ou perdu au dépôt",
+      help: "Pour un article perdu ou abîmé au dépôt, sans personne concernée. Si une personne l'avait, utilise « Retour ou départ » (Perdu ou Hors d'usage).",
+      send: "Enregistrer la perte", used: true, person: false },
+    { key: "retour", icon: "↩️", title: "Retour ou départ", tile: "Rendu, perdu, fin de contrat",
+      help: "Choisis la personne : ce qu'elle a en main s'affiche. Pour chaque article, choisis ce qu'il devient (« Garde » ne change rien). Si les pièces d'une même ligne finissent différemment, touche « Répartir ».",
+      send: "Enregistrer le retour", used: true, person: true }
+  ];
+  var KEEP = "Garde";
+  var OUTCOMES = ["Rendu", "Rendu usé", "Hors d'usage", "Perdu"];
+  var LEGEND = [[KEEP, "la personne le garde, rien ne change"], ["Rendu", "comme neuf : retour au stock neuf"],
+                ["Rendu usé", "rejoint le stock usé, pour être ressorti"], ["Hors d'usage", "jeté"],
+                ["Perdu", "la personne l'a perdu"]];
+  var state = { data: null, mode: null, sid: null, person: "", qty: {}, statut: {}, chosen: {}, counts: {},
+                parts: {}, touched: {}, split: {}, held: null, heldWarning: "", family: "", query: "", motif: "",
+                comment: "", date: "", ready: true, setLeft: false, sending: false, open: {} };
+
+  function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function recall(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function uid() {
+    try { return crypto.randomUUID(); } catch (e) { return Date.now().toString(36) + Math.random().toString(36).slice(2, 12); }
+  }
+  // French spacing: a non-breaking space inside « » and before : ; ? ! so a line never starts with them
+  function fr(text) {
+    return String(text).replace(/« /g, "«\u00a0").replace(/ »/g, "\u00a0»").replace(/ ([:;?!])/g, "\u00a0$1");
+  }
+  function el(tag, props, children) {
+    var node = document.createElement(tag);
+    Object.keys(props || {}).forEach(function (k) {
+      if (k === "text") node.textContent = fr(props[k]);
+      else if (k === "on") Object.keys(props.on).forEach(function (ev) { node.addEventListener(ev, props.on[ev]); });
+      else if (k === "className") node.className = props[k];
+      else node.setAttribute(k, props[k]);
+    });
+    (children || []).forEach(function (c) { if (c) node.appendChild(c); });
+    return node;
+  }
+  function mode() { return MODES.filter(function (m) { return m.key === state.mode; })[0]; }
+  function articles() {
+    return state.data.articles.filter(function (a) { return mode().used || a.etat !== "Usé"; });
+  }
+  function byId(id) { return state.data.articles.filter(function (a) { return a.id === id; })[0]; }
+  function familyOrder(list) {
+    var seen = []; list.forEach(function (a) { if (seen.indexOf(a.famille) < 0) seen.push(a.famille); }); return seen;
+  }
+  function stockText(a) {
+    var s = a.stock === null ? "stock à compter" : "stock " + a.stock;
+    if (state.mode === "livraison" && a.waiting) s += " · " + a.waiting + " en attente de livraison";
+    return s;
+  }
+  function selectedIds() { return Object.keys(state.qty).filter(function (id) { return state.qty[id] > 0; }); }
+
+  // ---------------------------------------------------------------- pickers
+  function renderPicker(box) {
+    var search = el("input", { type: "search", placeholder: "Chercher un article (ex. gants 9)", value: state.query });
+    search.addEventListener("input", function () { state.query = search.value; renderList(); });
+    var list = el("div", {});
+    box.appendChild(el("div", { className: "card" }, [search]));
+    box.appendChild(list);
+    function renderList() {
+      list.innerHTML = "";
+      var words = state.query.toLowerCase().split(/\s+/).filter(Boolean);
+      var items = articles().filter(function (a) {
+        var hay = (a.title + " " + a.famille).toLowerCase();
+        return words.every(function (w) { return hay.indexOf(w) >= 0; });
+      });
+      familyOrder(items).forEach(function (family) {
+        var rows = items.filter(function (a) { return a.famille === family; });
+        var chosen = rows.reduce(function (s, a) { return s + (state.qty[a.id] || 0); }, 0);
+        var details = el("details", {});
+        details.open = words.length > 0 || !!state.open[family];
+        details.addEventListener("toggle", function () { state.open[family] = details.open; });
+        var left = el("span", { text: family });
+        if (chosen) left.appendChild(el("span", { className: "badge", text: String(chosen) }));
+        details.appendChild(el("summary", {}, [left, el("span", { className: "hint", text: rows.length + " choix" })]));
+        rows.forEach(function (a) {
+          details.appendChild(itemRow(a));
+          if (state.mode === "remise" && state.qty[a.id] && a.etat !== "Usé") details.appendChild(choiceRow(a));
+        });
+        list.appendChild(details);
+      });
+      if (!items.length) list.appendChild(el("p", { className: "sub", text: "Aucun article ne correspond." }));
+    }
+    function itemRow(a) {
+      var q = state.qty[a.id] || 0;
+      var name = el("span", { className: "name", text: a.title });
+      if (a.etat === "Usé") name.appendChild(el("span", { className: "tag used", text: "usé" }));
+      if (a.mode === "Prêt") name.appendChild(el("span", { className: "tag", text: "prêt" }));
+      name.appendChild(el("span", { className: "facts", text: stockText(a) }));
+      var minus = el("button", { type: "button", text: "−", "aria-label": "Retirer un " + a.title,
+                                  on: { click: function () { setQty(a, q - 1); } } });
+      minus.disabled = q === 0;
+      var plus = el("button", { type: "button", text: "+", "aria-label": "Ajouter un " + a.title,
+                                 on: { click: function () { setQty(a, q + 1); } } });
+      return el("div", { className: "row" + (q ? " selected" : "") },
+                [name, el("span", { className: "stepper" }, [minus, el("span", { className: "qty", text: String(q) }), plus])]);
+    }
+    function choiceRow(a) {
+      var current = state.statut[a.id] || "Remis";
+      var box = el("div", {}, [el("div", { className: "choice" }, ["Remis", "À commander"].map(function (s) {
+        return el("button", { type: "button", className: s === current ? "on" : "", text: s,
+                               on: { click: function () { state.statut[a.id] = s; state.chosen[a.id] = true; renderList(); } } });
+      }))]);
+      if (current === "Remis" && a.stock !== null && a.stock < state.qty[a.id])
+        box.appendChild(el("p", { className: "note", style: "padding:0 16px 10px;margin:0",
+                                  text: "Le stock (" + a.stock + ") ne suffit pas : vérifie l'étagère, ou choisis « À commander »." }));
+      return box;
+    }
+    function setQty(a, value) {
+      var q = Math.max(0, Math.min(500, value));
+      if (q === 0) { delete state.qty[a.id]; delete state.statut[a.id]; delete state.chosen[a.id]; }
+      else {
+        state.qty[a.id] = q;
+        if (state.mode === "remise" && !state.chosen[a.id])   // until a choice is made, it follows the stock
+          state.statut[a.id] = (a.etat !== "Usé" && a.stock !== null && a.stock < q) ? "À commander" : "Remis";
+      }
+      renderList(); renderBar();
+    }
+    renderList();
+  }
+
+  function renderCounting(box) {
+    var fams = familyOrder(articles());
+    if (!state.family) state.family = fams[0];
+    var pickFamily = el("select", {}, fams.map(function (f) { return el("option", { value: f, text: f }); }));
+    pickFamily.value = state.family;
+    pickFamily.addEventListener("change", function () { state.family = pickFamily.value; renderScreen(); });
+    box.appendChild(el("div", { className: "card" }, [el("label", { className: "field", text: "Famille à compter" }), pickFamily]));
+    var card = el("div", { className: "card flush" });
+    articles().filter(function (a) { return a.famille === state.family; }).forEach(function (a) {
+      var input = el("input", { type: "number", min: "0", inputmode: "numeric", placeholder: "compté",
+                                "aria-label": "Quantité comptée : " + a.title });
+      if (state.counts[a.id] !== undefined) input.value = state.counts[a.id];
+      var diff = el("span", { className: "diff" });
+      function show() {
+        var v = input.value === "" ? null : Math.max(0, parseInt(input.value, 10) || 0);
+        if (v === null) { delete state.counts[a.id]; diff.textContent = ""; diff.className = "diff"; }
+        else {
+          state.counts[a.id] = v;
+          var d = v - (a.stock_raw || 0);
+          diff.textContent = d === 0 ? "juste" : (d > 0 ? "+" + d : String(d));
+          diff.className = "diff" + (d > 0 ? " plus" : d < 0 ? " minus" : "");
+        }
+        renderBar();
+      }
+      input.addEventListener("input", show);
+      var name = el("span", { className: "name", text: a.title });
+      if (a.etat === "Usé") name.appendChild(el("span", { className: "tag used", text: "usé" }));
+      name.appendChild(el("span", { className: "facts", text: a.stock === null
+        ? "jamais compté" + (a.stock_raw ? " (Notion dit " + a.stock_raw + ")" : "") : "Notion dit " + a.stock }));
+      card.appendChild(el("div", { className: "row count-row" }, [name, input, diff]));
+      show();
+    });
+    box.appendChild(card);
+  }
+
+  function partsOf(item) { return state.parts[item.line_id] || (state.parts[item.line_id] = {}); }
+  function given(item) { var p = partsOf(item); return OUTCOMES.reduce(function (s, o) { return s + (p[o] || 0); }, 0); }
+  function wholeValue(item) {   // one outcome for the whole line, Garde, or "split" when the pieces differ
+    var p = partsOf(item), on = OUTCOMES.filter(function (o) { return p[o] > 0; });
+    if (!on.length) return KEEP;
+    return on.length === 1 && p[on[0]] === item.qty ? on[0] : "split";
+  }
+  function setWhole(item, outcome) {
+    var p = {}; if (outcome !== KEEP) p[outcome] = item.qty; state.parts[item.line_id] = p;
+  }
+  function leavingDefault(item) {   // a departure pre-fills: loans come back, clothes go to the used stock
+    if (item.mode === "Prêt") return "Rendu";
+    return item.used ? "Rendu usé" : KEEP;
+  }
+  function redraw() { var y = window.scrollY; renderScreen(); window.scrollTo(0, y); }
+
+  function renderReturn(box) {
+    if (!state.person) return;
+    var card = el("div", { className: "card flush" });
+    box.appendChild(card);
+    if (state.held === null) { card.appendChild(el("p", { text: "Chargement de ce qu'a la personne…" })); return; }
+    var person = state.data.team.filter(function (p) { return p.id === state.person; })[0];
+    var left = el("input", { type: "checkbox" });
+    left.checked = state.setLeft;
+    left.addEventListener("change", function () {
+      state.setLeft = left.checked;
+      state.held.forEach(function (item) {
+        if (!state.touched[item.line_id]) setWhole(item, state.setLeft ? leavingDefault(item) : KEEP);
+      });
+      redraw();
+    });
+    card.appendChild(el("label", { className: "check" }, [left, el("span", {
+      text: "C'est un départ : " + person.name + " passe en « Parti » (son nom disparaît des formulaires). "
+          + "Pré-rempli : les prêts en « Rendu », ce qui a un stock usé en « Rendu usé », le reste en « Garde »." })]));
+    if (state.heldWarning) card.appendChild(el("p", { className: "note", text: state.heldWarning }));
+    if (!state.held.length) card.appendChild(el("p", { className: "sub", text: "Aucun article enregistré chez cette personne." }));
+    state.held.forEach(function (item) { card.appendChild(returnRow(item)); });
+    if (state.held.length) {
+      var legend = el("details", { className: "card flush" });
+      legend.appendChild(el("summary", { text: "Que veut dire chaque choix ?" }));
+      legend.appendChild(el("ul", { className: "legend" }, LEGEND.map(function (x) {
+        return el("li", {}, [el("b", { text: x[0] }), document.createTextNode(x[1])]);
+      })));
+      box.appendChild(legend);
+    }
+  }
+
+  function returnRow(item) {
+    var wrap = el("div", { className: "ret" }), value = wholeValue(item);
+    var choices = [KEEP].concat(OUTCOMES).concat(value === "split" ? ["split"] : []);
+    var pick = el("select", { "aria-label": "Devenir : " + item.title }, choices.map(function (o) {
+      return el("option", { value: o, text: o === "split" ? "Réparti" : o });
+    }));
+    pick.value = value;
+    pick.addEventListener("change", function () {
+      if (pick.value === "split") return;
+      state.touched[item.line_id] = true; setWhole(item, pick.value); redraw();
+    });
+    var since = item.handed_on ? " · remis le " + item.handed_on.slice(0, 10).split("-").reverse().join("/") : "";
+    var name = el("span", { className: "name", text: item.title + (item.qty > 1 ? " × " + item.qty : "") });
+    name.appendChild(el("span", { className: "facts", text: (item.mode === "Prêt" ? "prêt" : "dotation") + since }));
+    wrap.appendChild(el("div", { className: "row" }, [name, el("span", { className: "pick" }, [pick])]));
+    if (item.qty > 1) {
+      var open = !!state.split[item.line_id];
+      wrap.appendChild(el("button", { type: "button", className: "link",
+        text: open ? "Fermer la répartition" : "Répartir les " + item.qty + " pièces",
+        on: { click: function () { state.split[item.line_id] = !open; redraw(); } } }));
+      if (open) wrap.appendChild(splitEditor(item));
+    }
+    if ((partsOf(item)["Rendu usé"] || 0) > 0 && !item.used)
+      wrap.appendChild(el("p", { className: "note", text: "Pas d'article « usé » équivalent : le stock usé ne bougera pas." }));
+    return wrap;
+  }
+
+  function splitEditor(item) {
+    var p = partsOf(item), total = given(item), box = el("div", { className: "split" });
+    function change(o, v) {
+      state.touched[item.line_id] = true;
+      if (v > 0) p[o] = v; else delete p[o];
+      redraw();
+    }
+    OUTCOMES.forEach(function (o) {
+      var n = p[o] || 0;
+      var minus = el("button", { type: "button", text: "−", "aria-label": o + " : un de moins",
+                                  on: { click: function () { change(o, n - 1); } } });
+      minus.disabled = n === 0;
+      var plus = el("button", { type: "button", text: "+", "aria-label": o + " : un de plus",
+                                 on: { click: function () { change(o, n + 1); } } });
+      plus.disabled = total >= item.qty;
+      box.appendChild(el("div", { className: "split-row" }, [el("span", { text: o }),
+        el("span", { className: "stepper" }, [minus, el("span", { className: "qty", text: String(n) }), plus])]));
+    });
+    box.appendChild(el("div", { className: "split-row keep" }, [el("span", { text: "Garde (le reste)" }),
+      el("span", { className: "qty", text: String(item.qty - total) })]));
+    return box;
+  }
+
+  // ---------------------------------------------------------------- screen
+  function renderScreen() {
+    var m = mode(), body = $("screen-body");
+    $("screen-title").textContent = m.icon + " " + m.title;
+    $("screen-help").textContent = fr(m.help);
+    body.innerHTML = "";
+    if (m.person) {
+      var who = el("select", {}, [el("option", { value: "", text: "Choisis la personne" })].concat(
+        state.data.team.map(function (p) { return el("option", { value: p.id, text: p.name + (p.account ? "" : " (sans compte Notion)") }); })));
+      who.value = state.person;
+      who.addEventListener("change", function () {
+        state.person = who.value; state.held = null; state.heldWarning = "";
+        state.parts = {}; state.touched = {}; state.split = {};
+        if (state.mode === "retour" && state.person) loadHeld();
+        renderScreen();
+      });
+      body.appendChild(el("div", { className: "card" }, [el("label", { className: "field", text: "Pour qui ?" }), who]));
+    }
+    if (state.mode === "etat-des-lieux") {
+      var day = el("input", { type: "date", value: state.date, max: state.data.today });
+      day.addEventListener("change", function () { state.date = day.value; renderBar(); });
+      body.appendChild(el("div", { className: "card" }, [el("label", { className: "field", text: "Remis le (date approximative)" }), day]));
+    }
+    if (state.mode === "comptage") renderCounting(body);
+    else if (state.mode === "retour") renderReturn(body);
+    else renderPicker(body);
+    if (state.mode === "livraison") {
+      var ready = el("input", { type: "checkbox" }); ready.checked = state.ready;
+      ready.addEventListener("change", function () { state.ready = ready.checked; });
+      body.appendChild(el("div", { className: "card" }, [el("label", { className: "check" },
+        [ready, el("span", { text: "Passer les commandes en attente de ces articles en « Prêt à récupérer »." })])]));
+    }
+    if (state.mode === "remise") {
+      var motif = el("select", {}, [el("option", { value: "", text: "Motif (facultatif)" })].concat(
+        state.data.motifs.map(function (x) { return el("option", { value: x, text: x }); })));
+      motif.value = state.motif;
+      motif.addEventListener("change", function () { state.motif = motif.value; });
+      body.appendChild(el("div", { className: "card" }, [motif]));
+    }
+    if (state.mode === "perte") {
+      var comment = el("input", { type: "text", maxlength: "200", placeholder: "Ce qui s'est passé (facultatif)", value: state.comment });
+      comment.addEventListener("input", function () { state.comment = comment.value; });
+      body.appendChild(el("div", { className: "card" }, [comment]));
+    }
+    renderBar();
+  }
+
+  function loadHeld() {
+    var person = state.person;
+    fetch(base + "/held/" + encodeURIComponent(person)).then(function (r) { return r.json(); }).then(function (res) {
+      if (state.person !== person) return;
+      state.held = res.items || []; state.heldWarning = res.warning || (res.ok ? "" : res.error || "");
+      state.held.forEach(function (item) { setWhole(item, state.setLeft ? leavingDefault(item) : KEEP); });
+      renderScreen();
+    }).catch(function () { state.held = []; state.heldWarning = "Impossible de charger les articles de la personne."; renderScreen(); });
+  }
+
+  function amount() {
+    if (state.mode === "comptage") return Object.keys(state.counts).length;
+    if (state.mode === "retour") return (state.held || []).reduce(function (s, item) { return s + given(item); }, 0);
+    return selectedIds().reduce(function (s, id) { return s + state.qty[id]; }, 0);
+  }
+  function renderBar() {
+    if (!state.mode) return;
+    var n = amount(), m = mode();
+    var unit = state.mode === "comptage" ? " compté" + (n > 1 ? "s" : "")
+             : state.mode === "retour" ? " pièce" + (n > 1 ? "s" : "")
+             : " article" + (n > 1 ? "s" : "");
+    $("count").textContent = state.mode === "retour" && !n ? (state.setLeft ? "Départ seul" : "Rien de choisi") : n + unit;
+    $("send").textContent = state.sending ? "Envoi…" : state.mode === "retour" && state.setLeft ? "Enregistrer le départ" : m.send;
+    var ok = !state.sending && (!m.person || state.person)
+             && (state.mode === "retour" ? state.held !== null && (n > 0 || state.setLeft) : n > 0)
+             && (state.mode !== "etat-des-lieux" || state.date);
+    $("send").disabled = !ok;
+  }
+
+  function payload() {
+    var p = { submission_id: state.sid, by: $("by").value };
+    var items = selectedIds().map(function (id) { return { article_id: id, qty: state.qty[id] }; });
+    if (state.mode === "livraison") { p.items = items; p.ready_orders = state.ready; }
+    if (state.mode === "remise") {
+      p.person_id = state.person; p.motif = state.motif || null;
+      p.items = items.map(function (i) { i.statut = state.statut[i.article_id] || "Remis"; return i; });
+    }
+    if (state.mode === "etat-des-lieux") { p.person_id = state.person; p.items = items; p.handed_on = state.date; }
+    if (state.mode === "comptage") p.counts = Object.keys(state.counts).map(function (id) { return { article_id: id, counted: state.counts[id] }; });
+    if (state.mode === "perte") { p.items = items; p.comment = state.comment; }
+    if (state.mode === "retour") {
+      p.person_id = state.person; p.set_left = state.setLeft;
+      p.returns = (state.held || []).filter(function (h) { return given(h) > 0; }).map(function (h) {
+        var parts = partsOf(h);
+        return { line_id: h.line_id, line_qty: h.qty, parts: OUTCOMES.filter(function (o) { return parts[o] > 0; })
+                 .map(function (o) { return { outcome: o, qty: parts[o] }; }) };
+      });
+    }
+    return p;
+  }
+
+  function showError(msg) { $("error").textContent = fr(msg); $("error").hidden = !msg; }
+
+  function send() {
+    if (!$("by").value) { showError("Choisis d'abord qui fait la saisie, en haut de la page."); window.scrollTo(0, 0); return; }
+    state.sending = true; showError(""); renderBar();
+    fetch(base + "/" + state.mode, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload()) })
+      .then(function (r) { return r.json().catch(function () { return { ok: false }; }).then(function (b) {
+        if (!r.ok || !b.ok) throw new Error(b.error || "L'enregistrement a échoué. Réessaie.");
+        return b; }); })
+      .then(function (b) {
+        $("done-message").textContent = fr(b.message);
+        var ul = $("done-details"); ul.innerHTML = "";
+        (b.details || []).forEach(function (d) { ul.appendChild(el("li", { text: d })); });
+        $("screen").hidden = true; $("bar").hidden = true; $("done").hidden = false; window.scrollTo(0, 0);
+        setTimeout(reloadData, 3000);   // the stock moved: the next entry shows the new numbers
+      })
+      .catch(function (e) { showError(e.message); })
+      .then(function () { state.sending = false; renderBar(); });
+  }
+
+  function reloadData() {
+    fetch(base + "/data", { headers: { Accept: "application/json" } })
+      .then(function (r) { if (r.ok) return r.json(); })
+      .then(function (data) { if (data) { state.data.articles = data.articles; state.data.team = data.team; } })
+      .catch(function () {});
+  }
+
+  function open(key) {
+    state.mode = key; state.sid = uid(); state.qty = {}; state.statut = {}; state.chosen = {}; state.counts = {};
+    state.parts = {}; state.touched = {}; state.split = {};
+    state.person = ""; state.held = null; state.heldWarning = ""; state.query = ""; state.family = "";
+    state.motif = ""; state.comment = ""; state.date = state.data.first_of_month; state.ready = true; state.setLeft = false;
+    state.open = {};
+    $("home").hidden = true; $("done").hidden = true; $("screen").hidden = false; $("bar").hidden = false; showError("");
+    renderScreen(); window.scrollTo(0, 0);
+  }
+  function home() {
+    state.mode = null; $("screen").hidden = true; $("done").hidden = true; $("bar").hidden = true; $("home").hidden = false;
+  }
+
+  fetch(base + "/data", { headers: { Accept: "application/json" } })
+    .then(function (r) { if (!r.ok) throw new Error(); return r.json(); })
+    .then(function (data) {
+      state.data = data;
+      var by = $("by");
+      data.office.forEach(function (o) { by.appendChild(el("option", { value: o.email, text: o.name })); });
+      var saved = recall("epi-office");
+      if (saved && data.office.some(function (o) { return o.email === saved; })) by.value = saved;
+      by.addEventListener("change", function () { store("epi-office", by.value); showError(""); });
+      MODES.forEach(function (m) {
+        $("tiles").appendChild(el("button", { className: "tile", type: "button", on: { click: function () { open(m.key); } } },
+          [el("span", { className: "icon", text: m.icon }), el("b", { text: m.title }), el("span", { text: m.tile })]));
+      });
+      $("back").addEventListener("click", home);
+      $("again").addEventListener("click", function () { open(state.mode); });
+      $("send").addEventListener("click", send);
+      $("loading").hidden = true; $("who").hidden = false; $("home").hidden = false;
+    })
+    .catch(function () { $("loading").hidden = true; $("load-error").hidden = false; });
+})();
+</script>
+</body>
+</html>
