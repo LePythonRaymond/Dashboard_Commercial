@@ -50,6 +50,8 @@
   .choice button { flex: 1; border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 8px;
                    padding: 8px; font: inherit; font-size: 14px; cursor: pointer; }
   .choice button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .choice button:disabled { cursor: default; }
+  .choice .why { flex: 1; align-self: center; font-size: 13px; line-height: 1.35; color: var(--muted); }
   .count-row input { width: 90px; text-align: center; }
   .diff { min-width: 48px; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
   .diff.plus { color: var(--accent); } .diff.minus { color: var(--danger); }
@@ -213,7 +215,7 @@
         details.appendChild(el("summary", {}, [left, el("span", { className: "hint", text: rows.length + " choix" })]));
         rows.forEach(function (a) {
           details.appendChild(itemRow(a));
-          if (state.mode === "remise" && state.qty[a.id] && a.etat !== "Usé") details.appendChild(choiceRow(a));
+          if (state.mode === "remise" && state.qty[a.id]) details.appendChild(a.etat === "Usé" ? usedRow(a) : choiceRow(a));
         });
         list.appendChild(details);
       });
@@ -242,6 +244,16 @@
       if (current === "Remis" && a.stock !== null && a.stock < state.qty[a.id])
         box.appendChild(el("p", { className: "note", style: "padding:0 16px 10px;margin:0",
                                   text: "Le stock (" + a.stock + ") ne suffit pas : vérifie l'étagère, ou choisis « À commander »." }));
+      return box;
+    }
+    function usedRow(a) {   // a used article is handed out from the shelf, never ordered: no choice, said plainly
+      var box = el("div", {}, [el("div", { className: "choice" }, [
+        el("button", { type: "button", className: "on", text: "Remis", disabled: "disabled" }),
+        el("span", { className: "why", text: "Un article usé ne se commande pas. S'il manque, prends le neuf." })
+      ])]);
+      if (a.stock !== null && a.stock < state.qty[a.id])
+        box.appendChild(el("p", { className: "note", style: "padding:0 16px 10px;margin:0",
+                                  text: "Le stock usé (" + a.stock + ") ne suffit pas : vérifie l'étagère, ou remets le neuf à la place." }));
       return box;
     }
     function setQty(a, value) {
