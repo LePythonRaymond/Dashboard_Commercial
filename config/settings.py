@@ -131,6 +131,10 @@ class Settings:
     smtp_port: int = field(default_factory=lambda: int(get_secret("SMTP_PORT", "587")))
     smtp_user: str = field(default_factory=lambda: get_secret("SMTP_USER", ""))
     smtp_password: str = field(default_factory=lambda: get_secret("SMTP_PASSWORD", ""))
+    # Receives the pipeline's own alerts (sent even with --skip-emails)
+    pipeline_alert_email: str = field(
+        default_factory=lambda: get_secret("PIPELINE_ALERT_EMAIL", "taddeo.carpinelli@merciraymond.fr")
+    )
 
     # Notion
     notion_api_key: str = field(default_factory=lambda: get_secret("NOTION_API_KEY", ""))

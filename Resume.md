@@ -1149,6 +1149,26 @@ See original documentation for details on performance, security, error handling,
 
 **Tests**: 411 pass; the loss scenario (reason sent, "Perdu le" written, "PA" kept) and the five scenarios of §18.22 pass in a throwaway n8n 1.76.
 
+### 18.24 Signé read-back guard and alert email (October 2026)
+
+**Incident (2026-10-19, 06:00)**: Google Sheets answered `APIError: [500]: Internal error encountered.` to the tab listing of SIGNE_2026. `list_worksheets` swallowed it and returned `[]`, so the dedup set was empty and the orphan sweep added the 217 won devis of January to August to "Signé Octobre 2026": 233 rows and 4.33 M€, instead of 16 devis and 82,721 €. The log still said "PIPELINE COMPLETED SUCCESSFULLY"; sales spotted it in the monthly view. A sheets-only rerun at 16:38 (`run_pipeline.py --skip-emails --skip-notion --live-snapshot`) rewrote the tab correctly.
+
+**Guard**:
+- `list_worksheets` and `read_worksheet` take `raise_errors` (default False, so the dashboard is unchanged). The pipeline gets the Google error instead of an empty result, and an empty month tab (written without a header) is not mistaken for a failure. With `raise_errors`, a year without `SPREADSHEET_SIGNE_{YEAR}` raises too.
+- `GoogleSheetsClient.collect_signe_ids(year, skip_names)` reads the year's "Signé …" tabs with up to 4 tries per Google call, 65 s apart (the 429 settings), stops at the first call that keeps failing, and returns `(ids, problems)`.
+- `run_pipeline.py` runs the orphan sweep only on a complete set. Otherwise:
+  - the current month is written without orphans;
+  - `results["warnings"]` gets a line, and the final log says "PIPELINE COMPLETED WITH WARNINGS" (status stays "completed", exit code 0);
+  - `EmailSender.send_signe_dedup_alert` emails `PIPELINE_ALERT_EMAIL` (default taddeo.carpinelli@merciraymond.fr, TEST_EMAIL with `--test`), even with `--skip-emails`.
+- Dry runs and `--skip-sheets` no longer run the orphan sweep. Nothing is written in these modes, and the sweep used to log every won devis of the year as an orphan.
+
+**Unchanged**: `read_worksheet` still drops the cross-year avenant rows (`<id>_AV<n>`), so these 8 rows keep being re-added to the current month every day.
+
+**Tests**: 439 pass, 8 of them new in `tests/test_signe_dedup_guard.py`. The incident was also replayed offline through `PipelineRunner.run()` with Google answering 500:
+- before: 10 rows in the current month (8 copied) and no alert;
+- after: 2 rows, one alert, and "WITH WARNINGS";
+- a normal day reads the 8 ids and sends nothing.
+
 ---
 
 ## 17. Conclusion
@@ -1164,7 +1184,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.49
-**Last Updated**: September 2026
+**Document Version**: 1.50
+**Last Updated**: October 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System
