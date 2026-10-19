@@ -70,15 +70,19 @@ INPUT_OVERRIDE_COLUMNS = {
 }
 
 # Columns that need re-derivation when ``probability`` changes.
-def _recompute_probability_aux(row: pd.Series) -> pd.Series:
-    try:
-        prob = float(row.get("probability") or 0)
-    except (TypeError, ValueError):
-        prob = 0.0
-    prob_calc = 50.0 if prob == 0 else prob
-    row["probability_calc"] = prob_calc
-    row["probability_factor"] = prob_calc / 100.0
-    return row
+# Column-wise on purpose: a row-wise ``df.apply(..., axis=1)`` rebuilds every
+# column, and with pandas >= 2.3 an all-empty date column (``date_effective_won``,
+# empty while no cross-year avenant is injected, e.g. early January) loses its
+# datetime type, so ``.dt.month`` in the views crashed the whole run.
+def _recompute_probability_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if "probability" in df.columns:
+        prob = pd.to_numeric(df["probability"], errors="coerce").fillna(0.0)
+    else:
+        prob = pd.Series(0.0, index=df.index)
+    prob_calc = prob.where(prob != 0, 50.0)
+    df["probability_calc"] = prob_calc
+    df["probability_factor"] = prob_calc / 100.0
+    return df
 
 
 def apply_input_overrides(df: pd.DataFrame, store: OverridesStore) -> pd.DataFrame:
@@ -116,7 +120,7 @@ def apply_input_overrides(df: pd.DataFrame, store: OverridesStore) -> pd.DataFra
             df.loc[mask, col] = value
 
     if affected:
-        df = df.apply(_recompute_probability_aux, axis=1)
+        df = _recompute_probability_columns(df)
         if "statut_clean" in df.columns and "statut" in df.columns:
             df["statut_clean"] = df["statut"].astype(str).str.lower().str.strip()
         logger.info("Applied input overrides on %d row(s) (engine will re-run)", affected)
