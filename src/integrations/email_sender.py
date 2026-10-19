@@ -5,6 +5,7 @@ Sends HTML email alerts via SMTP (Gmail with App Password).
 """
 
 import smtplib
+from html import escape
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Dict, List, Any, Optional
@@ -524,6 +525,37 @@ class EmailSender:
             Dictionary with counts of emails sent
         """
         return self.send_combined_alerts(alerts_output)
+
+    def _generate_signe_dedup_alert_html(self, problems: List[str], year: int, started_at: datetime) -> str:
+        """Body of the alert sent when the previous Signé tabs cannot be read back."""
+        items = "".join(f"<li><code>{escape(problem)}</code></li>" for problem in problems)
+        rerun = (
+            "cd /root/Customs/Dashboard_Commercial && venv/bin/python3 "
+            "scripts/run_pipeline.py --skip-emails --skip-notion --live-snapshot"
+        )
+        return f"""
+<html><body style="font-family: Arial, sans-serif; color: #2c3e50;">
+<h2 style="color: #c0392b;">Pipeline Myrium : relecture des onglets « Signé {year} » impossible</h2>
+<p>Run du {started_at:%d/%m/%Y à %H:%M}. Google Sheets n'a pas répondu, même après plusieurs tentatives :</p>
+<ul>{items}</ul>
+<p><b>Ce que le pipeline a fait.</b> Il n'a ajouté aucun devis « orphelin » au mois en cours. Sans les onglets
+précédents, tous les devis gagnés de l'année auraient paru orphelins et auraient été recopiés dans ce mois
+(incident du 19 octobre 2026). Le reste du pipeline continue normalement.</p>
+<p><b>À faire.</b> Rien si le run de demain passe. Si l'alerte revient, relancer sur le serveur :</p>
+<pre style="background: #f4f6f7; padding: 8px;">{rerun}</pre>
+<p>puis vérifier dans le journal la ligne « Collected … IDs from previous Signé sheets ».</p>
+</body></html>"""
+
+    def send_signe_dedup_alert(self, problems: List[str], year: int, started_at: datetime) -> bool:
+        """
+        Alert that the previous Signé tabs could not be read back, so the orphan sweep was skipped.
+
+        Goes to settings.pipeline_alert_email (TEST_EMAIL in test mode), even when the
+        run skips the business emails.
+        """
+        to_email = self.TEST_EMAIL if self.test_mode else settings.pipeline_alert_email
+        subject = f"[Myrium] Alerte pipeline : onglets Signé {year} illisibles ({started_at:%d/%m/%Y})"
+        return self._send_email(to_email, subject, self._generate_signe_dedup_alert_html(problems, year, started_at))
 
     def _generate_travaux_projection_html(self, proposals: List[Dict[str, Any]]) -> str:
         """

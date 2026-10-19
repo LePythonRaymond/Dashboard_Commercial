@@ -23,7 +23,7 @@ import logging
 import pandas as pd
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -121,6 +121,15 @@ class PipelineRunner:
         logger.info(f"Step '{step_name}': {status}")
         if details:
             logger.info(f"  Details: {details}")
+
+    def _alert_signe_dedup(self, problems: List[str], year: int) -> None:
+        """Record the unreadable Signé tabs as a run warning and email the alert (even with --skip-emails)."""
+        self.results.setdefault("warnings", []).append(
+            f"Signé {year} tabs unreadable, orphan sweep skipped: {'; '.join(problems)}"
+        )
+        sender = EmailSender(test_mode=getattr(self, 'test_mode', False))
+        alert_sent = sender.send_signe_dedup_alert(problems, year, self.start_time)
+        self._log_step("signe_dedup", "warning", {"problems": problems, "alert_sent": alert_sent})
 
     def _sync_entretien_start_2026_to_store_and_sheets(
         self, sheets_client: Optional[GoogleSheetsClient]
@@ -277,27 +286,30 @@ class PipelineRunner:
             current_month = datetime.now().month
             view_generator = ViewGenerator()
 
-            # Collect IDs already in previous months' Signé sheets (for dedup)
+            # Collect IDs already in previous months' Signé sheets (for dedup).
+            # The orphan sweep below adds every won devis missing from them to the
+            # current month, so it only runs when all of them could be read.
             already_captured_ids: set = set()
+            dedup_complete = False
             if self.write_google_sheets:
+                current_month_name = view_generator.name_won
+                prev_month = current_month - 1 if current_month > 1 else 12
+                prev_year = current_year if current_month > 1 else current_year - 1
+                from config.settings import MONTH_MAP
+                prev_month_name = f"Signé {MONTH_MAP.get(prev_month, 'Unknown')} {prev_year}"
                 try:
-                    dedup_client = GoogleSheetsClient()
-                    existing_sheets = dedup_client.list_worksheets(view_type='signe', year=current_year)
-                    current_month_name = view_generator.name_won
-                    prev_month = current_month - 1 if current_month > 1 else 12
-                    prev_year = current_year if current_month > 1 else current_year - 1
-                    from config.settings import MONTH_MAP
-                    prev_month_name = f"Signé {MONTH_MAP.get(prev_month, 'Unknown')} {prev_year}"
-                    for sheet_name in existing_sheets:
-                        if sheet_name in (current_month_name, prev_month_name):
-                            continue  # skip months we're about to rewrite
-                        df_existing = dedup_client.read_worksheet(sheet_name, 'signe', current_year)
-                        if not df_existing.empty and 'id' in df_existing.columns:
-                            already_captured_ids.update(df_existing['id'].astype(str).tolist())
-                    if already_captured_ids:
-                        logger.info(f"  Collected {len(already_captured_ids)} IDs from previous Signé sheets for dedup")
+                    already_captured_ids, dedup_problems = GoogleSheetsClient().collect_signe_ids(
+                        current_year, skip_names=(current_month_name, prev_month_name)
+                    )
                 except Exception as e:
-                    logger.warning(f"  Could not read existing Signé sheets for dedup: {e}")
+                    dedup_problems = [f"{type(e).__name__}: {e}"]
+                if dedup_problems:
+                    for problem in dedup_problems:
+                        logger.warning(f"  Could not read existing Signé sheets for dedup: {problem}")
+                    self._alert_signe_dedup(dedup_problems, current_year)
+                else:
+                    dedup_complete = True
+                    logger.info(f"  Collected {len(already_captured_ids)} IDs from previous Signé sheets for dedup")
 
             views = view_generator.generate(df_processed, already_captured_ids=already_captured_ids)
 
@@ -319,7 +331,12 @@ class PipelineRunner:
             if not prev_month_won.data.empty and 'id' in prev_month_won.data.columns:
                 all_captured_now.update(prev_month_won.data['id'].astype(str))
 
-            df_orphans = view_generator.find_orphan_won_proposals(df_processed, current_year, all_captured_now)
+            if dedup_complete:
+                df_orphans = view_generator.find_orphan_won_proposals(df_processed, current_year, all_captured_now)
+            else:
+                df_orphans = df_processed.iloc[0:0]
+                if self.write_google_sheets:
+                    logger.warning("  Orphan sweep skipped: the previous Signé tabs could not all be read")
             orphan_count = len(df_orphans)
             if orphan_count > 0:
                 logger.info(f"  Orphan sweep: {orphan_count} WON proposal(s) not in any Signé sheet — adding to current month")
@@ -607,7 +624,13 @@ class PipelineRunner:
             self.results["duration_seconds"] = (datetime.now() - self.start_time).total_seconds()
 
             logger.info("\n" + "="*60)
-            logger.info("PIPELINE COMPLETED SUCCESSFULLY")
+            run_warnings = self.results.get("warnings", [])
+            if run_warnings:
+                logger.warning("PIPELINE COMPLETED WITH WARNINGS")
+                for warning in run_warnings:
+                    logger.warning(f"  {warning}")
+            else:
+                logger.info("PIPELINE COMPLETED SUCCESSFULLY")
             logger.info(f"Duration: {self.results['duration_seconds']:.2f} seconds")
             logger.info("="*60)
 

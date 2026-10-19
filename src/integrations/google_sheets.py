@@ -9,7 +9,7 @@ import gspread
 import gspread.exceptions
 import pandas as pd
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, TypeVar
 from pathlib import Path
 import traceback
 import json
@@ -905,7 +905,8 @@ class GoogleSheetsClient:
         self,
         name: str,
         view_type: Optional[str] = None,
-        year: Optional[int] = None
+        year: Optional[int] = None,
+        raise_errors: bool = False,
     ) -> pd.DataFrame:
         """
         Read a worksheet into a DataFrame.
@@ -916,6 +917,8 @@ class GoogleSheetsClient:
             name: Worksheet name
             view_type: Type of view ('etat', 'envoye', 'signe') - optional
             year: Year - optional. If both view_type and year provided, uses specific spreadsheet
+            raise_errors: Raise Google and lookup errors instead of returning an empty
+                frame, so a failed read can be told apart from an empty tab
 
         Returns:
             DataFrame with worksheet data (excluding summary rows)
@@ -1043,18 +1046,29 @@ class GoogleSheetsClient:
 
         except (gspread.WorksheetNotFound, gspread.SpreadsheetNotFound) as e:
             print(f"Worksheet/Spreadsheet not found: {name} (type: {view_type}, year: {year})")
+            if raise_errors:
+                raise
             return pd.DataFrame()
         except Exception as e:
             print(f"Error reading worksheet: {e}")
+            if raise_errors:
+                raise
             return pd.DataFrame()
 
-    def list_worksheets(self, view_type: Optional[str] = None, year: Optional[int] = None) -> List[str]:
+    def list_worksheets(
+        self,
+        view_type: Optional[str] = None,
+        year: Optional[int] = None,
+        raise_errors: bool = False,
+    ) -> List[str]:
         """
         List all worksheet names in a spreadsheet.
 
         Args:
             view_type: Type of view ('etat', 'envoye', 'signe') - optional
             year: Year - optional
+            raise_errors: Raise Google errors, and a missing spreadsheet id, instead of
+                returning an empty list
 
         Returns:
             List of worksheet names (all worksheets, including hidden)
@@ -1071,10 +1085,76 @@ class GoogleSheetsClient:
                     return worksheet_names
                 except Exception as e:
                     print(f"Error listing worksheets for {view_type} {year}: {e}")
+                    if raise_errors:
+                        raise
                     return []
+            if raise_errors:
+                raise ValueError(f"No spreadsheet id configured for {view_type} {year} (SPREADSHEET_{view_type.upper()}_{year})")
 
         # Fallback: return empty if no specific spreadsheet
         return []
+
+    def collect_signe_ids(
+        self,
+        year: int,
+        skip_names: Iterable[str] = (),
+        attempts: int = SHEETS_429_MAX_ATTEMPTS,
+        wait_seconds: float = SHEETS_429_RETRY_SLEEP_SEC,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> Tuple[Set[str], List[str]]:
+        """
+        Ids already written in the year's "Signé {Mois} {Année}" tabs, and what could not be read.
+
+        The pipeline adds to the current month every won devis of the year missing
+        from these tabs (the orphan sweep), so an incomplete set copies whole months
+        into it: on 2026-10-19 a Google 500 on the listing put the 217 devis of
+        January to August into October. Each Google call is retried; the first one
+        that keeps failing stops the collection, and a non-empty problem list means
+        the set is incomplete.
+
+        Args:
+            year: Year of the Signé spreadsheet
+            skip_names: Tabs not to read (the months the pipeline is about to rewrite)
+            attempts: Tries per Google call
+            wait_seconds: Pause between tries (sized for the per-minute read quota)
+            sleep: Pause function, replaceable in tests
+
+        Returns:
+            (ids, problems): the ids read, and one line per call that kept failing
+        """
+        def call(label: str, fn: Callable[[], T]) -> Tuple[Optional[T], Optional[str]]:
+            for attempt in range(1, attempts + 1):
+                try:
+                    return fn(), None
+                except Exception as e:
+                    error = f"{type(e).__name__}: {e}"
+                    if attempt == attempts:
+                        return None, f"{label}: {error} ({attempts} tries)"
+                    print(f"  {label}: {error}, retry in {wait_seconds:.0f}s ({attempt}/{attempts})")
+                    sleep(wait_seconds)
+            return None, f"{label}: no try made"
+
+        names, problem = call(
+            f"listing Signé {year}",
+            lambda: self.list_worksheets(view_type='signe', year=year, raise_errors=True),
+        )
+        if problem:
+            return set(), [problem]
+
+        skip = set(skip_names)
+        ids: Set[str] = set()
+        for name in names:
+            if not name.startswith("Signé ") or name in skip:
+                continue
+            df, problem = call(
+                f"reading {name}",
+                lambda: self.read_worksheet(name, 'signe', year, raise_errors=True),
+            )
+            if problem:
+                return ids, [problem]
+            if 'id' in df.columns:
+                ids.update(df['id'].astype(str).tolist())
+        return ids, []
 
     def get_worksheets_by_pattern(self, pattern: str, view_type: Optional[str] = None, year: Optional[int] = None) -> List[str]:
         """
