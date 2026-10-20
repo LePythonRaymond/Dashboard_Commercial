@@ -1169,6 +1169,22 @@ See original documentation for details on performance, security, error handling,
 - after: 2 rows, one alert, and "WITH WARNINGS";
 - a normal day reads the 8 ids and sends nothing.
 
+### 18.25 January safety: no crash on overrides, December rebuilt, one alert per bad run (October 2026)
+
+Two January breakdowns from the 2026-09-28 audit, fixed before they could happen, plus a general alert.
+
+**Crash on input overrides.** `apply_input_overrides` recomputed the probability with a row-wise `df.apply(..., axis=1)`. With pandas >= 2.3 (server venv: 2.3.3) that rebuilds every column, and the all-empty `date_effective_won` loses its datetime type. Furious never fills `signature_date`, so this column is all empty while no cross-year avenant is injected, i.e. at the start of every year. Then `.dt.month` in `views.py` crashed the whole run: no Sheets, Notion or emails. `_recompute_probability_columns` now works column-wise, with the same rule (0 or unreadable = 50%).
+
+**December rewritten in January.** Since 2026-04-16 (commit 4a2452a) the previous month's Signé sheet is rewritten until the end of the current month. In January that is December of the previous year, but the daily pass merges only the current year's avenants and its engine window starts at the current year. December would have been frozen without its avenants, without a column for its own year, and with its December production clamped into January. In January, `src/processing/previous_year_signe.py` (`build_previous_year_won_month`) now rebuilds it from the devis as fetched: avenant merge for that year, cleaning, overrides, and an engine and summary columns covering year..year+3. If that pass fails, the sheet keeps its last version and the run reports it.
+
+**One alert per bad run.** `PipelineRunner._send_run_alert` runs at the end of every run, so the §18.24 alert is now one of its cases. It emails `PIPELINE_ALERT_EMAIL` once when the run failed, left a step in error, or ended with warnings. A failed avenant fetch is now a warning. It is sent even with `--skip-emails`, never in a dry run. The last 12 server runs had no error or warning step, so the alert stays silent on normal days. Not covered: a process killed before `run()` returns (out of memory, import error).
+
+**Tests**: 444 pass (`tests/test_january_rollover.py`; alert tests updated). Replay of a January night (2027-01-15, December devis plus avenant, an input override, no cross-year avenant), through `PipelineRunner.run()` with frozen time:
+- deployed code: crash on `.dt`, nothing written, no alert;
+- new code: run completed, "Signé Decembre 2026" at 12,000 € with 4,000 € in 2026 and 8,000 € in 2027.
+
+A Furious failure now sends one "run échoué" alert, and the §18.24 incident one "anomalies" alert.
+
 ---
 
 ## 17. Conclusion
@@ -1184,7 +1200,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.50
+**Document Version**: 1.51
 **Last Updated**: October 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System

@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from config.settings import get_secret, settings, STATUS_WON
+from config.settings import get_secret, settings, MONTH_MAP, STATUS_WON
 from src.api.auth import FuriousAuth, AuthenticationError
 from src.api.proposals import ProposalsClient, ProposalsAPIError
 from src.api.proposal_addons import ProposalAddonsClient, merge_addons_into_proposals
@@ -37,6 +37,7 @@ from src.processing.cleaner import DataCleaner
 from src.processing.revenue_engine import RevenueEngine
 from src.processing.views import ViewGenerator
 from src.processing.alerts import AlertsGenerator
+from src.processing.previous_year_signe import build_previous_year_won_month
 from src.integrations.entretien_start_store import (
     fetch_and_write_entretien_start_2026,
     get_store_path,
@@ -123,13 +124,37 @@ class PipelineRunner:
             logger.info(f"  Details: {details}")
 
     def _alert_signe_dedup(self, problems: List[str], year: int) -> None:
-        """Record the unreadable Signé tabs as a run warning and email the alert (even with --skip-emails)."""
+        """Record the unreadable Signé tabs as a run warning (emailed by _send_run_alert)."""
         self.results.setdefault("warnings", []).append(
             f"Signé {year} tabs unreadable, orphan sweep skipped: {'; '.join(problems)}"
         )
-        sender = EmailSender(test_mode=getattr(self, 'test_mode', False))
-        alert_sent = sender.send_signe_dedup_alert(problems, year, self.start_time)
-        self._log_step("signe_dedup", "warning", {"problems": problems, "alert_sent": alert_sent})
+        self._log_step("signe_dedup", "warning", {"problems": problems})
+
+    def _send_run_alert(self) -> None:
+        """
+        One email per run that failed, left a step in error or ended with warnings.
+
+        Sent even with --skip-emails (those are the business emails); never in a dry run.
+        """
+        if self.dry_run:
+            return
+        failed = self.results.get("status") == "failed"
+        step_errors = [
+            f"{name}: {str(step.get('details'))[:500]}"
+            for name, step in self.results.get("steps", {}).items()
+            if step.get("status") == "error"
+        ]
+        warnings = self.results.get("warnings", [])
+        if not (failed or step_errors or warnings):
+            return
+        try:
+            sent = EmailSender(test_mode=getattr(self, 'test_mode', False)).send_pipeline_alert(
+                failed, self.results.get("error"), step_errors, warnings, self.start_time
+            )
+            self.results["alert_sent"] = sent
+            (logger.info if sent else logger.error)(f"Pipeline alert email sent: {sent}")
+        except Exception as e:
+            logger.error(f"Could not send the pipeline alert email: {type(e).__name__}: {e}")
 
     def _sync_entretien_start_2026_to_store_and_sheets(
         self, sheets_client: Optional[GoogleSheetsClient]
@@ -222,6 +247,7 @@ class PipelineRunner:
             # rows edited since then alone, n8n may have sent a newer one to Furious.
             self.furious_read_at = datetime.now(timezone.utc)
             df_raw = proposals_client.fetch_all()
+            df_fetched = df_raw  # before the avenant merge, for the previous-year month rebuilt in January
             self._log_step("fetch_proposals", "success", {"count": len(df_raw)})
 
             if df_raw.empty:
@@ -244,6 +270,9 @@ class PipelineRunner:
                 })
             except Exception as e:
                 logger.warning(f"Addon fetch failed (non-fatal, continuing without addons): {e}")
+                self.results.setdefault("warnings", []).append(
+                    f"Avenants not fetched, amounts are without avenants this run: {type(e).__name__}: {e}"
+                )
                 df_addons = None
                 if not df_raw.empty:
                     df_raw['addon_amount'] = 0
@@ -320,9 +349,27 @@ class PipelineRunner:
             prev_month_dedup = already_captured_ids | {
                 str(row.get('id', '')) for _, row in views.won_month.data.iterrows()
             } if not views.won_month.data.empty else already_captured_ids
-            prev_month_won = view_generator.generate_won_for_month(
-                df_processed, prev_year, prev_month, already_captured_ids=prev_month_dedup
-            )
+            if prev_year == current_year:
+                prev_month_won = view_generator.generate_won_for_month(
+                    df_processed, prev_year, prev_month, already_captured_ids=prev_month_dedup
+                )
+            else:
+                prev_name = f"Signé {MONTH_MAP.get(prev_month, 'Unknown')} {prev_year}"
+                try:
+                    prev_month_won = build_previous_year_won_month(
+                        df_fetched, df_addons, prev_year, prev_month, prev_month_dedup,
+                        overrides_store, manual_projects_store,
+                    )
+                    logger.info(f"  {prev_name} rebuilt with the {prev_year} avenants and revenue window")
+                except Exception as e:
+                    logger.warning(f"  {prev_name} not rewritten: {type(e).__name__}: {e}")
+                    self.results.setdefault("warnings", []).append(
+                        f"{prev_name} not rewritten, it keeps its last version: {type(e).__name__}: {e}"
+                    )
+                    # An empty view is not written, so the sheet stays as it is
+                    prev_month_won = view_generator.generate_won_for_month(
+                        df_processed.iloc[0:0], prev_year, prev_month
+                    )
 
             # Orphan sweep: find WON proposals dated this year but not in any Signé sheet
             all_captured_now = set(already_captured_ids)
@@ -625,10 +672,13 @@ class PipelineRunner:
 
             logger.info("\n" + "="*60)
             run_warnings = self.results.get("warnings", [])
-            if run_warnings:
+            error_steps = [name for name, step in self.results["steps"].items() if step.get("status") == "error"]
+            if run_warnings or error_steps:
                 logger.warning("PIPELINE COMPLETED WITH WARNINGS")
                 for warning in run_warnings:
                     logger.warning(f"  {warning}")
+                for name in error_steps:
+                    logger.warning(f"  step in error: {name}")
             else:
                 logger.info("PIPELINE COMPLETED SUCCESSFULLY")
             logger.info(f"Duration: {self.results['duration_seconds']:.2f} seconds")
@@ -651,6 +701,7 @@ class PipelineRunner:
             self.results["status"] = "failed"
             self.results["error"] = str(e)
 
+        self._send_run_alert()
         return self.results
 
 

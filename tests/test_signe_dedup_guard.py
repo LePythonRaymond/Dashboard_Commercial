@@ -153,16 +153,31 @@ def test_the_alert_goes_to_the_alert_address_with_the_escaped_errors(monkeypatch
     monkeypatch.setattr(settings, "pipeline_alert_email", "alertes@example.com")
     monkeypatch.setattr(EmailSender, "_send_email", lambda self, to, subject, html: sent.append((to, subject, html)) or True)
 
-    ok = EmailSender().send_signe_dedup_alert(
-        ["listing Signé 2026: APIError: <500> Internal error (4 tries)"], 2026, datetime(2026, 10, 19, 6, 0)
+    ok = EmailSender().send_pipeline_alert(
+        False, None, [], ["Signé 2026 tabs unreadable, orphan sweep skipped: APIError: <500> (4 tries)"],
+        datetime(2026, 10, 19, 6, 0),
     )
 
     assert ok
     to, subject, html = sent[0]
     assert to == "alertes@example.com"
-    assert "Signé 2026" in subject and "19/10/2026" in subject
+    assert "anomalies" in subject and "19/10/2026" in subject
     assert "&lt;500&gt;" in html and "<500>" not in html
-    assert "19/10/2026 à 06:00" in html
+    assert "19/10/2026 à 06:00" in html and "pipeline_daily_20261019.log" in html
+
+
+def test_a_failed_run_says_so(monkeypatch):
+    sent = []
+    monkeypatch.setattr(EmailSender, "_send_email", lambda self, to, subject, html: sent.append((subject, html)) or True)
+
+    EmailSender().send_pipeline_alert(
+        True, "Can only use .dt accessor with datetimelike values", ["fetch_proposals: {'error': 'x'}"], [],
+        datetime(2027, 1, 2, 6, 0),
+    )
+
+    subject, html = sent[0]
+    assert "run échoué" in subject
+    assert "le run a échoué" in html and ".dt accessor" in html and "fetch_proposals" in html
 
 
 def test_the_alert_goes_to_the_test_address_in_test_mode(monkeypatch):
@@ -170,6 +185,6 @@ def test_the_alert_goes_to_the_test_address_in_test_mode(monkeypatch):
     monkeypatch.setattr(settings, "pipeline_alert_email", "alertes@example.com")
     monkeypatch.setattr(EmailSender, "_send_email", lambda self, to, subject, html: sent.append(to) or True)
 
-    EmailSender(test_mode=True).send_signe_dedup_alert(["x"], 2026, datetime(2026, 10, 19, 6, 0))
+    EmailSender(test_mode=True).send_pipeline_alert(False, None, [], ["x"], datetime(2026, 10, 19, 6, 0))
 
     assert sent == [EmailSender.TEST_EMAIL]

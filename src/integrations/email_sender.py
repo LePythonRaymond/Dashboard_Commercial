@@ -526,36 +526,66 @@ class EmailSender:
         """
         return self.send_combined_alerts(alerts_output)
 
-    def _generate_signe_dedup_alert_html(self, problems: List[str], year: int, started_at: datetime) -> str:
-        """Body of the alert sent when the previous Signé tabs cannot be read back."""
-        items = "".join(f"<li><code>{escape(problem)}</code></li>" for problem in problems)
+    def _generate_pipeline_alert_html(
+        self,
+        failed: bool,
+        error: Optional[str],
+        step_errors: List[str],
+        warnings: List[str],
+        started_at: datetime,
+    ) -> str:
+        """Body of the alert sent when a run failed, left a step in error or ended with warnings."""
+        def items(lines: List[str]) -> str:
+            return "".join(f"<li><code>{escape(line)}</code></li>" for line in lines)
+
         rerun = (
             "cd /root/Customs/Dashboard_Commercial && venv/bin/python3 "
             "scripts/run_pipeline.py --skip-emails --skip-notion --live-snapshot"
         )
+        if failed:
+            title = "le run a échoué"
+            meaning = ("Le run s'est arrêté : les feuilles Google, Notion et les e-mails n'ont pas été mis à jour. "
+                       "Le dashboard montre les chiffres du dernier run réussi.")
+        else:
+            title = "run terminé avec des anomalies"
+            meaning = "Le run est allé au bout, mais les points ci-dessous peuvent fausser ou retarder des chiffres."
+        sections = ""
+        if error:
+            sections += f"<p><b>Erreur :</b></p><ul>{items([error])}</ul>"
+        if step_errors:
+            sections += f"<p><b>Étapes en erreur :</b></p><ul>{items(step_errors)}</ul>"
+        if warnings:
+            sections += f"<p><b>Avertissements :</b></p><ul>{items(warnings)}</ul>"
         return f"""
 <html><body style="font-family: Arial, sans-serif; color: #2c3e50;">
-<h2 style="color: #c0392b;">Pipeline Myrium : relecture des onglets « Signé {year} » impossible</h2>
-<p>Run du {started_at:%d/%m/%Y à %H:%M}. Google Sheets n'a pas répondu, même après plusieurs tentatives :</p>
-<ul>{items}</ul>
-<p><b>Ce que le pipeline a fait.</b> Il n'a ajouté aucun devis « orphelin » au mois en cours. Sans les onglets
-précédents, tous les devis gagnés de l'année auraient paru orphelins et auraient été recopiés dans ce mois
-(incident du 19 octobre 2026). Le reste du pipeline continue normalement.</p>
-<p><b>À faire.</b> Rien si le run de demain passe. Si l'alerte revient, relancer sur le serveur :</p>
+<h2 style="color: #c0392b;">Pipeline Myrium : {title}</h2>
+<p>Run du {started_at:%d/%m/%Y à %H:%M}. {meaning}</p>
+{sections}
+<p><b>À faire.</b> Lire le journal du jour sur le serveur (<code>logs/pipeline_daily_{started_at:%Y%m%d}.log</code>).
+Si le problème venait de Google ou du réseau, relancer l'écriture des feuilles :</p>
 <pre style="background: #f4f6f7; padding: 8px;">{rerun}</pre>
-<p>puis vérifier dans le journal la ligne « Collected … IDs from previous Signé sheets ».</p>
+<p>Sinon, rien ne se corrigera seul au prochain run : il faut regarder le code.</p>
 </body></html>"""
 
-    def send_signe_dedup_alert(self, problems: List[str], year: int, started_at: datetime) -> bool:
+    def send_pipeline_alert(
+        self,
+        failed: bool,
+        error: Optional[str],
+        step_errors: List[str],
+        warnings: List[str],
+        started_at: datetime,
+    ) -> bool:
         """
-        Alert that the previous Signé tabs could not be read back, so the orphan sweep was skipped.
+        Alert for a run that failed, left a step in error or ended with warnings.
 
         Goes to settings.pipeline_alert_email (TEST_EMAIL in test mode), even when the
         run skips the business emails.
         """
         to_email = self.TEST_EMAIL if self.test_mode else settings.pipeline_alert_email
-        subject = f"[Myrium] Alerte pipeline : onglets Signé {year} illisibles ({started_at:%d/%m/%Y})"
-        return self._send_email(to_email, subject, self._generate_signe_dedup_alert_html(problems, year, started_at))
+        what = "run échoué" if failed else "anomalies"
+        subject = f"[Myrium] Alerte pipeline : {what} ({started_at:%d/%m/%Y})"
+        html = self._generate_pipeline_alert_html(failed, error, step_errors, warnings, started_at)
+        return self._send_email(to_email, subject, html)
 
     def _generate_travaux_projection_html(self, proposals: List[Dict[str, Any]]) -> str:
         """
