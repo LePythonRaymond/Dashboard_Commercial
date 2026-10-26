@@ -186,31 +186,47 @@ def _opt(value) -> Optional[float]:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-def load_legacy(xlsx_path: Path, last_closed: str = "2026-09") -> Legacy:
+CORRECTION_COMMENT = (
+    "Ventilation du trop comptabilisé : à fin août, la compta (1 859 642 €) dépasse de 114 121 € la somme des "
+    "projets. Arthur l'étale à −28 530 € par mois de septembre à décembre (Projets Travaux, ligne 108). "
+    "Situation exceptionnelle : à supprimer dès que le suivi de production de la compta remplace les montants des projets."
+)
+
+
+def load_legacy(xlsx_path: Path, last_closed: str = "2026-08", first_open: Optional[str] = None) -> Legacy:
     """Read the start-up data from the exported workbook (cached values, no formula is evaluated).
 
-    Travaux: cumulative production at the end of September = before 2026 (N) + S1 cut-off (S)
-    + the July, August and September production the chefs de projet planned (AJ to AL), since
-    the workbook has no clean per-project figure after June. Pins = October to December.
-    Conception: before 2026 (AP) + 2026 to date (AU, "Résultat T1 à T3"). Pins = AZ to BB.
+    ``last_closed`` is the last month the accounts have closed (August 2026: the workbook's
+    "P&L fin août"). Months up to it count as produced; later months are typed values (pins).
+    A project marked finished stays closed unless it has an amount from ``first_open`` on (the first month
+    still to come; default the month after ``last_closed``). A closed project keeps only its typed months.
+    - Travaux: produced = before 2026 (N) + first-half cut-off (S) + the chefs de projet's July to
+      ``last_closed`` amounts (columns JUIL...), since the workbook has no per-project figure after June.
+      Pins = the following months up to December, 0 when empty.
+    - Conception: produced = before 2026 (AP) + 2026 to date (AU, which adds up to the accounts at
+      the end of August: 430 259 € against 423 060 €). Pins = "Prod Sept" to "Prod Dec" after ``last_closed``.
     """
     import openpyxl
 
     wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=True)
-    oct_, nov, dec = M.add(last_closed, 1), M.add(last_closed, 2), M.add(last_closed, 3)
+    closed_i = M.index(last_closed)
+    open_i = M.index(first_open or M.add(last_closed, 1))
     rows: List[LegacyRow] = []
 
     ws = wb["Projets Travaux"]
     data = list(ws.iter_rows(min_row=1, max_row=103, values_only=True))
     head = {name: i for i, name in enumerate(data[0]) if name}
     col = lambda r, name: r[head[name]]
+    trx_months = {"JUIL": "2026-07", "AOUT": "2026-08", "SEPT": "2026-09", "OCT": "2026-10", "NOV": "2026-11", "DEC": "2026-12"}
     for r in data[1:]:
         number = _opt(col(r, "N° Projet"))
         if number is None:
             continue
-        planned = [col(r, m) for m in ("JUIL", "AOUT", "SEPT", "OCT", "NOV", "DEC")]
-        q4_planned = any(_num(v) for v in planned[3:])
-        closed = str(col(r, "Etat") or "").strip().lower().startswith("ferm") and not q4_planned
+        planned = {m: col(r, name) for name, m in trx_months.items()}
+        before = [v for m, v in planned.items() if M.index(m) <= closed_i]
+        after = {m: v for m, v in planned.items() if M.index(m) > closed_i}
+        closed = str(col(r, "Etat") or "").strip().lower().startswith("ferm") and not any(
+            _num(v) for m, v in after.items() if M.index(m) >= open_i)
         rows.append(
             LegacyRow(
                 pole="Travaux",
@@ -221,9 +237,9 @@ def load_legacy(xlsx_path: Path, last_closed: str = "2026-09") -> Legacy:
                 ca=_num(col(r, "CA")),
                 part_mai=_num(col(r, "Part MAI à extraire")),
                 produced=_num(col(r, "Prod cumulée à fin 2025")) + _num(col(r, "Prod S1 2026 Cut Off"))
-                + sum(_num(v) for v in planned[:3]),
+                + sum(_num(v) for v in before),
                 kv=_opt(col(r, "kv obj (hors 100%)")),
-                pins={} if closed else {oct_: _num(planned[3]), nov: _num(planned[4]), dec: _num(planned[5])},
+                pins={m: _num(v) for m, v in after.items() if not closed or _num(v)},
                 comment=str(col(r, "Commentaire") or "").strip(),
             )
         )
@@ -232,14 +248,18 @@ def load_legacy(xlsx_path: Path, last_closed: str = "2026-09") -> Legacy:
     data = list(ws.iter_rows(min_row=1, max_row=135, values_only=True))
     head = {name: i for i, name in enumerate(data[1]) if name}
     kv_col = [i for i, name in enumerate(data[1]) if name == "KV prévu"][-1]
+    con_months = {"Prod Sept": "2026-09", "Prod Oct": "2026-10", "Prod Nov": "2026-11", "Prod Dec": "2026-12"}
     for r in data[2:]:
         label = str(r[head["Libellé"]] or "").strip()
         if not label:
             continue
-        planned = [r[head[m]] for m in ("Prod Sept", "Prod Oct", "Prod Nov", "Prod Dec")]
-        q4_planned = any(_num(v) for v in planned[1:])
+        planned = {m: r[head[name]] for name, m in con_months.items()}
+        before = [v for m, v in planned.items() if M.index(m) <= closed_i]
+        after = {m: v for m, v in planned.items() if M.index(m) > closed_i}
+        any_after = any(_num(v) for v in after.values())
         number = _opt(r[head["N° Projet"]])
-        closed = (str(r[head["Statut"]] or "").lower().startswith("ferm") or str(r[0] or "").lower() == "terminé") and not q4_planned
+        finished = str(r[head["Statut"]] or "").lower().startswith("ferm") or str(r[0] or "").lower() == "terminé"
+        closed = finished and not any(_num(v) for m, v in after.items() if M.index(m) >= open_i)
         rows.append(
             LegacyRow(
                 pole="Conception",
@@ -249,28 +269,31 @@ def load_legacy(xlsx_path: Path, last_closed: str = "2026-09") -> Legacy:
                 owner=str(r[head["Conduc/CDP"]] or "").strip(),
                 ca=_num(r[head["CA"]]),
                 part_mai=0.0,
-                produced=_num(r[head["Prod à fin 2025"]]) + _num(r[head["Prod 2026"]]),
+                produced=_num(r[head["Prod à fin 2025"]]) + _num(r[head["Prod 2026"]]) + sum(_num(v) for v in before),
                 kv=_opt(r[kv_col]),
-                pins={} if closed or (number is None and not q4_planned) else
-                {oct_: _num(planned[1]), nov: _num(planned[2]), dec: _num(planned[3])},
+                pins={} if number is None and not any_after else {m: _num(v) for m, v in after.items() if not closed or _num(v)},
             )
         )
 
     syn = wb["Synthèse Pôles 2026"]
     pole_rows = {"Maintenance": 7, "Travaux": 8, "Conception": 9}
     pl_report = {pole: _num(syn[f"C{r}"].value) for pole, r in pole_rows.items()}
-    sept = {pole: _num(syn[f"D{r}"].value) for pole, r in pole_rows.items()}
+    # September estimate per pole: only used when September is treated as closed (older start-ups).
+    sept = {pole: _num(syn[f"D{r}"].value) for pole, r in pole_rows.items()} if closed_i >= M.index("2026-09") else {}
     trx = wb["Projets Travaux"]
-    correction = _num(trx["AK107"].value)  # P&L at the end of August minus the projects' sum
+    correction = _num(trx["AK107"].value)  # accounts at the end of August minus the projects' sum
     adjustments = []
     if correction:
-        per_month = correction / 4  # spread over September to December in the workbook
-        sept["Travaux"] -= per_month
+        per_month = correction / 4  # the workbook spreads it over September to December (row 108)
+        spread = ["2026-09", "2026-10", "2026-11", "2026-12"]
+        if "Travaux" in sept:
+            sept["Travaux"] -= per_month * sum(1 for m in spread if M.index(m) <= closed_i)
         adjustments.append(
             {
                 "pole": "Travaux",
                 "label": "Correction compta fin août (reprise du fichier d'Arthur)",
-                "pins": {oct_: -per_month, nov: -per_month, dec: -per_month},
+                "pins": {m: -per_month for m in spread if M.index(m) > closed_i},
+                "comment": CORRECTION_COMMENT,
             }
         )
 

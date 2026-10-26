@@ -107,9 +107,13 @@ def compute_row(
     stop_o = M.of(o.get("stop")) if o.get("stop") else None
     pins = {k: float(v) for k, v in o.items() if M.is_key(k) and _num(v) is not None}
 
+    given: Dict[str, float] = {}  # months that keep their own value without being typed
     if row.fixed is not None:  # contracts and TS: their months are given; dates cannot be typed on them
         weights = {m: v for m, v in row.fixed.items() if v > 0}
-        remaining = sum(v for m, v in row.fixed.items() if M.index(m) >= M.index(open_from))
+        # Grid months before open_from are past but not closed yet (September on 26 October with
+        # August closed): nothing can be re-spread there, so they show the contract's own value.
+        given = {m: row.fixed[m] for m in grid if M.index(m) < M.index(open_from) and m in row.fixed and m not in pins}
+        remaining = sum(v for m, v in row.fixed.items() if M.index(m) >= M.index(grid[0]))
     else:
         weights = default_weights(  # the shape comes from the source data; typed values only move amounts and dates
             row.rule,
@@ -123,8 +127,8 @@ def compute_row(
             stop_override=stop_o,
             pending_from=pending_from,
         )
-        if row.closed:
-            remaining = 0.0
+        if row.closed:  # closed by the finance: only the months typed on it count
+            remaining = sum(v for k, v in pins.items() if k in set(grid))
         elif row.kind == "Projet":
             remaining = ca - mai - row.produced
             if remaining < -EPS:
@@ -140,7 +144,7 @@ def compute_row(
 
     if abs(remaining) < EPS:
         remaining = 0.0
-    dist = distribute(remaining, weights, pins, grid, open_from, fallback_months)
+    dist = distribute(remaining, weights, {**given, **pins}, grid, open_from, fallback_months)
     if dist.fallback:
         alerts.append(f"Dates dépassées : reste réparti sur {fallback_months} mois")
     if dist.unplaced <= -1:

@@ -216,6 +216,8 @@ def seed_from_legacy(legacy: Legacy, pipe: pd.DataFrame, last_closed: str, proje
         manual_n += 1
         typed = dict(adj["pins"])
         typed.update({"_pole": adj["pole"], "cat": "Signé", "label": adj["label"]})
+        if adj.get("comment"):
+            typed["comment"] = adj["comment"]
         inputs[f"M{manual_n}"] = typed
     return finance, inputs, notes
 
@@ -325,10 +327,12 @@ def assemble(
             listed.add((pole, str(p["id"])))
             notes.append(f"Nouveau projet Furious {p['id']} ajouté dans {pole}")
 
+    grid_set = set(grid)
     for f in finance:
         p = by_id.get(f.number)
-        if f.state == "fermé":
-            continue
+        closed = f.state == "fermé"
+        if closed and not any(M.is_key(k) and k in grid_set for k in state.inputs.get(f"P{f.number}", {})):
+            continue  # a closed project shows up only for the months typed on it (a last amount after the close)
         ca = float(p["total_amount"]) if p is not None and float(p["total_amount"] or 0) > 0 else f.ca
         typologie = ", ".join(p["typologies"]) if p is not None else ""
         row = Row(
@@ -346,6 +350,7 @@ def assemble(
             rule="CONCEPTION" if f.pole == "Conception" else "TRAVAUX",
             kv_default=kv_default(f.pole, typologie, ca, kv),
             proposal_id=str(p.get("proposal_id") or "") if p is not None else "",
+            closed=closed,
         )
         if p is None:
             row.alerts.append("Projet introuvable dans Furious (CA de la finance)")
@@ -356,11 +361,10 @@ def assemble(
     # Maintenance: contracts (Notion), TS and animations (Furious projects), pipe (Furious devis).
     refs = site_refs(sites)
     year = M.year_of(open_from)
-    grid_set = set(grid)
     for s in sites:
         # A contract renews itself: only the months of the window count (nothing "after the window").
         fixed = {} if s.archived else {
-            m: v for m, v in monthly_values(s, years).items() if m in grid_set and M.index(m) >= M.index(open_from)
+            m: v for m, v in monthly_values(s, years).items() if m in grid_set
         }
         value = year_value(s, year)
         planned = passages_in_year(s, year)
@@ -398,7 +402,7 @@ def assemble(
             start = p.get("start_date") or p.get("created_at")
             stop = p.get("end_date") or start
             alloc = myrium_allocation("TRAVAUX", float(p["total_amount"] or 0), start, stop)
-            fixed = {m: v for m, v in alloc.items() if M.index(m) >= M.index(open_from)}
+            fixed = {m: v for m, v in alloc.items() if M.index(m) >= M.index(grid[0])}
             if sum(fixed.values()) <= EPS:
                 continue
             rows["Maintenance"].append(Row(

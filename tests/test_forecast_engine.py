@@ -106,3 +106,30 @@ def test_a_pending_devis_starts_next_month_at_the_earliest():
     signed = default_weights("TRAVAUX", 30000, "2026-09-01", "2026-11-30", pending=False, open_from="2026-10",
                              pending_from="2026-11")
     assert min(signed) == "2026-09"  # a signed project keeps its dates
+
+
+def test_a_contract_shows_its_own_value_in_a_past_month_not_closed_yet():
+    from src.forecast.model import Row, compute_row
+
+    grid = M.span("2026-09", "2027-02")  # August closed, today in October
+    contract = Row(ref="S1", pole="Maintenance", category="Signé", kind="Contrat", label="x", ca=12000,
+                   fixed={"2026-09": 1000.0, "2026-10": 1000.0, "2026-11": 0.0, "2026-12": 2000.0})
+    shown = compute_row(contract, {}, grid, "2026-10")
+    assert shown.months["2026-09"] == 1000 and shown.months["2026-12"] == 2000
+    assert shown.remaining == 4000 and shown.gap == 0
+    assert shown.pinned == []  # not typed: no yellow
+    # A typed September wins and the open months keep their own values.
+    typed = compute_row(contract, {"2026-09": 400.0}, grid, "2026-10")
+    assert typed.months["2026-09"] == 400 and typed.months["2026-10"] == pytest.approx(1000 + 600 / 3)
+    assert typed.pinned == ["2026-09"]
+
+
+def test_a_project_shows_only_typed_values_in_a_past_month_not_closed_yet():
+    from src.forecast.model import Row, compute_row
+
+    grid = M.span("2026-09", "2027-02")
+    project = Row(ref="P1", pole="Travaux", category="Signé", kind="Projet", label="x", ca=90000, produced=30000,
+                  start="2026-09", stop="2026-11", rule="TRAVAUX")
+    shown = compute_row(project, {"2026-09": 20000.0}, grid, "2026-10")
+    assert shown.months["2026-09"] == 20000
+    assert shown.months["2026-10"] == pytest.approx(20000) and shown.months["2026-11"] == pytest.approx(20000)

@@ -11,6 +11,12 @@
  * ligne, vérifiée par tests/test_forecast_js_parity.py.
  *
  * Vider une cellule = revenir au calcul automatique.
+ *
+ * Le menu « Prévision » n'est qu'un secours, le recalcul se fait déjà à chaque modification :
+ *   - « Recalculer la ligne » : relit la ligne sélectionnée, enregistre ce qui a été tapé sans être pris
+ *     en compte (par exemple quand deux personnes modifient en même temps), puis la recalcule ;
+ *   - « Effacer toutes les saisies jaunes des mois de la ligne » : vide d'un coup tous les mois tapés
+ *     de la ligne ; son reste à produire se répartit à nouveau selon les règles.
  */
 
 var POLES = ['Travaux', 'Conception', 'Maintenance'];
@@ -121,16 +127,20 @@ function computeRow(calc, typed, meta) {
   var pins = {};
   Object.keys(typed).forEach(function (k) { if (isMonthKey(k) && num(typed[k]) !== null) pins[k] = num(typed[k]); });
 
-  var weights, remaining, openIndex = monthIndex(openFrom);
-  var fixedSum = function () {
-    var s = 0; Object.keys(calc.fixed || {}).forEach(function (m) { if (monthIndex(m) >= openIndex) s += calc.fixed[m]; }); return s;
-  };
+  var weights, remaining, openIndex = monthIndex(openFrom), given = {};
   if (calc.fixed) {  // contracts and TS: their months are given; dates cannot be typed on them
     weights = {}; Object.keys(calc.fixed).forEach(function (m) { if (calc.fixed[m] > 0) weights[m] = calc.fixed[m]; });
-    remaining = fixedSum();
+    // Past grid months not closed yet show the contract's own value (nothing can be re-spread there).
+    grid.forEach(function (m) {
+      if (monthIndex(m) < openIndex && calc.fixed.hasOwnProperty(m) && !pins.hasOwnProperty(m)) given[m] = calc.fixed[m];
+    });
+    remaining = 0;
+    Object.keys(calc.fixed).forEach(function (m) { if (monthIndex(m) >= monthIndex(grid[0])) remaining += calc.fixed[m]; });
   } else {
     weights = defaultWeights(calc.alloc, calc.kind === 'Devis', openFrom, startO, stopO, meta.pending_from);
-    if (calc.closed) remaining = 0;
+    if (calc.closed) {  // closed by the finance: only the months typed on it count
+      remaining = 0; grid.forEach(function (m) { if (pins.hasOwnProperty(m)) remaining += pins[m]; });
+    }
     else if (calc.kind === 'Projet') {
       remaining = ca - mai - Number(calc.produced || 0);
       if (remaining < -EPS) { if (remaining <= -1) alerts.push('Réalisé supérieur au CA de ' + Math.round(-remaining) + ' €'); remaining = 0; }
@@ -139,7 +149,10 @@ function computeRow(calc, typed, meta) {
     else remaining = ca - mai;
   }
   if (Math.abs(remaining) < EPS) remaining = 0;
-  var dist = distribute(remaining, weights, pins, grid, openFrom, fallback);
+  var allPins = {};
+  Object.keys(given).forEach(function (m) { allPins[m] = given[m]; });
+  Object.keys(pins).forEach(function (m) { allPins[m] = pins[m]; });
+  var dist = distribute(remaining, weights, allPins, grid, openFrom, fallback);
   if (dist.fallback) alerts.push('Dates dépassées : reste réparti sur ' + fallback + ' mois');
   if (dist.unplaced <= -1) alerts.push('Saisies supérieures au reste de ' + Math.round(-dist.unplaced) + ' €');
   else if (dist.unplaced >= 1) alerts.push(Math.round(dist.unplaced) + ' € sans mois ouvert disponible');
@@ -161,8 +174,8 @@ function computeRow(calc, typed, meta) {
 
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('Prévision')
-    .addItem('Recalculer la ligne sélectionnée', 'recalcSelected')
-    .addItem('Libérer tous les mois saisis de la ligne', 'releaseSelected')
+    .addItem('Recalculer la ligne (si elle ne s\'est pas mise à jour)', 'recalcSelected')
+    .addItem('Effacer toutes les saisies jaunes des mois de la ligne', 'releaseSelected')
     .addToUi();
 }
 
@@ -292,23 +305,61 @@ function selectedRef_() {
   return { sheet: sheet, row: row, fields: fields, ref: String(sheet.getRange(row, fields.indexOf('ref') + 1).getValue() || '') };
 }
 
+function sameValue_(a, b) {
+  var empty = function (x) { return x === null || x === undefined || x === ''; };
+  if (empty(a) && empty(b)) return true;
+  if (typeof a === 'number' && typeof b === 'number') return Math.abs(a - b) <= Math.max(0.005, 1e-9 * Math.abs(b));
+  return String(a).trim() === String(b).trim();
+}
+
+// Same rule as the nightly refresh (build.detect_typed): a cell that differs from what was last drawn
+// (_rendu) was typed by hand; an emptied one goes back to automatic. Catches an edit that onEdit missed.
+function recordRow_(fields, line, ref, typed, before) {
+  Object.keys(before || {}).forEach(function (f) {
+    if (f === 'label' && ref.charAt(0) !== 'M') return;
+    var i = fields.indexOf(f); if (i < 0) return;
+    var now = line[i];
+    if ((f === 'start' || f === 'stop') && now !== '' && now !== null) now = serialToMonth_(now);
+    if (sameValue_(now, before[f])) return;
+    var v = normalize_(f, line[i]);
+    if (v === null || v === '') delete typed[f]; else typed[f] = v;
+  });
+  return typed;
+}
+
 function recalcSelected() {
   var s = selectedRef_(); if (!s || !s.ref) return;
-  var ss = s.sheet.getParent();
-  var inputs = readJsonTab_(ss, '_saisies'), rendu = readJsonTab_(ss, '_rendu'), calcTab = readJsonTab_(ss, '_calcul');
-  redrawRow_(s.sheet, s.fields, s.row, s.ref, inputs.data[s.ref] || {}, calcTab.data[s.ref], calcTab.data.__meta, rendu);
+  var lock = LockService.getDocumentLock();
+  if (!lock.tryLock(20000)) { SpreadsheetApp.getUi().alert('Le fichier est occupé, réessayez dans un instant.'); return; }
+  try {
+    var ss = s.sheet.getParent();
+    var inputs = readJsonTab_(ss, '_saisies'), rendu = readJsonTab_(ss, '_rendu'), calcTab = readJsonTab_(ss, '_calcul');
+    var line = s.sheet.getRange(s.row, 1, 1, s.fields.length).getValues()[0];
+    var typed = recordRow_(s.fields, line, s.ref, inputs.data[s.ref] || {}, rendu.data[s.ref]);
+    writeJson_(inputs, s.ref, typed);
+    redrawRow_(s.sheet, s.fields, s.row, s.ref, typed, calcTab.data[s.ref], calcTab.data.__meta, rendu);
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function releaseSelected() {
   var s = selectedRef_(); if (!s || !s.ref) return;
-  var ss = s.sheet.getParent();
-  var inputs = readJsonTab_(ss, '_saisies'), rendu = readJsonTab_(ss, '_rendu'), calcTab = readJsonTab_(ss, '_calcul');
-  var typed = inputs.data[s.ref] || {};
-  Object.keys(typed).forEach(function (k) { if (isMonthKey(k)) delete typed[k]; });
-  writeJson_(inputs, s.ref, typed);
-  redrawRow_(s.sheet, s.fields, s.row, s.ref, typed, calcTab.data[s.ref], calcTab.data.__meta, rendu);
+  var lock = LockService.getDocumentLock();
+  if (!lock.tryLock(20000)) { SpreadsheetApp.getUi().alert('Le fichier est occupé, réessayez dans un instant.'); return; }
+  try {
+    var ss = s.sheet.getParent();
+    var inputs = readJsonTab_(ss, '_saisies'), rendu = readJsonTab_(ss, '_rendu'), calcTab = readJsonTab_(ss, '_calcul');
+    var typed = inputs.data[s.ref] || {};
+    Object.keys(typed).forEach(function (k) { if (isMonthKey(k)) delete typed[k]; });
+    writeJson_(inputs, s.ref, typed);
+    redrawRow_(s.sheet, s.fields, s.row, s.ref, typed, calcTab.data[s.ref], calcTab.data.__meta, rendu);
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { distribute: distribute, defaultWeights: defaultWeights, computeRow: computeRow, monthSpan: monthSpan };
+  module.exports = { distribute: distribute, defaultWeights: defaultWeights, computeRow: computeRow, monthSpan: monthSpan,
+                     recordRow_: recordRow_ };
 }

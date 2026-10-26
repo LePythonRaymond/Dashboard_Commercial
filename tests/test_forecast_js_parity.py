@@ -47,8 +47,8 @@ def test_distribute_vectors_in_javascript():
         assert got["fallback"] is exp["fallback"], case["name"]
 
 
-def _random_case(rnd: random.Random):
-    grid = M.span("2026-10", "2028-03")
+def _random_case(rnd: random.Random, first: str = "2026-10"):
+    grid = M.span(first, "2028-03")
     kind = rnd.choice(["Projet", "Devis", "Manuel", "Contrat", "TS"])
     rule = rnd.choice(["TRAVAUX", "CONCEPTION", "MAINTENANCE"])
     ca = rnd.choice([0, 4000, 18000, 52000, 410000])
@@ -99,3 +99,29 @@ def test_compute_row_matches_python_on_random_rows():
         assert js["kv"] == pytest.approx(py.kv, abs=1e-9), ctx
         assert js["cost"] == pytest.approx(py.cost, abs=1e-6), ctx
         assert js["proba"] == pytest.approx(py.proba), ctx
+
+
+def test_compute_row_matches_python_with_a_past_month_not_closed_yet():
+    # August closed, today in October: September is in the grid but no longer open.
+    rnd = random.Random(20261027)
+    cases = [_random_case(rnd, "2026-09") for _ in range(300)]
+    meta = {"grid": cases[0][3], "open_from": "2026-10", "fallback": 2, "pending_from": "2026-11"}
+    got = run_node([{"fn": "computeRow", "args": [calc, typed, meta]} for _, typed, calc, _ in cases])
+    for (row, typed, calc, grid), js in zip(cases, got):
+        py = compute_row(row, typed, grid, "2026-10", 2, "2026-11")
+        ctx = (row.kind, row.rule, row.ca, typed)
+        assert js["remaining"] == pytest.approx(py.remaining, abs=1e-6), ctx
+        for m in grid:
+            assert js["months"][m] == pytest.approx(py.months[m], abs=1e-6), (ctx, m)
+        assert js["beyond"] == pytest.approx(py.beyond, abs=1e-6), ctx
+        assert js["gap"] == pytest.approx(py.gap, abs=1e-6), ctx
+
+
+def test_recalculating_a_row_records_what_the_edit_handler_missed():
+    fields = ["ref", "label", "kv", "start", "2026-10", "2026-11", "comment"]
+    before = {"label": "Farman", "kv": 1.4, "start": "2026-02", "2026-10": 56268.0, "2026-11": 56268.0, "comment": ""}
+    # 2026-10 typed (missed by onEdit), 2026-11 emptied, start unchanged (shown as a date serial), kv unchanged
+    line = ["P1081", "Farman", 1.4, 46054, 40000, "", ""]
+    typed = {"2026-11": 56268.0, "kv": 1.4}
+    got = run_node([{"fn": "recordRow_", "args": [fields, line, "P1081", typed, before]}])[0]
+    assert got == {"2026-10": 40000, "kv": 1.4}

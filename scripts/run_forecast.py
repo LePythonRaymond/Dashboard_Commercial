@@ -27,7 +27,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.settings import get_secret  # noqa: E402
 from src.forecast import months as M  # noqa: E402
-from src.forecast.build import Params, SheetState, assemble, detect_typed, seed_from_legacy  # noqa: E402
+from src.forecast.build import Params, SheetState, assemble, detect_typed, seed_from_legacy, window  # noqa: E402
 from src.forecast.layout import POLES  # noqa: E402
 from src.forecast.sheet import ForecastSheet, actual_month_columns, manual_fields, normalize_typed  # noqa: E402
 from src.forecast.sources import fetch_pipe, fetch_projects, fetch_sites, load_legacy  # noqa: E402
@@ -60,7 +60,7 @@ def main() -> int:
     ap.add_argument("--spreadsheet", default=get_secret("FORECAST_SPREADSHEET_ID", ""))
     ap.add_argument("--init", action="store_true", help="build the tabs from the legacy workbook")
     ap.add_argument("--legacy", type=Path, help="exported .xlsx of the legacy workbook (with --init)")
-    ap.add_argument("--last-closed", default="2026-09", help="last month closed by finance (with --init)")
+    ap.add_argument("--last-closed", default="2026-08", help="last month closed by the accounts (with --init)")
     ap.add_argument("--delete-old-tabs", action="store_true", help="with --init: delete every tab the forecast does not use")
     ap.add_argument("--dry-run", action="store_true", help="compute and print, write nothing")
     ap.add_argument("--today", help="YYYY-MM-DD, for tests")
@@ -86,7 +86,7 @@ def main() -> int:
     if args.init:
         if not args.legacy:
             ap.error("--init needs --legacy")
-        legacy = load_legacy(args.legacy, args.last_closed)
+        legacy = load_legacy(args.legacy, args.last_closed, window(args.last_closed, today)[1])
         finance, inputs, notes = seed_from_legacy(legacy, pipe, args.last_closed, projects)
         # Projects created after the newest one each pole of the workbook knows are added on their own.
         latest = []
@@ -100,7 +100,8 @@ def main() -> int:
         objectives = {(pole, y): (legacy.objectives[pole][0] if y == first_year else 0.0, legacy.objectives[pole][1], {})
                       for pole in POLES for y in range(first_year, last_year + 1)}
         params = Params(args.last_closed, 2, since, legacy.kv, objectives)
-        pl = {pole: {"report": legacy.pl_report[pole], args.last_closed: legacy.pl_september[pole]} for pole in POLES}
+        pl = {pole: {"report": legacy.pl_report[pole], **({"2026-09": legacy.pl_september[pole]} if pole in legacy.pl_september else {})}
+              for pole in POLES}
         # Real costs of the reported months: production ÷ the first half's real KV (accounts at the end of June).
         pl_costs = {pole: {"report": legacy.pl_report[pole] / legacy.s1_kv[pole]} for pole in POLES if legacy.s1_kv.get(pole)}
         for n in notes:

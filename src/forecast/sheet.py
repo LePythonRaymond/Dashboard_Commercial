@@ -541,12 +541,12 @@ def actual_month_columns(first_year: int, last_year: int) -> List[str]:
 
 
 ACT_NOTE = ("Production réalisée par pôle et par mois, d'après la comptabilité (compte de résultat). « Report » = mois non "
-            "détaillés (janvier à août 2026, chiffres compta du fichier d'Arthur). Septembre 2026 est une estimation, à remplacer "
-            "à la clôture.")
+            "détaillés (janvier à août 2026, chiffres compta du fichier d'Arthur). À chaque clôture : tapez le mois, puis avancez "
+            "« Dernier mois clos » dans Paramètres. Un mois après le dernier mois clos reste une prévision.")
 ACT_COST_NOTE = ("Coûts (€) · le report vaut production ÷ KV réel du 1er semestre (compta fin juin, fichier d'Arthur). "
                  "Mois vides : coût = production ÷ KV objectif.")
 ACT_PROJ_NOTE = ("Production cumulée par projet à la dernière clôture, depuis le début du projet. PROVISOIRE : reprise du fichier "
-                 "Forecast 2 (cut-off compta du 1er semestre + estimations des chefs de projet pour juillet à septembre). À "
+                 "Forecast 2 (cut-off compta du 1er semestre + estimations des chefs de projet pour juillet et août). À "
                  "remplacer par le suivi de production de la comptabilité dès qu'il est accessible.")
 
 

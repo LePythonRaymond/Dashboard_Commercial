@@ -1222,14 +1222,18 @@ The "En bref" block answers four questions for the year: what is produced, what 
 The script's functions mirror `engine.py` and `model.py` line for line. `tests/test_forecast_js_parity.py` checks them under Node on 300 random rows.
 
 **Start-up** (`--init --legacy file.xlsx`) reproduces Arthur's October to December figures to the euro:
-- every listed project's months are pinned, zeros included;
-- his August P&L correction is kept as a manual line;
+- every listed project's months after the last close (August) are pinned, zeros included;
+- his August P&L correction (114 121 €, "trop comptabilisé") is a manual line at −28 530 € a month from September to December, with a comment;
 - Conception opportunities are attached to the project or devis they became;
-- the January to August P&L becomes a "Report", and September is an estimate.
+- the January to August P&L becomes a "Report"; September stays a forecast month until finance closes it.
+
+**Months between the last close and today** (September on 26 October): shown, not re-spread. A project shows its typed value there; a contract or TS shows its own month value. A project closed by finance appears only if a month is typed on it, and counts only its typed months.
+
+**Menu "Prévision"** (backup only, the row recalculates on every edit): "Recalculer la ligne" records any cell typed but missed (same rule as the server) and redraws the row; "Effacer toutes les saisies jaunes des mois de la ligne" empties the row's typed months.
 
 **Run.** `python scripts/run_forecast.py --spreadsheet ID [--dry-run]` takes about 90 s: Furious, Notion, one read and a few batched writes. Formulas use the sheet's fr_FR syntax. It reads Furious and Notion only.
 
-**Tests.** 482 pass. The 38 new ones are in `test_forecast_engine.py`, `test_forecast_maintenance.py`, `test_forecast_inputs.py` and `test_forecast_js_parity.py`, with shared vectors in `forecast_vectors.json`.
+**Tests.** 493 pass. The 49 new ones are in `test_forecast_engine.py`, `test_forecast_maintenance.py`, `test_forecast_inputs.py` and `test_forecast_js_parity.py`, with shared vectors in `forecast_vectors.json`.
 
 ---
 

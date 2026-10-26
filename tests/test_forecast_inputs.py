@@ -131,3 +131,17 @@ def test_quarters_and_type_labels():
     ts = Row(ref="T1", pole="Maintenance", category="Signé", kind="TS", label="x")
     devis_ts = Row(ref="D1", pole="Maintenance", category="Pipe", kind="Devis", label="x", typologie="Maintenance TS (+DT)")
     assert type_label(ts, "Signé") == "TS signé" and type_label(devis_ts, "Pipe") == "Devis TS en attente"
+
+
+def test_a_closed_project_shows_only_its_typed_months():
+    # Closed by the finance, with a last amount typed in September: only that amount counts.
+    finance = [FinanceProject("Conception", "276", "Smartseille 2", 12324.64, "2026-08", "fermé", 60225.0),
+               FinanceProject("Conception", "277", "Fini sans montant", 5000.0, "2026-08", "fermé", 5000.0)]
+    params = Params("2026-08", 2, None, {}, {})
+    state = SheetState(params, finance, {}, {}, {"P276": {"2026-09": 4675.0}}, {}, {})
+    out = assemble(state, pd.DataFrame(), pd.DataFrame(), [], date(2026, 10, 26))
+    rows = {r.ref: s for r, s in out.rows["Conception"]}
+    assert "P277" not in rows  # closed and nothing typed: not listed
+    smart = rows["P276"]
+    assert smart.months["2026-09"] == 4675 and smart.remaining == 4675
+    assert sum(v for m, v in smart.months.items() if m != "2026-09") == 0 and smart.gap == 0
