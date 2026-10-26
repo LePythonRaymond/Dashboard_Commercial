@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
@@ -105,35 +106,51 @@ def _month(value) -> Optional[str]:
         return None
 
 
+def _ascii_words(text: str) -> List[str]:
+    plain = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode()
+    return re.findall(r"[0-9A-Za-z]+", plain)
+
+
+def site_number(site: Site) -> str:
+    """Furious number of a site: the one in its title (« Cogéva - 1116 (EXT) »), else the "ID furious" column.
+
+    The title wins because it is the one people read and correct: on 2026-10-26 Cogéva's "ID furious" said 1119
+    (Green Corner's number) while its title and Furious said 1116.
+    """
+    m = re.search(r"-\s*(\d+(?:\s*\+\s*\d+)*)\s*\(", site.name or "")
+    return "-".join(_ascii_words(m.group(1) if m else site.furious_id))
+
+
 def site_refs(sites: List[Site]) -> Dict[str, str]:
     """Short, stable, unique references for maintenance contracts.
 
-    "S" + the site's Furious number, with "-INT" / "-EXT" when two sites share it (inside and outside of one
-    building). A site without a Furious number, or still clashing, gets "S" + the end of its Notion page id.
+    1. "S" + the site's Furious number (``site_number``).
+    2. When several sites share it, + the label in brackets at the end of the title: EXT, INT, Maraichage...
+       (or the INT/EXT column when the title has none).
+    3. Still shared (three buildings on one contract), + the first word of the name.
+    4. No number, or still shared: "S" + the end of the Notion page id.
     """
-    def clean(text: str) -> str:
-        return "-".join(re.findall(r"[0-9A-Za-z]+", text or ""))
+    def label(s: Site) -> str:
+        m = re.search(r"\(([^()]*)\)\s*$", s.name or "")
+        return "-".join(_ascii_words(m.group(1) if m else s.int_ext))
 
-    wanted = {s.page_id: "S" + clean(s.furious_id) if clean(s.furious_id) else "" for s in sites}
-    counts: Dict[str, int] = {}
-    for ref in wanted.values():
-        if ref:
-            counts[ref] = counts.get(ref, 0) + 1
-    for s in sites:
-        ref = wanted[s.page_id]
-        if ref and counts[ref] > 1 and s.int_ext:
-            wanted[s.page_id] = f"{ref}-{clean(s.int_ext)}"
-    seen: Dict[str, int] = {}
-    for ref in wanted.values():
-        if ref:
-            seen[ref] = seen.get(ref, 0) + 1
-    out: Dict[str, str] = {}
-    for s in sites:
-        ref = wanted[s.page_id]
-        if not ref or seen[ref] > 1:
-            ref = "S" + s.page_id.replace("-", "")[-6:]
-        out[s.page_id] = ref
-    return out
+    def unique(candidates: Dict[str, str]) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for ref in candidates.values():
+            if ref:
+                counts[ref] = counts.get(ref, 0) + 1
+        return counts
+
+    wanted = {s.page_id: ("S" + site_number(s)) if site_number(s) else "" for s in sites}
+    for extra in (label, lambda s: "-".join(_ascii_words(s.name)[:1]).upper()):
+        counts = unique(wanted)
+        for s in sites:
+            ref = wanted[s.page_id]
+            if ref and counts[ref] > 1 and extra(s):
+                wanted[s.page_id] = f"{ref}-{extra(s)}"
+    counts = unique(wanted)
+    return {s.page_id: wanted[s.page_id] if wanted[s.page_id] and counts[wanted[s.page_id]] == 1
+            else "S" + s.page_id.replace("-", "")[-6:] for s in sites}
 
 
 def _pole_of_bu(bu: str) -> Optional[str]:
@@ -381,6 +398,10 @@ def assemble(
                 "per_passage": value / planned if planned else "",
             },
         )
+        listed = "-".join(_ascii_words(s.furious_id))
+        if listed and site_number(s) and listed != site_number(s):
+            checks.append(("Maintenance", row.ref, s.name, f"N° Furious du titre ({site_number(s)}) différent de la colonne "
+                                                           f"« ID furious » de Notion ({s.furious_id}) : corriger dans Notion"))
         if s.annual <= 0:
             row.alerts.append("Pas de montant annuel dans Notion")
         elif not s.passages and fixed:
