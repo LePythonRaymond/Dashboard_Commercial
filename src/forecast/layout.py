@@ -41,8 +41,25 @@ ROW_HEADER = 8
 ROW_FIRST = 9
 
 # Colours (Google Sheets RGB 0..1)
-BLUE_INPUT = {"red": 0.91, "green": 0.95, "blue": 1.0}
-YELLOW_TYPED = {"red": 1.0, "green": 0.95, "blue": 0.70}
+def rgb(hex_code: str) -> dict:
+    """"#fff2cc" -> {"red": 1.0, "green": 0.949..., "blue": 0.8}"""
+    h = hex_code.lstrip("#")
+    return {k: int(h[i:i + 2], 16) / 255 for k, i in (("red", 0), ("green", 2), ("blue", 4))}
+
+
+# One colour per pole, chosen by the user in the Synthèse (2026-10-26): pale for the lines, strong for totals
+# and headers; then three shades for the charts (réalisé, signé, pipe pondéré).
+POLE_COLORS = {
+    "Travaux": {"light": "#fff2cc", "strong": "#ffe599", "chart": ("#7f6000", "#bf9000", "#ffd966")},
+    "Conception": {"light": "#d9ead3", "strong": "#b6d7a8", "chart": ("#274e13", "#6aa84f", "#b6d7a8")},
+    "Maintenance": {"light": "#d9d2e9", "strong": "#b4a7d6", "chart": ("#20124d", "#674ea7", "#b4a7d6")},
+    "Total": {"light": "#cfe2f3", "strong": "#9fc5e8", "chart": ("#073763", "#3d85c6", "#9fc5e8")},
+}
+OBJECTIVE_LINE = "#434343"
+INPUT_HEX = "#e8f2ff"
+TYPED_HEX = "#f9cb9c"  # orange: yellow is the Travaux colour
+BLUE_INPUT = rgb(INPUT_HEX)
+TYPED_BG = rgb(TYPED_HEX)
 GREY_CALC = {"red": 0.96, "green": 0.96, "blue": 0.96}
 WHITE = {"red": 1.0, "green": 1.0, "blue": 1.0}
 HEADER_BG = {"red": 0.15, "green": 0.30, "blue": 0.25}

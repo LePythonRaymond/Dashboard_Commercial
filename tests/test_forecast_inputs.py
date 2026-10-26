@@ -164,3 +164,28 @@ def test_contract_references_follow_the_number_in_the_title():
         "p1-000001": "S1116", "p2-000002": "S1119", "p3-000003": "S1044", "p4-000004": "S721-EXT",
         "p5-000005": "S721-Maraichage", "p6-000006": "S209-EXT-BOETIE", "p7-000007": "S209-EXT-ROYALE",
     }
+
+
+def test_summary_headers_notes_and_one_chart_per_pole():
+    from datetime import datetime
+
+    from src.forecast import months as M
+    from src.forecast.layout import col_letter
+    from src.forecast.sheet import CHART_BLOCK, CHART_COL, CHART_ROW, YEARS_FIRST, render_summary
+
+    params = Params("2026-08", 2, None, {}, {("Travaux", 2026): (3500000.0, 1.47, {})}, {("Travaux", 2026): 23})
+    pl = {"Travaux": {"report": 1859642.0}, "Conception": {"report": 423060.0}, "Maintenance": {"report": 941984.0}}
+    columns = {"report": "B", **{m: col_letter(2 + i) for i, m in enumerate(M.span("2026-01", "2027-12"))}}
+    state = SheetState(params, [], pl, {}, {}, {}, {}, columns)
+    out = assemble(state, pd.DataFrame(), pd.DataFrame(), [], date(2026, 10, 26))
+    values, formulas, styled = render_summary(out, state, datetime(2026, 10, 26, 8, 0))
+    f = dict(formulas)
+    assert values[3][1] == "Réalisé compta (janv. à août 2026)" and values[3][4] == "Total prévu fin 2026 (atterrissage)"
+    assert values[YEARS_FIRST - 1][1] == "Cumul janv. à août"  # was "Report"
+    assert any(r == YEARS_FIRST and c == 1 for r, c, _ in styled["notes"])
+    for b, name in enumerate(["Total", "Travaux", "Conception", "Maintenance"]):
+        c0 = CHART_COL + CHART_BLOCK * b
+        assert values[CHART_ROW - 1][c0:c0 + 5] == ["Mois", "Réalisé", "Signé", "Pipe pondéré", "Objectif"], name
+        assert values[CHART_ROW][c0] == "Moy. janv. à août", name  # the months known only as a total, as one average bar
+        assert f[f"{col_letter(c0 + 1)}{CHART_ROW + 1}"].endswith("/8"), name
+        assert values[CHART_ROW + 1][c0] == "sept. 2026", name

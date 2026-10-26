@@ -1229,7 +1229,9 @@ The script's functions mirror `engine.py` and `model.py` line for line. `tests/t
 
 **Months between the last close and today** (September on 26 October): shown, not re-spread. A project shows its typed value there; a contract or TS shows its own month value. A project closed by finance appears only if a month is typed on it, and counts only its typed months.
 
-**Menu "Prévision"** (backup only, the row recalculates on every edit): "Recalculer la ligne" records any cell typed but missed (same rule as the server) and redraws the row; "Effacer toutes les saisies jaunes des mois de la ligne" empties the row's typed months.
+**Menu "Prévision"** (backup only, the row recalculates on every edit): "Recalculer la ligne" records any cell typed but missed (same rule as the server) and redraws the row; "Effacer toutes les saisies orange des mois de la ligne" empties the row's typed months.
+
+**Colours.** One per pole, chosen by the user (`POLE_COLORS`): Travaux yellow, Conception green, Maintenance purple, Total blue; pale for lines, strong for totals, headers and the tab. Typed cells are orange (yellow is Travaux). The script reads the colours from `_calcul` (`__meta.colors`), so a colour change needs no new paste. The Synthèse has one chart for all poles and one per pole; their first bar is the monthly average of the months known only as a cumulative ("Cumul janv. à août").
 
 **Run.** `python scripts/run_forecast.py --spreadsheet ID [--dry-run]` takes about 90 s: Furious, Notion, one read and a few batched writes. Formulas use the sheet's fr_FR syntax. It reads Furious and Notion only.
 
