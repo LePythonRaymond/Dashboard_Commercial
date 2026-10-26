@@ -1,0 +1,77 @@
+{
+  "_doc": "Shared cases for distribute(): run by tests/test_forecast_engine.py (Python) and tests/test_forecast_js_parity.py (the Apps Script twin under Node). Amounts in euros.",
+  "cases": [
+    {
+      "name": "equal shape, nothing typed",
+      "remaining": 370000, "weights": {"2026-10": 1, "2026-11": 1, "2026-12": 1}, "pins": {},
+      "grid": ["2026-10", "2026-11", "2026-12", "2027-01"], "open_from": "2026-10", "fallback_months": 2,
+      "expect": {"values": {"2026-10": 123333.3333, "2026-11": 123333.3333, "2026-12": 123333.3333, "2027-01": 0}, "beyond": 0, "unplaced": 0, "fallback": false}
+    },
+    {
+      "name": "november typed at 0, the two other months share the rest",
+      "remaining": 370000, "weights": {"2026-10": 1, "2026-11": 1, "2026-12": 1}, "pins": {"2026-11": 0},
+      "grid": ["2026-10", "2026-11", "2026-12", "2027-01"], "open_from": "2026-10", "fallback_months": 2,
+      "expect": {"values": {"2026-10": 185000, "2026-11": 0, "2026-12": 185000, "2027-01": 0}, "beyond": 0, "unplaced": 0, "fallback": false}
+    },
+    {
+      "name": "big delivery typed in october, end extended to january",
+      "remaining": 370000, "weights": {"2026-10": 1, "2026-11": 1, "2026-12": 1, "2027-01": 1}, "pins": {"2026-10": 250000, "2026-11": 0},
+      "grid": ["2026-10", "2026-11", "2026-12", "2027-01"], "open_from": "2026-10", "fallback_months": 2,
+      "expect": {"values": {"2026-10": 250000, "2026-11": 0, "2026-12": 60000, "2027-01": 60000}, "beyond": 0, "unplaced": 0, "fallback": false}
+    },
+    {
+      "name": "typing error: typed months exceed what remains",
+      "remaining": 370000, "weights": {"2026-10": 1, "2026-11": 1, "2026-12": 1}, "pins": {"2026-10": 400000, "2026-11": 0},
+      "grid": ["2026-10", "2026-11", "2026-12"], "open_from": "2026-10", "fallback_months": 2,
+      "expect": {"values": {"2026-10": 400000, "2026-11": 0, "2026-12": 0}, "beyond": 0, "unplaced": -30000, "fallback": false}
+    },
+    {
+      "name": "Furious dates all in the past: equal parts over the next 2 open months",
+      "remaining": 90000, "weights": {"2026-05": 1, "2026-06": 1, "2026-07": 1}, "pins": {},
+      "grid": ["2026-10", "2026-11", "2026-12"], "open_from": "2026-10", "fallback_months": 2,
+      "expect": {"values": {"2026-10": 45000, "2026-11": 45000, "2026-12": 0}, "beyond": 0, "unplaced": 0, "fallback": true}
+    },
+    {
+      "name": "past grid month keeps its typed estimate and never receives the rest",
+      "remaining": 200000, "weights": {"2026-09": 1, "2026-10": 1, "2026-11": 1, "2026-12": 1}, "pins": {"2026-09": 50000},
+      "grid": ["2026-09", "2026-10", "2026-11", "2026-12", "2027-01"], "open_from": "2026-10", "fallback_months": 2,
+      "expect": {"values": {"2026-09": 50000, "2026-10": 50000, "2026-11": 50000, "2026-12": 50000, "2027-01": 0}, "beyond": 0, "unplaced": 0, "fallback": false}
+    },
+    {
+      "name": "part of the shape lies after the window",
+      "remaining": 60000, "weights": {"2026-11": 1, "2026-12": 1, "2027-01": 1, "2027-02": 1, "2027-03": 1, "2027-04": 1}, "pins": {},
+      "grid": ["2026-10", "2026-11", "2026-12", "2027-01", "2027-02"], "open_from": "2026-10", "fallback_months": 2,
+      "expect": {"values": {"2026-10": 0, "2026-11": 10000, "2026-12": 10000, "2027-01": 10000, "2027-02": 10000}, "beyond": 20000, "unplaced": 0, "fallback": false}
+    },
+    {
+      "name": "uneven Conception shape with a pause, one month typed",
+      "remaining": 20000, "weights": {"2026-10": 2000, "2026-11": 2000, "2026-12": 2000, "2027-01": 2000, "2027-02": 2000, "2027-03": 2000, "2027-10": 1333.33, "2027-11": 1333.33, "2027-12": 1333.33, "2028-01": 1333.33, "2028-02": 1333.33, "2028-03": 1333.33}, "pins": {"2026-10": 5000},
+      "grid": ["2026-10", "2026-11", "2026-12", "2027-01", "2027-02", "2027-03", "2027-04", "2027-05", "2027-06", "2027-07", "2027-08", "2027-09", "2027-10", "2027-11", "2027-12", "2028-01", "2028-02", "2028-03"], "open_from": "2026-10", "fallback_months": 2,
+      "expect": {"values": {"2026-10": 5000, "2026-11": 1666.6685, "2026-12": 1666.6685, "2027-01": 1666.6685, "2027-02": 1666.6685, "2027-03": 1666.6685, "2027-04": 0, "2027-05": 0, "2027-06": 0, "2027-07": 0, "2027-08": 0, "2027-09": 0, "2027-10": 1111.1096, "2027-11": 1111.1096, "2027-12": 1111.1096, "2028-01": 1111.1096, "2028-02": 1111.1096, "2028-03": 1111.1096}, "beyond": 0, "unplaced": 0, "fallback": false}
+    },
+    {
+      "name": "every open month typed and something left: shown as not placed",
+      "remaining": 100000, "weights": {"2026-10": 1, "2026-11": 1}, "pins": {"2026-10": 30000, "2026-11": 30000},
+      "grid": ["2026-10", "2026-11"], "open_from": "2026-10", "fallback_months": 2,
+      "expect": {"values": {"2026-10": 30000, "2026-11": 30000}, "beyond": 0, "unplaced": 40000, "fallback": false}
+    },
+    {
+      "name": "nothing left to produce",
+      "remaining": 0, "weights": {"2026-10": 1}, "pins": {},
+      "grid": ["2026-10", "2026-11"], "open_from": "2026-10", "fallback_months": 2,
+      "expect": {"values": {"2026-10": 0, "2026-11": 0}, "beyond": 0, "unplaced": 0, "fallback": false}
+    },
+    {
+      "name": "typed month outside the grid is ignored",
+      "remaining": 30000, "weights": {"2026-10": 1, "2026-11": 1, "2026-12": 1}, "pins": {"2026-08": 99999},
+      "grid": ["2026-10", "2026-11", "2026-12"], "open_from": "2026-10", "fallback_months": 2,
+      "expect": {"values": {"2026-10": 10000, "2026-11": 10000, "2026-12": 10000}, "beyond": 0, "unplaced": 0, "fallback": false}
+    },
+    {
+      "name": "fallback skips typed months",
+      "remaining": 50000, "weights": {}, "pins": {"2026-10": 10000},
+      "grid": ["2026-10", "2026-11", "2026-12", "2027-01"], "open_from": "2026-10", "fallback_months": 2,
+      "expect": {"values": {"2026-10": 10000, "2026-11": 20000, "2026-12": 20000, "2027-01": 0}, "beyond": 0, "unplaced": 0, "fallback": true}
+    }
+  ]
+}

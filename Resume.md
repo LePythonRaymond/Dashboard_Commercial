@@ -1185,6 +1185,56 @@ Two January breakdowns from the 2026-09-28 audit, fixed before they could happen
 
 A Furious failure now sends one "run échoué" alert, and the §18.24 incident one "anomalies" alert.
 
+### 18.26 Production forecast sheet (October 2026)
+
+This replaces Arthur's hand-made workbook "Forecast 2" (formerly "Prédiction Production 2026 - Vision S2") with a Google Sheet the server fills.
+- It is built in the copy "Copie de Forecast 2" (`1YeKI_nkKLTDNn2LpBwlEuDUI-LQKnY8paSwjUJE2MOA`). The original is untouched.
+- Code: `src/forecast/`, `scripts/run_forecast.py`, `src/forecast/apps_script/Prevision.gs`.
+
+**What it shows** (tab Synthèse), per pole and month:
+- the P&L actuals up to the last closed month (tab Réalisé, typed by finance);
+- after that, signed work still to produce, plus the pipe weighted by its probability;
+- the production objectives (tab Paramètres) to compare against.
+
+The "En bref" block answers four questions for the year: what is produced, what is signed and still to produce, what is probable, and what is left to sign and produce to reach the objective.
+
+**Rows** (tabs Travaux, Conception, Maintenance). There is one row per:
+- **Signed project.** These are the Furious projects that finance lists in Réalisé, plus new Furious projects created after the date set in Paramètres. Remaining = CA − maintenance share − cumulative production at the last close (from finance).
+- **Pending devis.** This is the dashboard's pipe: same fetch, avenants, cleaning and overrides as the daily pipeline.
+- **Maintenance contract** (Notion Sites).
+  - The year's value follows the rule of the Notion column "Total HT Cette année".
+  - That value is split over the months by the site's passages in the Notion Planning. One planned passage counts as one done, and two passages on the same site and day count once.
+  - n8n generates each year's planning on 1 January. A year not generated yet borrows the months of the busiest planned year.
+- **TS and animation.** These are Furious projects in BU MAINTENANCE with typologie "Maintenance TS (+DT)" or animation. They follow their own dates with the Travaux rule.
+- **Manual line.** A line typed under the table becomes `M<n>`.
+
+**Spread** (`engine.py`):
+- **Default shape:** the dashboard's rules (`RevenueEngine`). A pending devis whose start date has passed starts at the first open month.
+- **Typed months:** a month typed by hand stays as typed. The remaining amount minus the typed months is shared over the other open months, in proportion to the shape.
+- **Dates all in the past:** equal parts over the next N months (set in Paramètres, default 2).
+- **Typed dates:** an end month gives equal parts up to that month. A start month moves the whole schedule.
+
+**Typed values.** The Apps Script stores them per Réf. in the hidden tab `_saisies` and recomputes the row at once. The server also catches edits the script missed:
+- an editable cell that differs from what was last written (`_rendu`) counts as typed;
+- an emptied cell goes back to automatic;
+- a row whose label no longer matches its Réf. (a partial sort) is skipped and reported in Contrôles.
+
+The script's functions mirror `engine.py` and `model.py` line for line. `tests/test_forecast_js_parity.py` checks them under Node on 300 random rows.
+
+**Start-up** (`--init --legacy file.xlsx`) reproduces Arthur's October to December figures to the euro:
+- every listed project's months after the last close (August) are pinned, zeros included;
+- his August P&L correction (114 121 €, "trop comptabilisé") is a manual line at −28 530 € a month from September to December, with a comment;
+- Conception opportunities are attached to the project or devis they became;
+- the January to August P&L becomes a "Report"; September stays a forecast month until finance closes it.
+
+**Months between the last close and today** (September on 26 October): shown, not re-spread. A project shows its typed value there; a contract or TS shows its own month value. A project closed by finance appears only if a month is typed on it, and counts only its typed months.
+
+**Menu "Prévision"** (backup only, the row recalculates on every edit): "Recalculer la ligne" records any cell typed but missed (same rule as the server) and redraws the row; "Effacer toutes les saisies jaunes des mois de la ligne" empties the row's typed months.
+
+**Run.** `python scripts/run_forecast.py --spreadsheet ID [--dry-run]` takes about 90 s: Furious, Notion, one read and a few batched writes. Formulas use the sheet's fr_FR syntax. It reads Furious and Notion only.
+
+**Tests.** 493 pass. The 49 new ones are in `test_forecast_engine.py`, `test_forecast_maintenance.py`, `test_forecast_inputs.py` and `test_forecast_js_parity.py`, with shared vectors in `forecast_vectors.json`.
+
 ---
 
 ## 17. Conclusion

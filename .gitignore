@@ -47,3 +47,6 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Shared test cases of the forecast engine (Python and Apps Script), not data
+!tests/forecast_vectors.json
