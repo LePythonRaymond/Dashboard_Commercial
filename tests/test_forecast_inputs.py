@@ -145,3 +145,22 @@ def test_a_closed_project_shows_only_its_typed_months():
     smart = rows["P276"]
     assert smart.months["2026-09"] == 4675 and smart.remaining == 4675
     assert sum(v for m, v in smart.months.items() if m != "2026-09") == 0 and smart.gap == 0
+
+
+def test_contract_references_follow_the_number_in_the_title():
+    from src.forecast.build import site_refs
+    from src.forecast.maintenance import Site
+
+    sites = [
+        Site("p1-000001", "Cogéva - 1116 (EXT)", 1, furious_id="1119", int_ext="EXT"),  # wrong ID in Notion
+        Site("p2-000002", "Green Corner - 1119 (EXT)", 1, furious_id="1119", int_ext="EXT"),
+        Site("p3-000003", "INSEE - 1044 (EXT)", 1, int_ext="EXT"),  # ID furious empty
+        Site("p4-000004", "Capital 8 - 721 (EXT)", 1, furious_id="721", int_ext="EXT"),
+        Site("p5-000005", "Capital 8 - 721 (Maraîchage)", 1, furious_id="721", int_ext="EXT"),
+        Site("p6-000006", "BOETIE WONDERLAND - 209 (EXT)", 1, furious_id="209", int_ext="EXT"),
+        Site("p7-000007", "ROYALE WONDERLAND - 209 (EXT)", 1, furious_id="209", int_ext="EXT"),
+    ]
+    assert site_refs(sites) == {
+        "p1-000001": "S1116", "p2-000002": "S1119", "p3-000003": "S1044", "p4-000004": "S721-EXT",
+        "p5-000005": "S721-Maraichage", "p6-000006": "S209-EXT-BOETIE", "p7-000007": "S209-EXT-ROYALE",
+    }
