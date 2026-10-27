@@ -186,11 +186,12 @@ def passages_by_site(planning_pages: Iterable[dict]) -> Dict[str, Dict[str, int]
     return counts
 
 
-# --------------------------------------------------------------------------- contract status (Safe / À risque / Mort)
+# --------------------------------------------------------------------------- contract status (Safe / À surveiller / Mort)
 
 RISK_HORIZON_DAYS = 90  # an end date this close is worth a look
-# Notion "Reconduction" option -> contract status (decided by the user on 2026-10-27)
-RECONDUCTION_HEALTH = {"Reconduction Tacite": "Safe", "À surveiller": "À risque", "Perdu": "Mort"}
+# Notion "Reconduction" option -> contract status (decided by the user on 2026-10-27; Hugo asked for
+# "À surveiller" rather than "À risque", less alarming, so the sheet uses the Notion word itself)
+RECONDUCTION_HEALTH = {"Reconduction Tacite": "Safe", "À surveiller": "À surveiller", "Perdu": "Mort"}
 
 
 def contract_signals(site: Site, today: date) -> List[str]:
@@ -207,12 +208,12 @@ def contract_signals(site: Site, today: date) -> List[str]:
 
 
 def contract_health(site: Site, today: date) -> Tuple[str, str]:
-    """Status of a maintenance contract and why: ("Safe" | "À risque" | "Mort" | "", reason).
+    """Status of a maintenance contract and why: ("Safe" | "À surveiller" | "Mort" | "", reason).
 
     The status is a person's decision, typed in Notion's "Reconduction" (a multi-select):
-    "Reconduction Tacite" = Safe, "À surveiller" = À risque, "Perdu" = Mort. The most cautious option
+    "Reconduction Tacite" = Safe, "À surveiller" = À surveiller, "Perdu" = Mort. The most cautious option
     wins when several are ticked (Perdu, then À surveiller, then Reconduction Tacite). An archived site
-    is Mort. Any other value ("à suivre", "Relancé en attente de réponse") or none: À risque until
+    is Mort. Any other value ("à suivre", "Relancé en attente de réponse") or none: À surveiller until
     someone decides. The date signals (end passed, no end, end within 3 months) are added to the reason
     but never change the status. A site without an annual amount gets no status (it produces nothing).
     """
@@ -225,8 +226,8 @@ def contract_health(site: Site, today: date) -> Tuple[str, str]:
     if site.annual <= 0:
         return "", "Pas de montant annuel dans Notion"
     if "À surveiller" in options:
-        return "À risque", " · ".join(["À surveiller dans Notion"] + signals)
+        return "À surveiller", " · ".join(["À surveiller dans Notion"] + signals)
     if "Reconduction Tacite" in options:
         return "Safe", " · ".join(["Reconduction Tacite dans Notion"] + [f"à vérifier : {x}" for x in signals])
     told = "Reconduction : " + ", ".join(options) if options else "Reconduction vide"
-    return "À risque", " · ".join([f"{told} (à décider dans Notion)"] + signals)
+    return "À surveiller", " · ".join([f"{told} (à décider dans Notion)"] + signals)

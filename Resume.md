@@ -1239,7 +1239,7 @@ The script's functions mirror `engine.py` and `model.py` line for line. `tests/t
 
 A contract's « État du contrat » (`maintenance.contract_health`) is read from Notion Sites' « Reconduction » (decided 2026-10-27; the pole heads set it there, the sheet is read only):
 - **Safe** = « Reconduction Tacite »;
-- **À risque** = « À surveiller », or nothing decided yet (empty, « à suivre », « Relancé en attente de réponse »), listed in Contrôles as « Reconduction à choisir »;
+- **À surveiller** (called « À risque » until 2026-10-27, renamed at Hugo's request) = « À surveiller », or nothing decided yet (empty, « à suivre », « Relancé en attente de réponse »), listed in Contrôles as « Reconduction à choisir »;
 - **Mort** = « Perdu », or the site archived.
 The most cautious option wins when several are ticked. Date signals (end passed, no end, end within 90 days) go into « Pourquoi » without changing the status; a Safe contract past its end date is listed in Contrôles.
 

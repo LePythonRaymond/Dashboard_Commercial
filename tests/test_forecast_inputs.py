@@ -187,7 +187,7 @@ def test_summary_headers_notes_and_one_chart_per_pole():
     assert values[3][8] == "Manque pour l'objectif (sans compter le pipe)"  # column I, was "(hors pipe)"
     from src.forecast.sheet import STATUS_COL
     assert values[3][STATUS_COL:STATUS_COL + 2] == ["Contrats d'entretien", "Nombre"]
-    assert [values[4 + i][STATUS_COL] for i in range(4)] == ["Safe", "À risque", "Mort", "Total"]
+    assert [values[4 + i][STATUS_COL] for i in range(4)] == ["Safe", "À surveiller", "Mort", "Total"]
     assert f[f"{col_letter(STATUS_COL + 1)}5"].startswith("=COUNTIF('Maintenance contrats'!")
     for b, name in enumerate(["Total", "Travaux", "Conception", "Maintenance"]):
         c0 = CHART_COL + CHART_BLOCK * b
@@ -211,9 +211,9 @@ def test_contract_status_from_notion_reconduction():
     assert contract_health(tacit_passed, today) == (
         "Safe", "Reconduction Tacite dans Notion · à vérifier : fin dépassée le 06/12/2024, encore 2 passages au planning après")
     watched = Site("p3", "x", 1000, end=date(2026, 12, 1), reconduction="Reconduction Tacite, À surveiller")
-    assert contract_health(watched, today) == ("À risque", "À surveiller dans Notion · fin le 01/12/2026, dans moins de 3 mois")
+    assert contract_health(watched, today) == ("À surveiller", "À surveiller dans Notion · fin le 01/12/2026, dans moins de 3 mois")
     pending = Site("p4", "x", 1000, end=date(2027, 11, 2), reconduction="Relancé en attente de réponse")
-    assert contract_health(pending, today) == ("À risque", "Reconduction : Relancé en attente de réponse (à décider dans Notion)")
+    assert contract_health(pending, today) == ("À surveiller", "Reconduction : Relancé en attente de réponse (à décider dans Notion)")
     assert contract_health(Site("p5", "x", 1000, end=date(2027, 1, 1)), today)[1].startswith("Reconduction vide")
     assert contract_health(Site("p6", "x", 1000, lost=True, reconduction="Perdu, Reconduction Tacite"), today) == (
         "Mort", "Perdu dans Notion")
@@ -238,7 +238,7 @@ def test_maintenance_rows_split_between_contracts_and_ts_tabs():
     out = assemble(SheetState(params, [], {}, {}, {}, {}, {}), projects, pd.DataFrame(), sites, date(2026, 10, 27))
     contracts = {r.ref: r for r, _ in out.rows[TAB_CONTRACTS]}
     assert list(contracts) == ["S721", "S1350"] and [r.ref for r, _ in out.rows[TAB_TS]] == ["T1270"]  # Safe first
-    assert contracts["S721"].extra["health"] == "Safe" and contracts["S1350"].extra["health"] == "À risque"
+    assert contracts["S721"].extra["health"] == "Safe" and contracts["S1350"].extra["health"] == "À surveiller"
     # Wednesday's to-do: every contract whose Reconduction is not one of the three choices is listed in Contrôles
     assert [c[1] for c in out.checks if c[3].startswith("Reconduction à choisir")] == ["S1350"]
     # Début and Fin of a contract are its Notion dates, even when it renews (asked on 2026-10-27: Fin was empty)

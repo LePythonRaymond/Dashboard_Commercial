@@ -25,7 +25,7 @@ from .sources import Legacy, norm
 
 KIND_ORDER = {"Projet": 0, "Contrat": 1, "TS": 2, "Animation": 3, "Devis": 4, "Manuel": 5}
 CATEGORY_ORDER = {"Signé": 0, "Pipe": 1}
-HEALTH_ORDER = {"Safe": 0, "À risque": 1, "Mort": 2}
+HEALTH_ORDER = {"Safe": 0, "À surveiller": 1, "Mort": 2}
 
 
 @dataclass
@@ -512,7 +512,7 @@ def assemble(
                 row.extra.update({"health": health, "health_reason": why})
                 if health and "(à décider dans Notion)" in why:
                     checks.append((TAB_CONTRACTS, row.ref, row.label, "Reconduction à choisir dans Notion : Reconduction Tacite "
-                                                                       "(Safe), À surveiller (À risque) ou Perdu (Mort)"))
+                                                                       "(Safe), À surveiller ou Perdu (Mort)"))
                 elif health == "Safe" and site.end is not None and site.end < today:
                     checks.append((TAB_CONTRACTS, row.ref, row.label, f"Reconduction Tacite mais fin dépassée le "
                                                                        f"{site.end:%d/%m/%Y} : mettre à jour la date de fin dans Notion"))
@@ -523,8 +523,8 @@ def assemble(
                     checks.append((pole, row.ref, s.label, a))
         shown.sort(key=lambda rs: (
             rs[0].inactive, CATEGORY_ORDER.get(rs[1].category, 9), KIND_ORDER.get(rs[0].kind, 9),
-            HEALTH_ORDER.get(rs[0].extra.get("health"), 3),  # contracts: Safe, then À risque, then Mort
-            "(à décider dans Notion)" in str(rs[0].extra.get("health_reason")),  # within À risque, decided risks first
+            HEALTH_ORDER.get(rs[0].extra.get("health"), 3),  # contracts: Safe, then À surveiller, then Mort
+            "(à décider dans Notion)" in str(rs[0].extra.get("health_reason")),  # within À surveiller, the decided ones first
             rs[0].owner.lower(), rs[1].label.lower(),
         ))
         out_rows[pole] = shown
