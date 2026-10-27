@@ -15,15 +15,15 @@
  * Le menu « Prévision » n'est qu'un secours, le recalcul se fait déjà à chaque modification :
  *   - « Recalculer la ligne » : relit la ligne sélectionnée, enregistre ce qui a été tapé sans être pris
  *     en compte (par exemple quand deux personnes modifient en même temps), puis la recalcule ;
- *   - « Effacer toutes les saisies jaunes des mois de la ligne » : vide d'un coup tous les mois tapés
+ *   - « Effacer toutes les saisies orange des mois de la ligne » : vide d'un coup tous les mois tapés
  *     de la ligne ; son reste à produire se répartit à nouveau selon les règles.
  */
 
-var POLES = ['Travaux', 'Conception', 'Maintenance'];
+var POLES = ['Travaux', 'Conception', 'Maintenance contrats', 'Maintenance TS'];  // the tabs of rows
 var ROW_FIELDS = 3;
 var ROW_FIRST = 9;
 var EPS = 0.005;
-var COLORS = { typed: '#fff2b3', input: '#e8f2ff', calc: '#ffffff' };
+var COLORS = { typed: '#f9cb9c', input: '#e8f2ff', calc: '#ffffff' };  // the server's colours (_calcul) win
 
 // ------------------------------------------------------------------ months ("AAAA-MM")
 
@@ -175,7 +175,7 @@ function computeRow(calc, typed, meta) {
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('Prévision')
     .addItem('Recalculer la ligne (si elle ne s\'est pas mise à jour)', 'recalcSelected')
-    .addItem('Effacer toutes les saisies jaunes des mois de la ligne', 'releaseSelected')
+    .addItem('Effacer toutes les saisies orange des mois de la ligne', 'releaseSelected')
     .addToUi();
 }
 
@@ -208,10 +208,22 @@ function serialToMonth_(v) {
   return null;
 }
 
+function serialToDay_(v) {
+  var pad = function (n) { return ('0' + n).slice(-2); };
+  if (v instanceof Date) return v.getFullYear() + '-' + pad(v.getMonth() + 1) + '-' + pad(v.getDate());
+  if (typeof v === 'number') { var d = new Date(Date.UTC(1899, 11, 30) + v * 86400000); return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()); }
+  var t = String(v || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(t)) return t.slice(0, 10);
+  var p = t.split('/');
+  if (p.length === 3 && p[2].length === 4) return p[2] + '-' + pad(+p[1]) + '-' + pad(+p[0]);
+  return null;
+}
+
 function normalize_(field, value) {
   if (value === '' || value === null || value === undefined) return null;
   if (field === 'start' || field === 'stop') return serialToMonth_(value);
-  if (field === 'cat' || field === 'label' || field === 'comment') return String(value).trim();
+  if (field === 'confirmed_until') return serialToDay_(value);
+  if (field === 'cat' || field === 'label' || field === 'comment' || field === 'health') return String(value).trim();
   var x = num(value);
   if (field === 'proba' && x !== null && x > 1) x = x / 100;
   return x;
@@ -259,6 +271,7 @@ function onEdit(e) {
 function redrawRow_(sheet, fields, row, ref, typed, calc, meta, rendu) {
   if (!calc) return;
   var res = computeRow(calc, typed, meta);
+  var colors = (meta && meta.colors) || COLORS;  // written by the server each night: no new paste when colours change
   var range = sheet.getRange(row, 1, 1, fields.length);
   var values = range.getValues()[0], backgrounds = range.getBackgrounds()[0];
   var editable = rendu.data[ref] || {};
@@ -275,7 +288,7 @@ function redrawRow_(sheet, fields, row, ref, typed, calc, meta, rendu) {
     var f = fields[i];
     if (shown.hasOwnProperty(f) && f !== 'cost_next' && f !== 'margin_next') values[i] = shown[f];
     if (editable.hasOwnProperty(f)) {
-      backgrounds[i] = typed.hasOwnProperty(f) ? COLORS.typed : COLORS.input;
+      backgrounds[i] = typed.hasOwnProperty(f) ? colors.typed : colors.input;
       newRendu[f] = (f === 'start' || f === 'stop') ? (f === 'start' ? res.start : res.stop) || null : values[i];
     }
   }
@@ -320,6 +333,7 @@ function recordRow_(fields, line, ref, typed, before) {
     var i = fields.indexOf(f); if (i < 0) return;
     var now = line[i];
     if ((f === 'start' || f === 'stop') && now !== '' && now !== null) now = serialToMonth_(now);
+    if (f === 'confirmed_until' && now !== '' && now !== null) now = serialToDay_(now);
     if (sameValue_(now, before[f])) return;
     var v = normalize_(f, line[i]);
     if (v === null || v === '') delete typed[f]; else typed[f] = v;

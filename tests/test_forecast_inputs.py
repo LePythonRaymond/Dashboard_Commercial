@@ -164,3 +164,74 @@ def test_contract_references_follow_the_number_in_the_title():
         "p1-000001": "S1116", "p2-000002": "S1119", "p3-000003": "S1044", "p4-000004": "S721-EXT",
         "p5-000005": "S721-Maraichage", "p6-000006": "S209-EXT-BOETIE", "p7-000007": "S209-EXT-ROYALE",
     }
+
+
+def test_summary_headers_notes_and_one_chart_per_pole():
+    from datetime import datetime
+
+    from src.forecast import months as M
+    from src.forecast.layout import col_letter
+    from src.forecast.sheet import CHART_BLOCK, CHART_COL, CHART_ROW, YEARS_FIRST, render_summary
+
+    params = Params("2026-08", 2, None, {}, {("Travaux", 2026): (3500000.0, 1.47, {})}, {("Travaux", 2026): 23})
+    pl = {"Travaux": {"report": 1859642.0}, "Conception": {"report": 423060.0}, "Maintenance": {"report": 941984.0}}
+    columns = {"report": "B", **{m: col_letter(2 + i) for i, m in enumerate(M.span("2026-01", "2027-12"))}}
+    state = SheetState(params, [], pl, {}, {}, {}, {}, columns)
+    out = assemble(state, pd.DataFrame(), pd.DataFrame(), [], date(2026, 10, 26))
+    values, formulas, styled = render_summary(out, state, datetime(2026, 10, 26, 8, 0))
+    f = dict(formulas)
+    assert values[3][1] == "Réalisé compta (janv. à août 2026)" and values[3][4] == "Total prévu fin 2026 (atterrissage)"
+    assert values[YEARS_FIRST - 1][1] == "Cumul janv. à août"  # was "Report"
+    assert styled["notes"] == []  # no hover notes anywhere (asked on 2026-10-26)
+    assert values[3][8] == "Manque pour l'objectif (sans compter le pipe)"  # column I, was "(hors pipe)"
+    from src.forecast.sheet import STATUS_COL
+    assert values[3][STATUS_COL:STATUS_COL + 2] == ["Contrats d'entretien", "Nombre"]
+    assert [values[4 + i][STATUS_COL] for i in range(4)] == ["Safe", "À risque", "Mort", "Total"]
+    assert f[f"{col_letter(STATUS_COL + 1)}5"].startswith("=COUNTIF('Maintenance contrats'!")
+    for b, name in enumerate(["Total", "Travaux", "Conception", "Maintenance"]):
+        c0 = CHART_COL + CHART_BLOCK * b
+        assert values[CHART_ROW - 1][c0:c0 + 5] == ["Mois", "Réalisé", "Signé", "Pipe pondéré", "Objectif"], name
+        assert values[CHART_ROW][c0] == "Moy. janv. à août", name  # the months known only as a total, as one average bar
+        assert f[f"{col_letter(c0 + 1)}{CHART_ROW + 1}"].endswith("/8"), name
+        assert values[CHART_ROW + 1][c0] == "sept. 2026", name
+
+
+
+def test_contract_status_from_the_data_and_from_a_confirmation():
+    from src.forecast.maintenance import Site, contract_health
+
+    today = date(2026, 10, 27)
+    tacit = Site("p1", "Capital 8 - 721 (EXT)", 38800, start=date(2024, 7, 1), end=date(2050, 12, 31),
+                 reconduction="Reconduction Tacite")
+    assert contract_health(tacit, today) == ("À risque", "fin 2050 : pas de date de fin réelle (tacite)")
+    passed = Site("p2", "Adyen - 179 (INT)", 4420, end=date(2024, 12, 6), reconduction="Relancé en attente de réponse",
+                  dates=["2026-10-30", "2026-11-27"])
+    status, why = contract_health(passed, today)
+    assert status == "À risque" and "fin dépassée le 06/12/2024, encore 2 passages au planning après" in why
+    assert "Notion : Relancé en attente de réponse" in why
+    plain = Site("p3", "Neuf - 1350 (INT)", 4576, start=date(2026, 11, 2), end=date(2027, 11, 2))
+    assert contract_health(plain, today) == ("À risque", "non confirmé")
+    assert contract_health(Site("p4", "x", 1000, lost=True), today)[0] == "Mort"
+    assert contract_health(Site("p5", "x", 0), today) == ("", "Pas de montant annuel dans Notion")
+    # A confirmation wins; a Safe whose date has passed falls back to À risque.
+    assert contract_health(tacit, today, {"health": "Safe", "confirmed_until": "2028-12-31"})[0] == "Safe"
+    status, why = contract_health(plain, today, {"health": "Safe", "confirmed_until": "2026-09-30"})
+    assert status == "À risque" and why.startswith("confirmation expirée le 30/09/2026")
+
+
+def test_maintenance_rows_split_between_contracts_and_ts_tabs():
+    from src.forecast.layout import TAB_CONTRACTS, TAB_TS
+    from src.forecast.maintenance import Site
+
+    projects = pd.DataFrame([
+        {"id": "1270", "title": "(E) - TS - Curage", "total_amount": 3762.0, "start_date": "2026-11-01", "end_date": "2026-11-30",
+         "created_at": "2026-10-01", "project_manager": "luana", "cf_bu": "MAINTENANCE", "typologies": ["Maintenance TS"]},
+    ])
+    sites = [Site("aaaa-1", "Capital 8 - 721 (EXT)", 12000, start=date(2024, 7, 1), end=date(2050, 12, 31), furious_id="721",
+                  passages={"2026-11": 1, "2026-12": 1})]
+    params = Params("2026-09", 2, None, {}, {})
+    out = assemble(SheetState(params, [], {}, {}, {"S721": {"health": "Safe", "confirmed_until": "2028-06-30"}}, {}, {}),
+                   projects, pd.DataFrame(), sites, date(2026, 10, 27))
+    contracts = {r.ref: r for r, _ in out.rows[TAB_CONTRACTS]}
+    assert list(contracts) == ["S721"] and [r.ref for r, _ in out.rows[TAB_TS]] == ["T1270"]
+    assert contracts["S721"].extra["health"] == "Safe" and contracts["S721"].extra["confirmed_until"] == date(2028, 6, 30)

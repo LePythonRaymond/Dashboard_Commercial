@@ -18,12 +18,14 @@ import pandas as pd
 
 from . import months as M
 from .engine import EPS, myrium_allocation
-from .maintenance import Site, monthly_values, passages_in_year, year_value
+from .layout import POLE_TABS, TAB_CONTRACTS, TAB_POLE, TAB_TS
+from .maintenance import Site, contract_health, monthly_values, passages_in_year, year_value
 from .model import EDITABLE_FIELDS, Row, Shown, compute_row
 from .sources import Legacy, norm
 
 KIND_ORDER = {"Projet": 0, "Contrat": 1, "TS": 2, "Animation": 3, "Devis": 4, "Manuel": 5}
 CATEGORY_ORDER = {"Signé": 0, "Pipe": 1}
+HEALTH_ORDER = {"Safe": 0, "À risque": 1, "Mort": 2}
 
 
 @dataclass
@@ -319,7 +321,7 @@ def assemble(
     params = state.params
     grid, open_from = window(params.last_closed, today)
     years = sorted({M.year_of(m) for m in grid})
-    rows: Dict[str, List[Row]] = {p: [] for p in ("Travaux", "Conception", "Maintenance")}
+    rows: Dict[str, List[Row]] = {t: [] for t in POLE_TABS}  # by tab: Maintenance is split into contracts and TS
     checks: List[Tuple[str, str, str, str]] = []
     notes: List[str] = []
     kv = params.kv
@@ -378,6 +380,7 @@ def assemble(
     # Maintenance: contracts (Notion), TS and animations (Furious projects), pipe (Furious devis).
     refs = site_refs(sites)
     year = M.year_of(open_from)
+    site_of: Dict[str, Site] = {}
     for s in sites:
         # A contract renews itself: only the months of the window count (nothing "after the window").
         fixed = {} if s.archived else {
@@ -398,15 +401,16 @@ def assemble(
                 "per_passage": value / planned if planned else "",
             },
         )
+        site_of[row.ref] = s
         listed = "-".join(_ascii_words(s.furious_id))
         if listed and site_number(s) and listed != site_number(s):
-            checks.append(("Maintenance", row.ref, s.name, f"N° Furious du titre ({site_number(s)}) différent de la colonne "
+            checks.append((TAB_CONTRACTS, row.ref, s.name, f"N° Furious du titre ({site_number(s)}) différent de la colonne "
                                                            f"« ID furious » de Notion ({s.furious_id}) : corriger dans Notion"))
         if s.annual <= 0:
             row.alerts.append("Pas de montant annuel dans Notion")
         elif not s.passages and fixed:
             row.alerts.append("Aucun passage au planning : montant réparti à parts égales")
-        rows["Maintenance"].append(row)
+        rows[TAB_CONTRACTS].append(row)
 
     if not projects.empty:
         horizon = pd.Timestamp(today) - pd.DateOffset(months=24)
@@ -426,7 +430,7 @@ def assemble(
             fixed = {m: v for m, v in alloc.items() if M.index(m) >= M.index(grid[0])}
             if sum(fixed.values()) <= EPS:
                 continue
-            rows["Maintenance"].append(Row(
+            rows[TAB_TS].append(Row(
                 ref=f"T{p['id']}", pole="Maintenance", category="Signé", kind=kind, label=str(p["title"]),
                 proposal_id=str(p.get("proposal_id") or ""),
                 owner=_owner(p.get("project_manager")), typologie=typ, ca=float(p["total_amount"] or 0),
@@ -441,7 +445,9 @@ def assemble(
             if pole is None or amount <= 0:
                 continue
             typ = str(d.get("cf_typologie_de_devis") or d.get("cf_typologie_myrium") or "")
-            rule = "TRAVAUX" if (pole == "Maintenance" and "TS" in typ.upper().split()) else d["final_bu"]
+            is_ts = pole == "Maintenance" and "TS" in typ.upper().split()
+            rule = "TRAVAUX" if is_ts else d["final_bu"]
+            tab = (TAB_TS if is_ts else TAB_CONTRACTS) if pole == "Maintenance" else pole
             row = Row(
                 ref=f"D{d['id']}", pole=pole, category="Pipe", kind="Devis", label=str(d.get("title") or ""),
                 owner=_owner(d.get("assigned_to")), typologie=typ, ca=amount,
@@ -455,25 +461,26 @@ def assemble(
                 row.proba = 0.0
             devis_date = pd.to_datetime(d.get("date"), errors="coerce")
             if pd.notna(devis_date) and devis_date < pd.Timestamp(today) - pd.DateOffset(months=12):
-                checks.append((pole, row.ref, row.label, f"Devis en attente depuis le {devis_date:%d/%m/%Y} : à gagner ou perdre dans Furious"))
+                checks.append((tab, row.ref, row.label, f"Devis en attente depuis le {devis_date:%d/%m/%Y} : à gagner ou perdre dans Furious"))
             else:
                 alloc = myrium_allocation(str(rule).upper(), amount, row.start, row.stop, row.proposal_date)
                 if alloc and M.index(min(alloc)) <= M.index(M.key(today.year, today.month)):
-                    checks.append((pole, row.ref, row.label, f"Début prévu {M.label(min(alloc))}, devis pas encore signé : "
-                                                             f"compté à partir du mois prochain, à redater dans Furious"))
-            rows[pole].append(row)
+                    checks.append((tab, row.ref, row.label, f"Début prévu {M.label(min(alloc))}, devis pas encore signé : "
+                                                            f"compté à partir du mois prochain, à redater dans Furious"))
+            rows[tab].append(row)
 
     # Manual lines live only in the typed values.
     for ref, typed in state.inputs.items():
         if not re.fullmatch(r"M\d+", ref):
             continue
-        pole = typed.get("_pole")
-        if pole not in rows:
+        tab = typed.get("_pole")
+        tab = TAB_CONTRACTS if tab == "Maintenance" else tab  # lines typed before the Maintenance tab was split
+        if tab not in rows:
             continue
-        rows[pole].append(Row(
-            ref=ref, pole=pole, category=typed.get("cat") if typed.get("cat") in ("Signé", "Pipe") else "Signé",
+        rows[tab].append(Row(
+            ref=ref, pole=TAB_POLE[tab], category=typed.get("cat") if typed.get("cat") in ("Signé", "Pipe") else "Signé",
             kind="Manuel", label=str(typed.get("label") or "Ligne manuelle"), rule="TRAVAUX",
-            kv_default=kv_default(pole, "", 0, kv),
+            kv_default=kv_default(TAB_POLE[tab], "", 0, kv),
         ))
 
     # A devis won in Furious leaves the pipe and becomes a project (P or T row). What people typed on
@@ -499,6 +506,11 @@ def assemble(
         for row in items:
             typed = {k: v for k, v in inputs.get(row.ref, {}).items() if not k.startswith("_")}
             s = compute_row(row, typed, grid, open_from, params.fallback_months, pending_from)
+            if row.ref in site_of:
+                health, why = contract_health(site_of[row.ref], today, typed)
+                until = typed.get("confirmed_until")
+                row.extra.update({"health": health, "health_reason": why,
+                                  "confirmed_until": date.fromisoformat(str(until)[:10]) if until else ""})
             if row.kind in ("Projet", "Devis", "Manuel", "Contrat") or abs(s.remaining) > EPS or s.pinned:
                 shown.append((row, s))
             for a in s.alerts:
@@ -506,6 +518,8 @@ def assemble(
                     checks.append((pole, row.ref, s.label, a))
         shown.sort(key=lambda rs: (
             rs[0].inactive, CATEGORY_ORDER.get(rs[1].category, 9), KIND_ORDER.get(rs[0].kind, 9),
+            HEALTH_ORDER.get(rs[0].extra.get("health"), 3),  # contracts: Safe, then À risque, then Mort
+            rs[0].extra.get("health_reason") == "non confirmé",  # within À risque, real warning signs first
             rs[0].owner.lower(), rs[1].label.lower(),
         ))
         out_rows[pole] = shown

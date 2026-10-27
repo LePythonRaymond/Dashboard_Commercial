@@ -23,7 +23,12 @@ from typing import List, Sequence
 
 from . import months as M
 
-POLES = ("Travaux", "Conception", "Maintenance")
+POLES = ("Travaux", "Conception", "Maintenance")  # poles of the Synthèse, Réalisé and objectives
+TAB_CONTRACTS = "Maintenance contrats"
+TAB_TS = "Maintenance TS"
+POLE_TABS = ("Travaux", "Conception", TAB_CONTRACTS, TAB_TS)  # one tab of rows per pole, Maintenance split in two
+TAB_POLE = {"Travaux": "Travaux", "Conception": "Conception", TAB_CONTRACTS: "Maintenance", TAB_TS: "Maintenance"}
+POLE_TAB_LIST = {pole: [t for t in POLE_TABS if TAB_POLE[t] == pole] for pole in POLES}
 TAB_HOME = "Accueil"
 TAB_SUMMARY = "Synthèse"
 TAB_ACTUALS = "Réalisé"
@@ -33,7 +38,7 @@ TAB_INPUTS = "_saisies"  # Réf -> JSON of the values typed by hand
 TAB_RENDER = "_rendu"  # Réf -> JSON of the editable cells as last written
 TAB_CALC = "_calcul"  # Réf -> JSON the Apps Script needs to redo a row; row 1 holds the grid
 HIDDEN_TABS = (TAB_INPUTS, TAB_RENDER, TAB_CALC)
-TAB_ORDER = (TAB_HOME, TAB_SUMMARY, *POLES, TAB_ACTUALS, TAB_PARAMS, TAB_CHECKS, *HIDDEN_TABS)
+TAB_ORDER = (TAB_HOME, TAB_SUMMARY, *POLE_TABS, TAB_ACTUALS, TAB_PARAMS, TAB_CHECKS, *HIDDEN_TABS)
 
 ROW_TITLE, ROW_LEGEND, ROW_FIELDS = 1, 2, 3
 ROW_SIGNED, ROW_PIPE, ROW_TOTAL, ROW_COST = 4, 5, 6, 7
@@ -41,8 +46,30 @@ ROW_HEADER = 8
 ROW_FIRST = 9
 
 # Colours (Google Sheets RGB 0..1)
-BLUE_INPUT = {"red": 0.91, "green": 0.95, "blue": 1.0}
-YELLOW_TYPED = {"red": 1.0, "green": 0.95, "blue": 0.70}
+def rgb(hex_code: str) -> dict:
+    """"#fff2cc" -> {"red": 1.0, "green": 0.949..., "blue": 0.8}"""
+    h = hex_code.lstrip("#")
+    return {k: int(h[i:i + 2], 16) / 255 for k, i in (("red", 0), ("green", 2), ("blue", 4))}
+
+
+# One colour per pole, chosen by the user in the Synthèse (2026-10-26): pale for the lines, strong for totals
+# and headers; then three shades for the charts (réalisé, signé, pipe pondéré).
+POLE_COLORS = {
+    "Travaux": {"light": "#fff2cc", "strong": "#ffe599", "chart": ("#7f6000", "#bf9000", "#ffd966")},
+    "Conception": {"light": "#d9ead3", "strong": "#b6d7a8", "chart": ("#274e13", "#6aa84f", "#b6d7a8")},
+    "Maintenance": {"light": "#d9d2e9", "strong": "#b4a7d6", "chart": ("#20124d", "#674ea7", "#b4a7d6")},
+    "Total": {"light": "#cfe2f3", "strong": "#9fc5e8", "chart": ("#073763", "#3d85c6", "#9fc5e8")},
+}
+# The two Maintenance tabs share the pole's purple; the TS tab is a shade darker so the tabs stand apart.
+POLE_COLORS[TAB_CONTRACTS] = POLE_COLORS["Maintenance"]
+POLE_COLORS[TAB_TS] = {"light": "#e4dff0", "strong": "#8e7cc3", "chart": POLE_COLORS["Maintenance"]["chart"]}
+HEALTH = ("Safe", "À risque", "Mort")  # contract status, set by hand once confirmed
+HEALTH_TEXT = {"Safe": "#1a6b3d", "À risque": "#b45309", "Mort": "#7f7f7f"}
+OBJECTIVE_LINE = "#434343"
+INPUT_HEX = "#e8f2ff"
+TYPED_HEX = "#f9cb9c"  # orange: yellow is the Travaux colour
+BLUE_INPUT = rgb(INPUT_HEX)
+TYPED_BG = rgb(TYPED_HEX)
 GREY_CALC = {"red": 0.96, "green": 0.96, "blue": 0.96}
 WHITE = {"red": 1.0, "green": 1.0, "blue": 1.0}
 HEADER_BG = {"red": 0.15, "green": 0.30, "blue": 0.25}
@@ -59,7 +86,7 @@ class Col:
     editable: str = ""  # "" = computed, "all" = every row, "manual" = manual rows only
     width: int = 100
     detail: bool = False  # in the collapsible "détails" group
-    only: Sequence[str] = POLES  # poles where the column is visible
+    only: Sequence[str] = POLE_TABS  # tabs where the column is visible
 
 
 BEFORE: List[Col] = [
@@ -68,26 +95,30 @@ BEFORE: List[Col] = [
     Col("type", "Type", "text", width=132),
     Col("label", "Libellé", "text", "manual", 330),
     Col("owner", "Responsable", "text", width=120),
+    # Contract status (asked by Hugo): automatic proposal, confirmed by typing it
+    Col("health", "État du contrat", "text", "contract", 92, only=(TAB_CONTRACTS,)),
+    Col("confirmed_until", "Confirmé jusqu'au", "day", "contract", 92, only=(TAB_CONTRACTS,)),
+    Col("health_reason", "Pourquoi", "text", width=300, only=(TAB_CONTRACTS,)),
     # Maintenance portfolio (asked by Arthur): hidden in the other tabs
-    Col("client", "Client", "text", width=150, only=("Maintenance",)),
-    Col("furious_no", "N° Furious", "text", width=72, only=("Maintenance",)),
-    Col("status", "Statut", "text", width=70, only=("Maintenance",)),
-    Col("renewal", "Reconduction", "text", width=150, only=("Maintenance",)),
-    Col("contract_end", "Fin du contrat", "date", width=88, only=("Maintenance",)),
-    Col("frequency", "Fréquence", "text", width=190, only=("Maintenance",)),
-    Col("passages_year", "Passages prévus {year}", "int", width=82, only=("Maintenance",)),
-    Col("passages_done", "Passages faits à date", "int", width=82, only=("Maintenance",)),
-    Col("year_value", "CA {year} (€)", "money", width=96, only=("Maintenance",)),
-    Col("per_passage", "CA par passage (€)", "money", width=92, only=("Maintenance",)),
+    Col("client", "Client", "text", width=150, only=(TAB_CONTRACTS,)),
+    Col("furious_no", "N° Furious", "text", width=72, only=(TAB_CONTRACTS,)),
+    Col("status", "Statut Notion", "text", width=78, only=(TAB_CONTRACTS,)),
+    Col("renewal", "Reconduction (Notion)", "text", width=150, only=(TAB_CONTRACTS,)),
+    Col("contract_end", "Fin du contrat", "date", width=88, only=(TAB_CONTRACTS,)),
+    Col("frequency", "Fréquence", "text", width=190, only=(TAB_CONTRACTS,)),
+    Col("passages_year", "Passages prévus {year}", "int", width=82, only=(TAB_CONTRACTS,)),
+    Col("passages_done", "Passages faits à date", "int", width=82, only=(TAB_CONTRACTS,)),
+    Col("year_value", "CA {year} (€)", "money", width=96, only=(TAB_CONTRACTS,)),
+    Col("per_passage", "CA par passage (€)", "money", width=92, only=(TAB_CONTRACTS,)),
     Col("ca", "CA (€)", "money", "manual", 100),
     Col("proba", "Proba", "pct", "all", 64),
     Col("remaining", "Reste à produire (€)", "money", width=120),
     Col("this_year", "dont {year} (€)", "money", width=110),
+    Col("start", "Début", "date", "all", 84),
     Col("stop", "Fin", "date", "all", 84),
     Col("kv", "KV", "kv", "all", 56),
     # Collapsible group "détails" (contiguous on purpose: a column group needs one block)
     Col("typo", "Typologie", "text", width=130, detail=True),
-    Col("start", "Début", "date", "all", 84, detail=True),
     Col("produced", "Réalisé à la clôture (€)", "money", width=120, detail=True),
     Col("mai", "Part maintenance (€)", "money", "all", 110, detail=True, only=("Travaux",)),
     Col("cost", "Coût prévu (€)", "money", "all", 106, detail=True),
@@ -120,27 +151,6 @@ def pole_columns(grid: List[str]) -> List[Col]:
     months = [Col(m, M.label(m), "month", "all", 92) for m in grid]
     quarter_cols = [Col(fid, title, "money", width=96) for fid, title, _ in quarters(grid)]
     return BEFORE + months + quarter_cols + AFTER
-
-
-# Notes shown when hovering a column title (row 8)
-HEADER_NOTES = {
-    "ref": "Référence de la ligne. P + n° de projet Furious, D + n° de devis Furious, T + n° de projet Furious (TS ou "
-           "animation), S + n° Furious du site d'entretien (ou un code interne s'il n'en a pas), M = ligne manuelle.",
-    "cat": "Signé : compte à 100 %. Pipe : compte à sa probabilité (colonne Proba). Modifiable sur une ligne manuelle.",
-    "type": "Ce qu'est la ligne : projet signé, devis en attente, contrat d'entretien, TS signé, animation, ligne manuelle.",
-    "proba": "Probabilité de signature. Vient de Furious ; 0 % dans Furious compte 50 %. Tapez une autre valeur pour la remplacer.",
-    "remaining": "Ce qu'il reste à produire en tout. Projet : CA − part maintenance − production à la dernière clôture "
-                 "(onglet Réalisé). Devis : son montant. Contrat : la valeur des mois de la fenêtre.",
-    "this_year": "Partie du reste à produire placée sur les mois de l'année en cours (jusqu'à décembre).",
-    "stop": "Mois de fin. Tapez un mois pour répartir le reste à parts égales jusqu'à lui.",
-    "kv": "KV = CA ÷ coût. Par défaut celui de la typologie (Paramètres). Tapez-le, ou tapez le coût prévu.",
-    "cost": "Coût total prévu du projet. Si vous le tapez, le KV se calcule : (CA − part maintenance) ÷ coût.",
-    "mai": "Part du chantier qui relève de la maintenance : retirée du reste à produire Travaux.",
-    "produced": "Production cumulée depuis le début du projet, à la dernière clôture (onglet Réalisé).",
-    "beyond": "Reste à produire placé après le dernier mois affiché.",
-    "gap": "Doit être vide. Sinon : les mois saisis dépassent le reste à produire (négatif) ou une part n'a pas de mois.",
-    "alerts": "Points à vérifier sur la ligne. La liste complète est dans l'onglet Contrôles.",
-}
 
 
 def col_letter(index0: int) -> str:
