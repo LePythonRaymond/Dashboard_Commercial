@@ -188,58 +188,45 @@ def passages_by_site(planning_pages: Iterable[dict]) -> Dict[str, Dict[str, int]
 
 # --------------------------------------------------------------------------- contract status (Safe / À risque / Mort)
 
-RISK_HORIZON_DAYS = 90  # an end date this close, not confirmed yet, is a risk
+RISK_HORIZON_DAYS = 90  # an end date this close is worth a look
+# Notion "Reconduction" option -> contract status (decided by the user on 2026-10-27)
+RECONDUCTION_HEALTH = {"Reconduction Tacite": "Safe", "À surveiller": "À risque", "Perdu": "Mort"}
 
 
-def contract_health(site: Site, today: date, typed: Optional[Dict[str, object]] = None) -> Tuple[str, str]:
+def contract_signals(site: Site, today: date) -> List[str]:
+    """What the dates say about a contract, whatever its status: worth a look, not a status."""
+    end = site.end
+    if end is None:
+        return ["pas de date de fin dans Notion"]
+    if end < today:
+        after = sum(1 for d in site.dates if d > end.isoformat())
+        return [f"fin dépassée le {end:%d/%m/%Y}" + (f", encore {after} passages au planning après" if after else "")]
+    if (end - today).days <= RISK_HORIZON_DAYS:
+        return [f"fin le {end:%d/%m/%Y}, dans moins de 3 mois"]
+    return []
+
+
+def contract_health(site: Site, today: date) -> Tuple[str, str]:
     """Status of a maintenance contract and why: ("Safe" | "À risque" | "Mort" | "", reason).
 
-    Only a person can say a contract is safe (confirmed for the next one to three years): that is the
-    status typed in the sheet, with an optional "confirmed until" date. Without it the data can only
-    point at risks:
-    - Mort: "Perdu" in Notion's Reconduction, or the site archived.
-    - À risque, with every reason found: end date passed (and still planned after it), no end date or a
-      placeholder one (2040 and later, the "tacite 2050"), end within 3 months, a follow-up flag typed in
-      Notion ("À surveiller", "à suivre", "Relancé en attente de réponse"), or simply "non confirmé".
-    A typed status wins; a "Safe" whose confirmation date has passed goes back to "À risque".
-    A site without an annual amount gets no status (it produces nothing in the forecast).
+    The status is a person's decision, typed in Notion's "Reconduction" (a multi-select):
+    "Reconduction Tacite" = Safe, "À surveiller" = À risque, "Perdu" = Mort. The most cautious option
+    wins when several are ticked (Perdu, then À surveiller, then Reconduction Tacite). An archived site
+    is Mort. Any other value ("à suivre", "Relancé en attente de réponse") or none: À risque until
+    someone decides. The date signals (end passed, no end, end within 3 months) are added to the reason
+    but never change the status. A site without an annual amount gets no status (it produces nothing).
     """
-    typed = typed or {}
-    if site.lost or site.archived:
-        auto, flags = "Mort", ["Perdu dans Notion" if site.lost else "Site archivé dans Notion"]
-    elif site.annual <= 0:
+    options = [o.strip() for o in site.reconduction.split(",") if o.strip()]
+    signals = contract_signals(site, today)
+    if site.archived:
+        return "Mort", "Site archivé dans Notion"
+    if "Perdu" in options:
+        return "Mort", "Perdu dans Notion"
+    if site.annual <= 0:
         return "", "Pas de montant annuel dans Notion"
-    else:
-        auto, flags = "À risque", []
-        end = site.end
-        if end is None:
-            flags.append("pas de date de fin")
-        elif end.year >= 2040:
-            flags.append(f"fin {end.year} : pas de date de fin réelle (tacite)")
-        elif end < today:
-            after = sum(1 for d in site.dates if d > end.isoformat())
-            flags.append(f"fin dépassée le {end:%d/%m/%Y}" + (f", encore {after} passages au planning après" if after else ""))
-        elif (end - today).days <= RISK_HORIZON_DAYS:
-            flags.append(f"fin le {end:%d/%m/%Y}, dans moins de 3 mois")
-        for flag in [f.strip() for f in site.reconduction.split(",")]:
-            if flag and flag not in ("Reconduction Tacite", "Perdu"):
-                flags.append(f"Notion : {flag}")
-    status = str(typed.get("health") or "").strip()
-    if status not in ("Safe", "À risque", "Mort"):
-        return auto, " · ".join(flags) if flags else "non confirmé"
-    until = _day(typed.get("confirmed_until"))
-    if status == "Safe" and until is not None and until < today:
-        return "À risque", " · ".join([f"confirmation expirée le {until:%d/%m/%Y}"] + flags)
-    reason = "confirmé" + (f" jusqu'au {until:%d/%m/%Y}" if until else "")
-    if flags and status == "Safe":
-        reason += " (signaux : " + ", ".join(flags) + ")"
-    return status, reason
-
-
-def _day(value) -> Optional[date]:
-    if value in (None, ""):
-        return None
-    try:
-        return date.fromisoformat(str(value)[:10])
-    except ValueError:
-        return None
+    if "À surveiller" in options:
+        return "À risque", " · ".join(["À surveiller dans Notion"] + signals)
+    if "Reconduction Tacite" in options:
+        return "Safe", " · ".join(["Reconduction Tacite dans Notion"] + [f"à vérifier : {x}" for x in signals])
+    told = "Reconduction : " + ", ".join(options) if options else "Reconduction vide"
+    return "À risque", " · ".join([f"{told} (à décider dans Notion)"] + signals)

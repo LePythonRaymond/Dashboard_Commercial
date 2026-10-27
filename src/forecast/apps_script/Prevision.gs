@@ -208,22 +208,10 @@ function serialToMonth_(v) {
   return null;
 }
 
-function serialToDay_(v) {
-  var pad = function (n) { return ('0' + n).slice(-2); };
-  if (v instanceof Date) return v.getFullYear() + '-' + pad(v.getMonth() + 1) + '-' + pad(v.getDate());
-  if (typeof v === 'number') { var d = new Date(Date.UTC(1899, 11, 30) + v * 86400000); return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()); }
-  var t = String(v || '').trim();
-  if (/^\d{4}-\d{2}-\d{2}/.test(t)) return t.slice(0, 10);
-  var p = t.split('/');
-  if (p.length === 3 && p[2].length === 4) return p[2] + '-' + pad(+p[1]) + '-' + pad(+p[0]);
-  return null;
-}
-
 function normalize_(field, value) {
   if (value === '' || value === null || value === undefined) return null;
   if (field === 'start' || field === 'stop') return serialToMonth_(value);
-  if (field === 'confirmed_until') return serialToDay_(value);
-  if (field === 'cat' || field === 'label' || field === 'comment' || field === 'health') return String(value).trim();
+  if (field === 'cat' || field === 'label' || field === 'comment') return String(value).trim();
   var x = num(value);
   if (field === 'proba' && x !== null && x > 1) x = x / 100;
   return x;
@@ -333,7 +321,6 @@ function recordRow_(fields, line, ref, typed, before) {
     var i = fields.indexOf(f); if (i < 0) return;
     var now = line[i];
     if ((f === 'start' || f === 'stop') && now !== '' && now !== null) now = serialToMonth_(now);
-    if (f === 'confirmed_until' && now !== '' && now !== null) now = serialToDay_(now);
     if (sameValue_(now, before[f])) return;
     var v = normalize_(f, line[i]);
     if (v === null || v === '') delete typed[f]; else typed[f] = v;

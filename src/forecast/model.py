@@ -16,7 +16,7 @@ from . import months as M
 from .engine import EPS, default_weights, distribute, effective_probability
 
 # Field ids of the editable cells (the hidden row 3 of each pole tab carries them).
-EDITABLE_FIELDS = ("cat", "label", "ca", "proba", "mai", "start", "stop", "kv", "cost", "comment", "health", "confirmed_until")
+EDITABLE_FIELDS = ("cat", "label", "ca", "proba", "mai", "start", "stop", "kv", "cost", "comment")
 
 
 @dataclass

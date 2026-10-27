@@ -1237,14 +1237,15 @@ The script's functions mirror `engine.py` and `model.py` line for line. `tests/t
 - « Maintenance contrats »: Notion contracts and contract devis;
 - « Maintenance TS »: TS, animations and their devis.
 
-A contract's « État du contrat » (`maintenance.contract_health`):
-- **Safe** only when typed, with a « Confirmé jusqu'au » date; it falls back to À risque once that date passes;
-- **À risque** otherwise, with the reasons in « Pourquoi » (end passed, tacit 2050 end, no end, end within 90 days, a Notion follow-up flag, or « non confirmé »);
-- **Mort** when Notion says Perdu or the site is archived.
+A contract's « État du contrat » (`maintenance.contract_health`) is read from Notion Sites' « Reconduction » (decided 2026-10-27; the pole heads set it there, the sheet is read only):
+- **Safe** = « Reconduction Tacite »;
+- **À risque** = « À surveiller », or nothing decided yet (empty, « à suivre », « Relancé en attente de réponse »), listed in Contrôles as « Reconduction à choisir »;
+- **Mort** = « Perdu », or the site archived.
+The most cautious option wins when several are ticked. Date signals (end passed, no end, end within 90 days) go into « Pourquoi » without changing the status; a Safe contract past its end date is listed in Contrôles.
 
 « Début » and « Fin » of a contract are its Notion dates and are display only: the months come from the planning, and a contract that is not Perdu keeps producing after its Fin (renewal rule).
 
-**Sheet hygiene.** There are no cell notes. The colour legend is only in the Accueil, which is a page: sections, no gridlines. Every run re-hides `_saisies`, `_rendu` and `_calcul`.
+**Sheet hygiene.** There are no cell notes and no « Écart » column. Notion queries retry 3 times on network errors. The colour legend is only in the Accueil, which is a page: sections, no gridlines. Every run re-hides `_saisies`, `_rendu` and `_calcul`.
 
 **Run.** `python scripts/run_forecast.py --spreadsheet ID [--dry-run]` takes about 90 s: Furious, Notion, one read and a few batched writes. Formulas use the sheet's fr_FR syntax. It reads Furious and Notion only.
 

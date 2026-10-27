@@ -507,10 +507,15 @@ def assemble(
             typed = {k: v for k, v in inputs.get(row.ref, {}).items() if not k.startswith("_")}
             s = compute_row(row, typed, grid, open_from, params.fallback_months, pending_from)
             if row.ref in site_of:
-                health, why = contract_health(site_of[row.ref], today, typed)
-                until = typed.get("confirmed_until")
-                row.extra.update({"health": health, "health_reason": why,
-                                  "confirmed_until": date.fromisoformat(str(until)[:10]) if until else ""})
+                site = site_of[row.ref]
+                health, why = contract_health(site, today)
+                row.extra.update({"health": health, "health_reason": why})
+                if health and "(à décider dans Notion)" in why:
+                    checks.append((TAB_CONTRACTS, row.ref, row.label, "Reconduction à choisir dans Notion : Reconduction Tacite "
+                                                                       "(Safe), À surveiller (À risque) ou Perdu (Mort)"))
+                elif health == "Safe" and site.end is not None and site.end < today:
+                    checks.append((TAB_CONTRACTS, row.ref, row.label, f"Reconduction Tacite mais fin dépassée le "
+                                                                       f"{site.end:%d/%m/%Y} : mettre à jour la date de fin dans Notion"))
             if row.kind in ("Projet", "Devis", "Manuel", "Contrat") or abs(s.remaining) > EPS or s.pinned:
                 shown.append((row, s))
             for a in s.alerts:
@@ -519,7 +524,7 @@ def assemble(
         shown.sort(key=lambda rs: (
             rs[0].inactive, CATEGORY_ORDER.get(rs[1].category, 9), KIND_ORDER.get(rs[0].kind, 9),
             HEALTH_ORDER.get(rs[0].extra.get("health"), 3),  # contracts: Safe, then À risque, then Mort
-            rs[0].extra.get("health_reason") == "non confirmé",  # within À risque, real warning signs first
+            "(à décider dans Notion)" in str(rs[0].extra.get("health_reason")),  # within À risque, decided risks first
             rs[0].owner.lower(), rs[1].label.lower(),
         ))
         out_rows[pole] = shown

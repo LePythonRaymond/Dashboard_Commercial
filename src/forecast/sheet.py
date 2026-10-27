@@ -58,7 +58,6 @@ FORMATS = {
     "kv": {"type": "NUMBER", "pattern": "0.00"},
     "date": {"type": "DATE", "pattern": "mmm yyyy"},
     "int": {"type": "NUMBER", "pattern": "0"},
-    "day": {"type": "DATE", "pattern": "dd/mm/yyyy"},
 }
 
 # Réalisé tab: accounting table (rows 5-7 production, 11-13 costs), projects table from row 17
@@ -76,26 +75,6 @@ def month_serial(month_key: Optional[str]):
         return ""
     y, m = M.parse(month_key)
     return serial(date(y, m, 1))
-
-
-def cell_day(value) -> Optional[str]:
-    """A day typed in a date cell (serial number, "2027-06-30" or "30/06/2027") as "2027-06-30"."""
-    if value in (None, ""):
-        return None
-    if isinstance(value, (int, float)):
-        return date.fromordinal(EPOCH.toordinal() + int(value)).isoformat()
-    text = str(value).strip()
-    try:
-        return date.fromisoformat(text[:10]).isoformat()
-    except ValueError:
-        pass
-    parts = [p for p in text.replace("-", "/").split("/") if p]
-    try:
-        if len(parts) == 3 and len(parts[2]) == 4:
-            return date(int(parts[2]), int(parts[1]), int(parts[0])).isoformat()
-    except ValueError:
-        return None
-    return None
 
 
 def cell_month(value) -> Optional[str]:
@@ -136,8 +115,6 @@ def editable_fields(row: Row, pole: str, grid: Sequence[str]) -> List[str]:
         fields.append("proba")
     if row.kind not in ("Contrat", "TS", "Animation"):
         fields += ["start", "stop"]
-    if row.kind == "Contrat":
-        fields += ["health", "confirmed_until"]
     if pole == "Travaux":
         fields.append("mai")
     if row.kind == "Manuel":
@@ -156,9 +133,7 @@ def normalize_typed(field: str, value):
         return None
     if field in ("start", "stop"):
         return cell_month(value)
-    if field == "confirmed_until":
-        return cell_day(value)
-    if field in ("cat", "label", "comment", "health"):
+    if field in ("cat", "label", "comment"):
         return str(value).strip()
     x = _num(value)
     if field == "proba" and x is not None and x > 1:  # "30" typed for 30 %
@@ -192,7 +167,7 @@ def render_pole(pole: str, items: List[Tuple[Row, Shown]], grid: List[str], open
     )
     values[ROW_FIELDS - 1] = [c.field for c in cols]
     labels = {ROW_SIGNED: "Signé (€)", ROW_PIPE: "Pipe pondéré par la proba (€)", ROW_TOTAL: "Total prévu (€)",
-              ROW_COST: "Coût prévu, pipe pondéré (€)"}
+              ROW_COST: "Coût prévu (€)"}
     for r, text in labels.items():
         values[r - 1][0] = text  # merged over the frozen columns A to D
     values[ROW_HEADER - 1] = [c.title.replace("{year}", str(M.year_of(open_from))) for c in cols]
@@ -233,7 +208,7 @@ def render_pole(pole: str, items: List[Tuple[Row, Shown]], grid: List[str], open
             "typo": row.typologie, "ca": s.ca, "proba": s.proba if s.category == "Pipe" else "",
             "mai": s.mai if pole == "Travaux" else "", "produced": row.produced if row.kind == "Projet" else "",
             "remaining": s.remaining, "start": month_serial(s.start), "stop": month_serial(s.stop), "kv": s.kv,
-            "cost": s.cost, "beyond": s.beyond or "", "gap": s.gap or "", "alerts": " · ".join(dict.fromkeys(s.alerts)),
+            "cost": s.cost, "beyond": s.beyond or "", "alerts": " · ".join(dict.fromkeys(s.alerts)),
             "comment": s.comment,
         }
         cells.update({m: s.months.get(m, 0.0) for m in grid})
@@ -262,15 +237,12 @@ def render_pole(pole: str, items: List[Tuple[Row, Shown]], grid: List[str], open
             else:
                 bg_row.append(WHITE)
         backgrounds.append(bg_row)
-        if s.gap:
-            red_cells.append((r - 1, idx["gap"]))
         if s.alerts:
             red_cells.append((r - 1, idx["alerts"]))
 
         shown = {}
         for f in editable:
-            shown[f] = (cell_month(cells[f]) if f in ("start", "stop") else
-                        cell_day(cells[f]) if f == "confirmed_until" else cells[f])
+            shown[f] = cell_month(cells[f]) if f in ("start", "stop") else cells[f]
         shown["label"] = s.label
         rendered[row.ref] = shown
         calc[row.ref] = {
@@ -355,8 +327,6 @@ class ForecastSheet:
                 for f in ("start", "stop"):
                     if f in cells:
                         cells[f] = cell_month(cells[f])
-                if "confirmed_until" in cells:
-                    cells["confirmed_until"] = cell_day(cells["confirmed_until"])
                 if any(v not in (None, "") for v in cells.values()):
                     data.append(cells)
             visible[pole] = data
@@ -681,11 +651,13 @@ HOME_SECTIONS: List[Tuple[str, List[Tuple[str, str]]]] = [
         ("Texte rouge", "Alerte à regarder : détail dans la colonne Alertes et l'onglet Contrôles."),
     ]),
     ("État d'un contrat", [
-        ("Safe", "Confirmé pour les 1 à 3 ans qui viennent : tapez « Safe » et la date « Confirmé jusqu'au ». "
-                 "Après cette date, il redevient À risque."),
-        ("À risque", "Pas encore confirmé, ou un signal : fin dépassée, pas de vraie date de fin (tacite 2050), "
-                     "fin dans moins de 3 mois, « À surveiller » dans Notion. Le détail est dans la colonne « Pourquoi »."),
-        ("Mort", "Perdu ou archivé dans Notion."),
+        ("Safe", "« Reconduction Tacite » dans la colonne Reconduction de Notion Sites : le contrat est confirmé."),
+        ("À risque", "« À surveiller » dans Notion, ou rien de décidé encore (Reconduction vide, « à suivre », "
+                     "« Relancé en attente de réponse »)."),
+        ("Mort", "« Perdu » dans Notion, ou site archivé."),
+        ("Pourquoi", "Le choix lu dans Notion, puis ce que disent les dates : fin dépassée, pas de date de fin, fin dans "
+                     "moins de 3 mois. Ces signaux ne changent pas l'état : ils disent quoi vérifier. L'état se change "
+                     "dans Notion, la feuille le reprend la nuit suivante."),
     ]),
     ("Les références (colonne Réf.)", [
         ("P1081", "Projet signé : n° de projet Furious."),
@@ -1116,12 +1088,9 @@ def pole_format_requests(sheet_id: int, rend: Rendered, pole: str) -> List[dict]
         {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": ROW_LEGEND - 1,
                                                  "endIndex": ROW_LEGEND}, "properties": {"pixelSize": 8}, "fields": "pixelSize"}},
     ]
-    if "health" in [c.field for c in cols] and pole == TAB_CONTRACTS:
-        h_i = [c.field for c in cols].index("health")
-        req.append({"setDataValidation": {"range": {"sheetId": sheet_id, "startRowIndex": ROW_FIRST - 1, "endRowIndex": n_rows + 200,
-                                                    "startColumnIndex": h_i, "endColumnIndex": h_i + 1},
-                                          "rule": {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": v} for v in HEALTH]},
-                                                   "strict": False, "showCustomUi": True}}})
+    # No dropdown left from an older layout (the status one, columns that moved): only Catégorie keeps one
+    req.append({"setDataValidation": {"range": {"sheetId": sheet_id, "startRowIndex": ROW_FIRST - 1, "endRowIndex": n_rows + 200,
+                                                "startColumnIndex": 0, "endColumnIndex": len(cols) + 5}}})
     cat_i = [c.field for c in cols].index("cat")
     req.append({"setDataValidation": {"range": {"sheetId": sheet_id, "startRowIndex": ROW_FIRST - 1, "endRowIndex": n_rows + 200,
                                                 "startColumnIndex": cat_i, "endColumnIndex": cat_i + 1},

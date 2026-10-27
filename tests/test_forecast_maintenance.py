@@ -90,3 +90,30 @@ def test_offered_passages_are_skipped_once_notion_carries_the_mark():
         {"properties": {"Date": {"date": {"start": "2026-11-09"}}, "Site": {"relation": [{"id": "s-2"}]}, "Offert": {"checkbox": False}}},
     ]
     assert passages_by_site(pages) == {"s2": {"2026-11": 1}}
+
+
+def test_notion_query_retries_a_dropped_connection(monkeypatch):
+    import requests
+
+    from src.forecast import sources
+
+    calls = []
+
+    class Ok:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"results": [{"id": "p1"}], "next_cursor": None}
+
+    def post(url, json, headers, timeout):
+        calls.append(url)
+        if len(calls) == 1:
+            raise requests.ConnectionError("Remote end closed connection without response")
+        return Ok()
+
+    monkeypatch.setattr(sources.requests, "post", post)
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+    assert sources._notion_query_all("ds", "key") == [{"id": "p1"}] and len(calls) == 2
