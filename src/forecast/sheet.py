@@ -27,9 +27,6 @@ from .engine import myrium_allocation
 from .model import Row, Shown
 
 EPOCH = date(1899, 12, 30)
-LEGEND_BLUE = "Bleu : modifiable"
-LEGEND_TYPED = "Orange : saisi à la main, gardé tel quel (videz la cellule pour revenir au calcul automatique)"
-LEGEND_WHITE = "Blanc : calculé, ne pas modifier"
 SIGNED_TEXT = {"red": 0.10, "green": 0.42, "blue": 0.24}
 DARK_TEXT = {"red": 0.13, "green": 0.13, "blue": 0.13}
 GREY_TEXT = {"red": 0.40, "green": 0.40, "blue": 0.40}
@@ -193,9 +190,6 @@ def render_pole(pole: str, items: List[Tuple[Row, Shown]], grid: List[str], open
     values[ROW_TITLE - 1][idx["label"]] = (
         f"Mis à jour le {updated_at:%d/%m/%Y à %H:%M} · mois ouverts de {M.label(open_from)} à {M.label(grid[-1])}"
     )
-    values[ROW_LEGEND - 1][0] = LEGEND_BLUE
-    values[ROW_LEGEND - 1][idx["label"]] = LEGEND_TYPED
-    values[ROW_LEGEND - 1][idx["owner"]] = LEGEND_WHITE
     values[ROW_FIELDS - 1] = [c.field for c in cols]
     labels = {ROW_SIGNED: "Signé (€)", ROW_PIPE: "Pipe pondéré par la proba (€)", ROW_TOTAL: "Total prévu (€)",
               ROW_COST: "Coût prévu, pipe pondéré (€)"}
@@ -331,7 +325,8 @@ class ForecastSheet:
         if not titles:
             return own
         got = self.ss.values_batch_get([f"{quote(t)}!A1" for t in titles])["valueRanges"]
-        markers = ("Prévision de production", "Synthèse de production", "Réalisé (saisi", "Paramètres de la prévision", "Pôle", "Réf.")
+        markers = ("Prévision de production", "Synthèse de production", "Réalisé (saisi", "Paramètres de la prévision", "Pôle", "Réf.",
+                   HOME_UPDATED)
         for t, g in zip(titles, got):
             a1_value = str((g.get("values") or [[""]])[0][0] if g.get("values") else "")
             if t in HIDDEN_TABS or any(a1_value.startswith(m) for m in markers) or "· prévision de production" in a1_value:
@@ -421,28 +416,12 @@ class ForecastSheet:
         if new_fin:
             start = ACT_PROJ_FIRST + len(state.finance)
             data_raw.append({"range": f"{quote(TAB_ACTUALS)}!A{start}", "values": new_fin})
-        home = render_home()
-        home[2][1] = f"{updated_at:%d/%m/%Y à %H:%M}"
-        clears.append(f"{quote(TAB_HOME)}!A1:B80")
+        home, home_styles = render_home(updated_at)
+        clears.append(f"{quote(TAB_HOME)}!A1:D100")
         data_raw.append({"range": f"{quote(TAB_HOME)}!A1", "values": home})
-        swatches = {"Bleu": BLUE_INPUT, "Orange": TYPED_BG, "Blanc": WHITE,
-                    **{label: rgb(POLE_COLORS[pole]["strong"]) for label, pole in HOME_POLE_LINES.items()}}
-        fmt.append(_repeat(ids[TAB_HOME], 0, 80, 0, 1, {"backgroundColor": WHITE, "textFormat": {"bold": False}},
-                           "userEnteredFormat(backgroundColor,textFormat)"))
-        for i, line in enumerate(home):
-            if line and line[0] in swatches:
-                fmt.append(_repeat(ids[TAB_HOME], i, i + 1, 0, 1, {"backgroundColor": swatches[line[0]], "textFormat": {"bold": True}},
-                                   "userEnteredFormat(backgroundColor,textFormat)"))
-            elif line and line[0] in ("À quoi sert ce fichier", "Qui fait quoi", "Les couleurs", "Règles de calcul",
-                                      "Les références (colonne Réf.)", "Quelles lignes apparaissent"):
-                fmt.append(_repeat(ids[TAB_HOME], i, i + 1, 0, 1, {"textFormat": {"bold": True, "fontSize": 12}},
-                                   "userEnteredFormat.textFormat"))
-            elif line and line[0] == "Texte vert / orange":
-                fmt.append(_repeat(ids[TAB_HOME], i, i + 1, 0, 1, {"textFormat": {"bold": True, "foregroundColor": SIGNED_TEXT}},
-                                   "userEnteredFormat.textFormat"))
-            elif line and line[0] == "Texte rouge":
-                fmt.append(_repeat(ids[TAB_HOME], i, i + 1, 0, 1, {"textFormat": {"bold": True, "foregroundColor": RED_TEXT}},
-                                   "userEnteredFormat.textFormat"))
+        fmt += home_format_requests(ids[TAB_HOME], home, home_styles)
+        fmt += [{"updateSheetProperties": {"properties": {"sheetId": ids[t], "hidden": True}, "fields": "hidden"}}
+                for t in HIDDEN_TABS]
 
         self.ss.values_batch_clear(body={"ranges": clears})
         self.ss.values_batch_update({"valueInputOption": "RAW", "data": data_raw})
@@ -527,7 +506,7 @@ class ForecastSheet:
         data = [
             {"range": f"{quote(TAB_PARAMS)}!A1", "values": render_params(params, first_year, last_year)},
             {"range": f"{quote(TAB_ACTUALS)}!A1", "values": render_actuals(pl, finance, params.last_closed, first_year, last_year, pl_costs)},
-            {"range": f"{quote(TAB_HOME)}!A1", "values": render_home()},
+            {"range": f"{quote(TAB_HOME)}!A1", "values": render_home()[0]},
             {"range": f"{quote(TAB_INPUTS)}!A1", "values": [["Réf.", "Saisies (JSON)"]] +
              [[ref, json.dumps(v, ensure_ascii=False)] for ref, v in sorted(inputs.items())]},
         ]
@@ -679,86 +658,136 @@ def new_finance_rows(before: List[FinanceProject], after: List[FinanceProject]) 
             for f in after if (f.pole, f.number) not in known]
 
 
-HOME_POLE_LINES = {"Pôle Travaux": "Travaux", "Pôle Conception": "Conception", "Pôle Maintenance": "Maintenance",
-                   "Tous pôles": "Total"}
+# Accueil: sections of (label, text). The label's style shows what it describes (a colour, a status).
+HOME_SECTIONS: List[Tuple[str, List[Tuple[str, str]]]] = [
+    ("Les onglets", [
+        ("Synthèse", "La vue d'ensemble par pôle et par mois : réalisé, signé à produire, pipe pondéré, objectif. Lecture seule."),
+        ("Travaux, Conception", "Une ligne par projet signé non fermé et par devis en attente (Brief, En cours, Envoyé). "
+                                "Les chefs de projet y modifient les cellules bleues."),
+        ("Maintenance contrats", "Les contrats d'entretien de Notion Sites, avec leur état (Safe, À risque, Mort), "
+                                 "et les devis de contrat en attente."),
+        ("Maintenance TS", "Les TS et animations Furious qui ont encore de la production, et les devis TS en attente."),
+        ("Réalisé, Paramètres", "Pour la finance : chiffres de la comptabilité à chaque clôture, dernier mois clos, "
+                                "KV par défaut, objectifs."),
+        ("Contrôles", "Les points à vérifier, trouvés à la dernière mise à jour."),
+    ]),
+    ("Les couleurs", [
+        ("Bleu", "Modifiable. La cellule affiche la valeur automatique (Furious, Notion, planning)."),
+        ("Orange", "Saisi à la main, gardé tel quel. Videz la cellule pour revenir au calcul automatique."),
+        ("Blanc", "Calculé. Une modification est remplacée à la mise à jour suivante : corrigez plutôt la source "
+                  "(Furious, Notion)."),
+        ("Texte vert", "Colonne Type : signé, compté à 100 %."),
+        ("Texte orange", "Colonne Type : en attente, compté à sa probabilité."),
+        ("Texte rouge", "Alerte à regarder : détail dans la colonne Alertes et l'onglet Contrôles."),
+    ]),
+    ("État d'un contrat", [
+        ("Safe", "Confirmé pour les 1 à 3 ans qui viennent : tapez « Safe » et la date « Confirmé jusqu'au ». "
+                 "Après cette date, il redevient À risque."),
+        ("À risque", "Pas encore confirmé, ou un signal : fin dépassée, pas de vraie date de fin (tacite 2050), "
+                     "fin dans moins de 3 mois, « À surveiller » dans Notion. Le détail est dans la colonne « Pourquoi »."),
+        ("Mort", "Perdu ou archivé dans Notion."),
+    ]),
+    ("Les références (colonne Réf.)", [
+        ("P1081", "Projet signé : n° de projet Furious."),
+        ("D252703", "Devis en attente : n° de devis Furious."),
+        ("T1357", "TS ou animation signé : n° de projet Furious."),
+        ("S1311", "Contrat d'entretien : n° Furious du site, lu dans son titre Notion (« Cogéva - 1116 (EXT) ») ou dans "
+                  "la colonne « ID furious ». Plusieurs sites sur un même n° : S721-EXT, S721-INT…"),
+        ("M3", "Ligne manuelle, tapée sous un tableau."),
+    ]),
+    ("Comment les chiffres sont calculés", [
+        ("Reste à produire", "Projet : CA − part maintenance − production cumulée à la dernière clôture. "
+                             "Devis : son montant, compté à sa probabilité."),
+        ("Répartition par mois", "Travaux à parts égales entre Début et Fin ; Conception par paliers selon le montant ; "
+                                 "devis maintenance sur 12 mois. Un devis pas encore signé produit à partir du mois prochain."),
+        ("Mois saisi", "Gardé tel quel ; le reste se répartit sur les autres mois ouverts. Si la Fin est passée, "
+                       "sur les 2 prochains mois."),
+        ("Contrats", "Valeur de l'année (règle Notion « Total HT Cette année ») répartie selon les passages du planning. "
+                     "Début et Fin sont les dates Notion : un contrat qui n'est pas « Perdu » est reconduit et continue "
+                     "de produire après sa Fin."),
+        ("Pipe", "Probabilité Furious ; 0 % compte 50 %. Modifiable ligne par ligne."),
+        ("Devis gagné", "Il quitte le pipe ; son projet apparaît à la mise à jour suivante et reprend les saisies du devis."),
+        ("Part maintenance", "Onglet Travaux : part d'un chantier qui relève de la maintenance. Retirée du reste à produire "
+                             "Travaux, comptée nulle part ailleurs (ajoutez une ligne manuelle en Maintenance si elle doit y compter)."),
+        ("Fenêtre", "18 mois à partir du mois en cours. Les mois clos viennent de la comptabilité (onglet Réalisé)."),
+    ]),
+]
+HOME_UPDATED = "Dernière mise à jour"
 
 
-def render_home() -> List[List[object]]:
-    return [
-        ["Prévision de production · Merci Raymond"],
-        [""],
-        ["Dernière mise à jour automatique", ""],
-        [""],
-        ["À quoi sert ce fichier"],
-        ["Montrer chaque mois, par pôle : ce qui est produit (réalisé), ce qui est signé et reste à produire, "
-         "ce qui sera probablement signé (pipe pondéré) et ce qu'il manque pour l'objectif."],
-        [""],
-        ["Qui fait quoi"],
-        ["Chefs de projet", "Onglets Travaux, Conception, Maintenance contrats, Maintenance TS : saisir un mois (le reste se répartit seul), "
-                            "la date de fin, le KV ou le coût prévu, la proba d'un devis, un commentaire."],
-        ["Finance", "Onglet Réalisé : production de la comptabilité par mois et production cumulée par projet à chaque clôture. "
-                    "Onglet Paramètres : dernier mois clos, KV par défaut, objectifs."],
-        ["Direction", "Onglet Synthèse : lecture seule."],
-        ["Serveur (chaque nuit)", "Met à jour les projets et devis Furious, les contrats Notion et les passages du planning."],
-        [""],
-        ["Les couleurs"],
-        ["Bleu", "Cellule modifiable : elle affiche la valeur automatique (Furious, Notion, règles)."],
-        ["Orange", "Valeur saisie à la main (ou reprise du fichier d'Arthur), gardée telle quelle. Videz la cellule pour revenir "
-                   "au calcul automatique."],
-        ["Blanc", "Calculé. Ne pas modifier : toute modification est remplacée à la mise à jour suivante. Pour changer un CA, "
-                  "une date ou une probabilité de source, corrigez-la dans Furious."],
-        ["Texte vert / orange", "Colonne Type : vert = signé (compte à 100 %), orange = en attente (compte à sa probabilité)."],
-        ["Pôle Travaux", "Jaune : l'onglet Travaux (titre, sous-totaux, en-têtes), ses lignes et son graphique dans la Synthèse, "
-                         "ses cellules « Pôle » dans Réalisé, Paramètres et Contrôles."],
-        ["Pôle Conception", "Vert, aux mêmes endroits."],
-        ["Pôle Maintenance", "Violet, aux mêmes endroits."],
-        ["Tous pôles", "Bleu clair : les lignes « Total » et le premier graphique de la Synthèse."],
-        ["Texte rouge", "Alerte ou écart à regarder (détail dans l'onglet Contrôles)."],
-        [""],
-        ["Les références (colonne Réf.)"],
-        ["P1081", "Projet signé : n° de projet Furious."],
-        ["D252703", "Devis en attente : n° de devis Furious."],
-        ["T1357", "TS ou animation signé : n° de projet Furious."],
-        ["S1311", "Contrat d'entretien : n° Furious du site, lu dans son titre Notion (« Cogéva - 1116 (EXT) »), sinon dans la "
-                  "colonne « ID furious ». Si plusieurs sites le partagent : suivi de EXT, INT, Maraichage… (S721-EXT). Un code "
-                  "interne si le site n'a aucun n°."],
-        ["M3", "Ligne manuelle, tapée sous un tableau."],
-        [""],
-        ["Quelles lignes apparaissent"],
-        ["Projets signés", "Ceux de l'onglet Réalisé (liste de la finance) qui ne sont pas fermés, plus tout projet Furious créé "
-                           "après la date de Paramètres. Ils restent affichés même si tout leur reste tombe après la fenêtre."],
-        ["Devis en attente", "Tous les devis Furious au statut Brief, En cours ou Envoyé (comme le pipe du dashboard), quelles "
-                             "que soient leurs dates."],
-        ["Contrats", "Onglet Maintenance contrats : tous les sites de la base Notion Sites, rangés par état (Safe, puis "
-                     "À risque, puis Mort), les sites sans production restante en bas."],
-        ["TS et animations", "Onglet Maintenance TS : projets Furious des 24 derniers mois qui ont encore de la production à "
-                             "partir du mois en cours, et les devis TS en attente."],
-        ["Lignes manuelles", "Celles que vous tapez."],
-        [""],
-        ["Règles de calcul"],
-        ["Reste à produire", "Projet : CA − part maintenance − production cumulée à la dernière clôture (finance). "
-                             "Devis : son montant, compté dans la synthèse à sa probabilité."],
-        ["Répartition par défaut", "Règles du dashboard commercial : Travaux à parts égales entre début et fin Furious ; "
-                                   "Conception par paliers selon le montant ; devis maintenance sur 12 mois. Un devis pas encore "
-                                   "signé ne produit qu'à partir du mois prochain : s'il démarre plus tôt, tout son calendrier est décalé."],
-        ["Devis gagné", "Quand un devis est gagné dans Furious, il quitte le pipe et son projet apparaît à la mise à jour suivante "
-                        "(ligne P… ou T…). Les mois, KV, coût, dates et commentaire saisis sur le devis passent sur le projet."],
-        ["Mois saisi", "Un mois saisi reste tel quel. Le reste à produire moins les mois saisis se répartit sur les autres "
-                       "mois ouverts, selon la forme par défaut ; si les dates sont passées, sur les 2 prochains mois."],
-        ["Maintenance", "Valeur annuelle d'un contrat d'après ses dates (règle de la colonne Notion « Total HT Cette année »), "
-                        "répartie selon les passages du planning (un passage planifié = un passage fait). Contrats actifs en haut, "
-                        "contrats perdus ou archivés sans production restante en bas. TS et animations : lignes à part, selon leurs dates."],
-        ["Part maintenance", "Onglet Travaux, groupe « détails » : part d'un chantier qui relève de la maintenance. Elle est retirée "
-                             "du reste à produire Travaux. Elle n'est ajoutée nulle part ailleurs : si elle doit compter en Maintenance, "
-                             "ajouter une ligne manuelle dans l'onglet Maintenance."],
-        ["Pipe", "Probabilité Furious ; 0 % compte 50 % comme dans le dashboard. Modifiable ligne par ligne."],
-        ["État d'un contrat", "Safe : confirmé par le responsable de pôle pour les 1 à 3 ans qui viennent (tapez « Safe » et la "
-                              "date « Confirmé jusqu'au »). À risque : pas encore confirmé, ou un signal (fin dépassée, pas de "
-                              "date de fin réelle comme les tacites 2050, fin dans moins de 3 mois, « À surveiller » dans Notion…), "
-                              "détaillé dans la colonne « Pourquoi ». Mort : perdu ou archivé dans Notion. Un Safe dont la date "
-                              "est passée redevient À risque."],
-        ["Fenêtre", "18 mois à partir du mois en cours. Les mois clos viennent de la comptabilité (onglet Réalisé)."],
+def render_home(updated_at: Optional[datetime] = None) -> Tuple[List[List[object]], List[Tuple[int, str, str]]]:
+    """Values of the Accueil tab, and each row's style: (row0, "update" | "section" | "line" | "spacer", label)."""
+    when = f"{updated_at:%d/%m/%Y à %H:%M}, automatique chaque nuit" if updated_at else "automatique chaque nuit"
+    values: List[List[object]] = [[HOME_UPDATED, when], [""]]
+    styles: List[Tuple[int, str, str]] = [(0, "update", HOME_UPDATED), (1, "spacer", "")]
+    for title, lines in HOME_SECTIONS:
+        styles.append((len(values), "section", title))
+        values.append([title, ""])
+        for label, text in lines:
+            styles.append((len(values), "line", label))
+            values.append([label, text])
+        styles.append((len(values), "spacer", ""))
+        values.append([""])
+    return values, styles
+
+
+def home_format_requests(sheet_id: int, values: List[List[object]], styles: List[Tuple[int, str, str]]) -> List[dict]:
+    """A page rather than a grid: no gridlines, a dark band per section, a swatch or coloured label per line."""
+    rule = {"style": "SOLID", "color": rgb("#e3e3e3")}
+    box = {"style": "SOLID", "color": rgb("#b7b7b7")}
+    swatches = {"Bleu": BLUE_INPUT, "Orange": TYPED_BG, "Blanc": WHITE}
+    label_text = {"Texte vert": SIGNED_TEXT, "Texte orange": PIPE_TEXT, "Texte rouge": RED_TEXT,
+                  **{h: rgb(c) for h, c in HEALTH_TEXT.items()}}
+    req: List[dict] = [
+        {"unmergeCells": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 100, "startColumnIndex": 0,
+                                    "endColumnIndex": 4}}},
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 100, "startColumnIndex": 0,
+                                  "endColumnIndex": 4}, "cell": {"note": ""}, "fields": "note"}},
+        _repeat(sheet_id, 0, 100, 0, 4, {"backgroundColor": WHITE, "verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP",
+                "textFormat": {"bold": False, "fontSize": 10, "foregroundColor": DARK_TEXT}},
+                "userEnteredFormat(backgroundColor,borders,verticalAlignment,wrapStrategy,textFormat,horizontalAlignment)"),
+        {"updateSheetProperties": {"properties": {"sheetId": sheet_id, "gridProperties": {"hideGridlines": True, "frozenRowCount": 0,
+                                                                                          "frozenColumnCount": 0}},
+                                   "fields": "gridProperties(hideGridlines,frozenRowCount,frozenColumnCount)"}},
+        {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 1},
+                                       "properties": {"pixelSize": 210}, "fields": "pixelSize"}},
+        {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 2},
+                                       "properties": {"pixelSize": 760}, "fields": "pixelSize"}},
+        {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": 0, "endIndex": 100},
+                                       "properties": {"pixelSize": 21}, "fields": "pixelSize"}},
     ]
+
+    def height(r0: int, px: int) -> dict:
+        return {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": r0,
+                                                        "endIndex": r0 + 1}, "properties": {"pixelSize": px}, "fields": "pixelSize"}}
+
+    for r0, kind, label in styles:
+        if kind == "update":
+            req.append(_repeat(sheet_id, r0, r0 + 1, 0, 2, {"textFormat": {"italic": True, "foregroundColor": GREY_TEXT}},
+                               "userEnteredFormat.textFormat"))
+            req.append(height(r0, 28))
+        elif kind == "spacer":
+            req.append(height(r0, 14))
+        elif kind == "section":
+            req.append({"mergeCells": {"range": {"sheetId": sheet_id, "startRowIndex": r0, "endRowIndex": r0 + 1,
+                                                 "startColumnIndex": 0, "endColumnIndex": 2}, "mergeType": "MERGE_ALL"}})
+            req.append(_repeat(sheet_id, r0, r0 + 1, 0, 2, {"backgroundColor": HEADER_BG,
+                                                            "textFormat": {"bold": True, "fontSize": 11, "foregroundColor": HEADER_FG}},
+                               "userEnteredFormat(backgroundColor,textFormat)"))
+            req.append(height(r0, 30))
+        else:
+            req.append(_repeat(sheet_id, r0, r0 + 1, 0, 2, {"borders": {"bottom": rule}}, "userEnteredFormat.borders"))
+            # Fixed heights do not grow with wrapped text: about 100 characters fit on a line of column B
+            req.append(height(r0, max(28, 10 + 16 * -(-len(str(values[r0][1])) // 100))))
+            text = {"bold": True, "foregroundColor": label_text.get(label, DARK_TEXT)}
+            cell = {"textFormat": text}
+            fields = "userEnteredFormat.textFormat"
+            if label in swatches:
+                cell = {"textFormat": text, "backgroundColor": swatches[label], "horizontalAlignment": "CENTER",
+                        "borders": {"top": box, "bottom": box, "left": box, "right": box}}
+                fields = "userEnteredFormat(textFormat,backgroundColor,horizontalAlignment,borders)"
+            req.append(_repeat(sheet_id, r0, r0 + 1, 0, 1, cell, fields))
+    return req
 
 
 # ---------------------------------------------------------------------- summary
@@ -784,9 +813,7 @@ def render_summary(output: Output, state: SheetState, updated_at: datetime):
     grid_cols = {c.field: col_letter(i) for i, c in enumerate(pole_columns(output.grid)) if M.is_key(c.field)}
     act_col = {k: v for k, v in state.pl_columns.items() if M.is_key(k)}
     report_year = min((M.year_of(k) for k in act_col), default=years[0])
-    values: List[List[object]] = [["Synthèse de production · Merci Raymond"],
-                                  [f"Réalisé = chiffres de la comptabilité jusqu'à {M.label(params.last_closed)} inclus ; ensuite prévision : "
-                                   f"signé + pipe pondéré par sa probabilité. Mis à jour le {updated_at:%d/%m/%Y à %H:%M}."], [""]]
+    values: List[List[object]] = [["Synthèse de production · Merci Raymond"], [""], [""]]
     formulas: List[Tuple[str, str]] = []
     styled: Dict[str, list] = {"header": [], "kv": [], "brief": [], "lines": [], "brief_rows": [], "notes": [], "status_rows": []}
     row = YEARS_FIRST
@@ -1073,10 +1100,7 @@ def pole_format_requests(sheet_id: int, rend: Rendered, pole: str) -> List[dict]
     for r0, c0, colour in rend.type_colors:
         req.append(_repeat(sheet_id, r0, r0 + 1, c0, c0 + 1, {"textFormat": {"foregroundColor": colour, "bold": True}},
                            "userEnteredFormat.textFormat(foregroundColor,bold)"))
-    # Legend on row 2: the real colours of the cells
-    fields = [c.field for c in cols]
-    label_i, owner_i = fields.index("label"), fields.index("owner")
-    border = {"style": "SOLID", "color": {"red": 0.6, "green": 0.6, "blue": 0.6}}
+    # Row 2: an empty thin spacer (it held the colour legend, now in the Accueil tab)
     req += [
         {"unmergeCells": {"range": {"sheetId": sheet_id, "startRowIndex": ROW_SIGNED - 1, "endRowIndex": ROW_COST,
                                     "startColumnIndex": 0, "endColumnIndex": len(cols)}}},
@@ -1088,20 +1112,9 @@ def pole_format_requests(sheet_id: int, rend: Rendered, pole: str) -> List[dict]
                                                  "endIndex": ROW_COST}, "properties": {"pixelSize": 24}, "fields": "pixelSize"}},
         {"unmergeCells": {"range": {"sheetId": sheet_id, "startRowIndex": ROW_LEGEND - 1, "endRowIndex": ROW_LEGEND,
                                     "startColumnIndex": 0, "endColumnIndex": len(cols)}}},
-        {"mergeCells": {"range": {"sheetId": sheet_id, "startRowIndex": ROW_LEGEND - 1, "endRowIndex": ROW_LEGEND,
-                                  "startColumnIndex": 0, "endColumnIndex": label_i}, "mergeType": "MERGE_ALL"}},
-        _repeat(sheet_id, ROW_LEGEND - 1, ROW_LEGEND, 0, label_i, {"backgroundColor": BLUE_INPUT, "textFormat": {"bold": True},
-                "verticalAlignment": "MIDDLE", "horizontalAlignment": "CENTER"},
-                "userEnteredFormat(backgroundColor,textFormat,verticalAlignment,horizontalAlignment)"),
-        _repeat(sheet_id, ROW_LEGEND - 1, ROW_LEGEND, label_i, label_i + 1, {"backgroundColor": TYPED_BG, "wrapStrategy": "WRAP",
-                "textFormat": {"bold": True}, "verticalAlignment": "MIDDLE"},
-                "userEnteredFormat(backgroundColor,wrapStrategy,textFormat,verticalAlignment)"),
-        _repeat(sheet_id, ROW_LEGEND - 1, ROW_LEGEND, owner_i, owner_i + 1, {"backgroundColor": WHITE, "wrapStrategy": "WRAP",
-                "textFormat": {"bold": True}, "verticalAlignment": "MIDDLE",
-                "borders": {"top": border, "bottom": border, "left": border, "right": border}},
-                "userEnteredFormat(backgroundColor,wrapStrategy,textFormat,verticalAlignment,borders)"),
+        _repeat(sheet_id, ROW_LEGEND - 1, ROW_LEGEND, 0, len(cols), {"backgroundColor": WHITE}, "userEnteredFormat(backgroundColor,borders)"),
         {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": ROW_LEGEND - 1,
-                                                 "endIndex": ROW_LEGEND}, "properties": {"pixelSize": 38}, "fields": "pixelSize"}},
+                                                 "endIndex": ROW_LEGEND}, "properties": {"pixelSize": 8}, "fields": "pixelSize"}},
     ]
     if "health" in [c.field for c in cols] and pole == TAB_CONTRACTS:
         h_i = [c.field for c in cols].index("health")
@@ -1206,13 +1219,7 @@ def static_format_requests(ids: Dict[str, int], first_year: int, last_year: int)
         _repeat(a, ACT_PROJ_FIRST - 1, 2000, 6, 7, {"numberFormat": FORMATS["money"]}, "userEnteredFormat.numberFormat"),
         _repeat(a, ACT_PROJ_HEADER - 1, ACT_PROJ_HEADER, 0, 8, {"backgroundColor": HEADER_BG, "textFormat": {"bold": True,
                 "foregroundColor": HEADER_FG}}, "userEnteredFormat(backgroundColor,textFormat)"),
-        _repeat(h, 0, 1, 0, 2, {"textFormat": {"bold": True, "fontSize": 16}}, "userEnteredFormat.textFormat"),
-        {"updateDimensionProperties": {"range": {"sheetId": h, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 1},
-                                       "properties": {"pixelSize": 220}, "fields": "pixelSize"}},
-        {"updateDimensionProperties": {"range": {"sheetId": h, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 2},
-                                       "properties": {"pixelSize": 900}, "fields": "pixelSize"}},
-        _repeat(h, 0, 40, 1, 2, {"wrapStrategy": "WRAP"}, "userEnteredFormat.wrapStrategy"),
-    ]
+    ] + home_format_requests(h, *render_home())
     for title in (TAB_INPUTS, TAB_RENDER, TAB_CALC):
         req.append({"updateSheetProperties": {"properties": {"sheetId": ids[title], "hidden": True}, "fields": "hidden"}})
     return req

@@ -1,10 +1,10 @@
 """
 Layout of the forecast spreadsheet: tabs, columns, fixed cells.
 
-Every pole tab (Travaux, Conception, Maintenance) has the same shape:
+Every pole tab (Travaux, Conception, Maintenance contrats, Maintenance TS) has the same shape:
 
     row 1  title and last update
-    row 2  how to read the colours
+    row 2  empty, a thin spacer (the colour legend lives in the Accueil tab)
     row 3  field ids (hidden): the server and the Apps Script find columns by these ids
     row 4  "Signé" subtotal per month (formula)
     row 5  "Pipe pondéré" subtotal per month (formula: amount x probability)
@@ -104,7 +104,6 @@ BEFORE: List[Col] = [
     Col("furious_no", "N° Furious", "text", width=72, only=(TAB_CONTRACTS,)),
     Col("status", "Statut Notion", "text", width=78, only=(TAB_CONTRACTS,)),
     Col("renewal", "Reconduction (Notion)", "text", width=150, only=(TAB_CONTRACTS,)),
-    Col("contract_end", "Fin du contrat", "date", width=88, only=(TAB_CONTRACTS,)),
     Col("frequency", "Fréquence", "text", width=190, only=(TAB_CONTRACTS,)),
     Col("passages_year", "Passages prévus {year}", "int", width=82, only=(TAB_CONTRACTS,)),
     Col("passages_done", "Passages faits à date", "int", width=82, only=(TAB_CONTRACTS,)),
@@ -115,7 +114,7 @@ BEFORE: List[Col] = [
     Col("remaining", "Reste à produire (€)", "money", width=120),
     Col("this_year", "dont {year} (€)", "money", width=110),
     Col("start", "Début", "date", "all", 84),
-    Col("stop", "Fin", "date", "all", 84),
+    Col("stop", "Fin", "date", "all", 84),  # contracts: Notion's end date (they renew unless "Perdu")
     Col("kv", "KV", "kv", "all", 56),
     # Collapsible group "détails" (contiguous on purpose: a column group needs one block)
     Col("typo", "Typologie", "text", width=130, detail=True),

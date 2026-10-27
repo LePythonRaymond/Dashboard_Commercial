@@ -392,11 +392,11 @@ def assemble(
         row = Row(
             ref=refs[s.page_id], pole="Maintenance", category="Signé", kind="Contrat", label=s.name, owner=s.owner,
             typologie="Entretien" + (f" ({s.int_ext})" if s.int_ext else ""), ca=s.annual,
-            start=_month(s.start), stop=_month(s.end) if s.lost else None, rule="MAINTENANCE",
+            start=_month(s.start), stop=_month(s.end), rule="MAINTENANCE",  # dates shown only: months come from the planning
             kv_default=kv.get("Maintenance", 2.3), fixed=fixed, inactive=not fixed,
             extra={
                 "client": s.client, "furious_no": s.furious_id, "status": status, "renewal": s.reconduction,
-                "contract_end": s.end, "frequency": s.frequency, "passages_year": planned,
+                "frequency": s.frequency, "passages_year": planned,
                 "passages_done": passages_in_year(s, year, before=today), "year_value": value,
                 "per_passage": value / planned if planned else "",
             },

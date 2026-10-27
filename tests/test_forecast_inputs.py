@@ -183,6 +183,7 @@ def test_summary_headers_notes_and_one_chart_per_pole():
     assert values[3][1] == "Réalisé compta (janv. à août 2026)" and values[3][4] == "Total prévu fin 2026 (atterrissage)"
     assert values[YEARS_FIRST - 1][1] == "Cumul janv. à août"  # was "Report"
     assert styled["notes"] == []  # no hover notes anywhere (asked on 2026-10-26)
+    assert values[1] == [""]  # no explanatory sentence under the title (asked on 2026-10-27)
     assert values[3][8] == "Manque pour l'objectif (sans compter le pipe)"  # column I, was "(hors pipe)"
     from src.forecast.sheet import STATUS_COL
     assert values[3][STATUS_COL:STATUS_COL + 2] == ["Contrats d'entretien", "Nombre"]
@@ -235,3 +236,24 @@ def test_maintenance_rows_split_between_contracts_and_ts_tabs():
     contracts = {r.ref: r for r, _ in out.rows[TAB_CONTRACTS]}
     assert list(contracts) == ["S721"] and [r.ref for r, _ in out.rows[TAB_TS]] == ["T1270"]
     assert contracts["S721"].extra["health"] == "Safe" and contracts["S721"].extra["confirmed_until"] == date(2028, 6, 30)
+    # Début and Fin of a contract are its Notion dates, even when it renews (asked on 2026-10-27: Fin was empty)
+    assert contracts["S721"].start == "2024-07" and contracts["S721"].stop == "2050-12"
+    assert "contract_end" not in contracts["S721"].extra
+
+
+def test_pole_tab_without_legend_and_home_page_without_preamble():
+    from datetime import datetime
+
+    from src.forecast.layout import ROW_LEGEND, TAB_CONTRACTS
+    from src.forecast.sheet import HOME_UPDATED, render_home, render_pole
+
+    rend = render_pole(TAB_CONTRACTS, [], ["2026-10", "2026-11"], "2026-10", datetime(2026, 10, 27, 7, 30), 2)
+    assert all(v == "" for v in rend.values[ROW_LEGEND - 1])  # the colour legend lives in the Accueil only
+    values, styles = render_home(datetime(2026, 10, 27, 7, 30))
+    assert values[0] == [HOME_UPDATED, "27/10/2026 à 07:30, automatique chaque nuit"]
+    texts = " ".join(str(c) for line in values for c in line)
+    assert "À quoi sert ce fichier" not in texts and "Prévision de production · Merci Raymond" not in texts
+    sections = [label for _, kind, label in styles if kind == "section"]
+    assert sections == ["Les onglets", "Les couleurs", "État d'un contrat", "Les références (colonne Réf.)",
+                        "Comment les chiffres sont calculés"]
+    assert all(values[r0][0] == label for r0, kind, label in styles if kind in ("section", "line"))

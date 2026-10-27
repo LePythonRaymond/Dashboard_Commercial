@@ -1198,7 +1198,7 @@ This replaces Arthur's hand-made workbook "Forecast 2" (formerly "Prédiction Pr
 
 The "En bref" block answers four questions for the year: what is produced, what is signed and still to produce, what is probable, and what is left to sign and produce to reach the objective.
 
-**Rows** (tabs Travaux, Conception, Maintenance). There is one row per:
+**Rows** (tabs Travaux, Conception, Maintenance contrats, Maintenance TS). There is one row per:
 - **Signed project.** These are the Furious projects that finance lists in Réalisé, plus new Furious projects created after the date set in Paramètres. Remaining = CA − maintenance share − cumulative production at the last close (from finance).
 - **Pending devis.** This is the dashboard's pipe: same fetch, avenants, cleaning and overrides as the daily pipeline.
 - **Maintenance contract** (Notion Sites).
@@ -1233,9 +1233,22 @@ The script's functions mirror `engine.py` and `model.py` line for line. `tests/t
 
 **Colours.** One per pole, chosen by the user (`POLE_COLORS`): Travaux yellow, Conception green, Maintenance purple, Total blue; pale for lines, strong for totals, headers and the tab. Typed cells are orange (yellow is Travaux). The script reads the colours from `_calcul` (`__meta.colors`), so a colour change needs no new paste. The Synthèse has one chart for all poles and one per pole; their first bar is the monthly average of the months known only as a cumulative ("Cumul janv. à août").
 
+**Maintenance tabs and contract status** (asked by Hugo, 2026-10-27). Maintenance is one pole in the Synthèse, Réalisé and objectives, but two tabs:
+- « Maintenance contrats »: Notion contracts and contract devis;
+- « Maintenance TS »: TS, animations and their devis.
+
+A contract's « État du contrat » (`maintenance.contract_health`):
+- **Safe** only when typed, with a « Confirmé jusqu'au » date; it falls back to À risque once that date passes;
+- **À risque** otherwise, with the reasons in « Pourquoi » (end passed, tacit 2050 end, no end, end within 90 days, a Notion follow-up flag, or « non confirmé »);
+- **Mort** when Notion says Perdu or the site is archived.
+
+« Début » and « Fin » of a contract are its Notion dates and are display only: the months come from the planning, and a contract that is not Perdu keeps producing after its Fin (renewal rule).
+
+**Sheet hygiene.** There are no cell notes. The colour legend is only in the Accueil, which is a page: sections, no gridlines. Every run re-hides `_saisies`, `_rendu` and `_calcul`.
+
 **Run.** `python scripts/run_forecast.py --spreadsheet ID [--dry-run]` takes about 90 s: Furious, Notion, one read and a few batched writes. Formulas use the sheet's fr_FR syntax. It reads Furious and Notion only.
 
-**Tests.** 493 pass. The 49 new ones are in `test_forecast_engine.py`, `test_forecast_maintenance.py`, `test_forecast_inputs.py` and `test_forecast_js_parity.py`, with shared vectors in `forecast_vectors.json`.
+**Tests.** 499 pass. The 49 new ones are in `test_forecast_engine.py`, `test_forecast_maintenance.py`, `test_forecast_inputs.py` and `test_forecast_js_parity.py`, with shared vectors in `forecast_vectors.json`.
 
 ---
 
