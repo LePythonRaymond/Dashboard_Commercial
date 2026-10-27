@@ -28,7 +28,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from config.settings import get_secret  # noqa: E402
 from src.forecast import months as M  # noqa: E402
 from src.forecast.build import Params, SheetState, assemble, detect_typed, seed_from_legacy, window  # noqa: E402
-from src.forecast.layout import POLES  # noqa: E402
+from src.forecast.layout import POLE_TABS, POLES  # noqa: E402
 from src.forecast.sheet import ForecastSheet, actual_month_columns, manual_fields, normalize_typed  # noqa: E402
 from src.forecast.sources import fetch_pipe, fetch_projects, fetch_sites, load_legacy  # noqa: E402
 
@@ -39,7 +39,7 @@ log = logging.getLogger("forecast")
 def summary(output, state) -> str:
     lines = []
     year = M.year_of(output.open_from)
-    for pole in POLES:
+    for pole in POLE_TABS:
         signed = {m: 0.0 for m in output.grid}
         pipe = {m: 0.0 for m in output.grid}
         for row, s in output.rows.get(pole, []):
@@ -117,7 +117,7 @@ def main() -> int:
         log.info("Onglets créés")
 
     state = sheet.read_state()
-    fields = {pole: manual_fields(pole, []) for pole in POLES}
+    fields = {tab: manual_fields(tab, []) for tab in POLE_TABS}
     inputs, notes = detect_typed(state, fields, normalize_typed)
     state.inputs = inputs
     output = assemble(state, projects, pipe, sites, today)

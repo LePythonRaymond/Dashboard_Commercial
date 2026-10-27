@@ -20,7 +20,8 @@ from .layout import (
     ROW_HEADER, ROW_LEGEND, ROW_PIPE, ROW_SIGNED, ROW_TITLE, ROW_TOTAL, TAB_ACTUALS, TAB_CALC,
     TAB_CHECKS, TAB_HOME, TAB_INPUTS, TAB_ORDER, TAB_PARAMS, TAB_RENDER, TAB_SUMMARY, WHITE, Col,
     INPUT_HEX, OBJECTIVE_LINE, POLE_COLORS, TYPED_BG, TYPED_HEX, rgb,
-    HEADER_NOTES, a1, col_letter, pole_columns, quarters, quote,
+    HEALTH, HEALTH_TEXT, POLE_TAB_LIST, POLE_TABS, TAB_CONTRACTS, TAB_POLE,
+    a1, col_letter, pole_columns, quarters, quote,
 )
 from .engine import myrium_allocation
 from .model import Row, Shown
@@ -30,6 +31,8 @@ LEGEND_BLUE = "Bleu : modifiable"
 LEGEND_TYPED = "Orange : saisi à la main, gardé tel quel (videz la cellule pour revenir au calcul automatique)"
 LEGEND_WHITE = "Blanc : calculé, ne pas modifier"
 SIGNED_TEXT = {"red": 0.10, "green": 0.42, "blue": 0.24}
+DARK_TEXT = {"red": 0.13, "green": 0.13, "blue": 0.13}
+GREY_TEXT = {"red": 0.40, "green": 0.40, "blue": 0.40}
 PIPE_TEXT = {"red": 0.72, "green": 0.40, "blue": 0.03}
 
 
@@ -58,6 +61,7 @@ FORMATS = {
     "kv": {"type": "NUMBER", "pattern": "0.00"},
     "date": {"type": "DATE", "pattern": "mmm yyyy"},
     "int": {"type": "NUMBER", "pattern": "0"},
+    "day": {"type": "DATE", "pattern": "dd/mm/yyyy"},
 }
 
 # Réalisé tab: accounting table (rows 5-7 production, 11-13 costs), projects table from row 17
@@ -75,6 +79,26 @@ def month_serial(month_key: Optional[str]):
         return ""
     y, m = M.parse(month_key)
     return serial(date(y, m, 1))
+
+
+def cell_day(value) -> Optional[str]:
+    """A day typed in a date cell (serial number, "2027-06-30" or "30/06/2027") as "2027-06-30"."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return date.fromordinal(EPOCH.toordinal() + int(value)).isoformat()
+    text = str(value).strip()
+    try:
+        return date.fromisoformat(text[:10]).isoformat()
+    except ValueError:
+        pass
+    parts = [p for p in text.replace("-", "/").split("/") if p]
+    try:
+        if len(parts) == 3 and len(parts[2]) == 4:
+            return date(int(parts[2]), int(parts[1]), int(parts[0])).isoformat()
+    except ValueError:
+        return None
+    return None
 
 
 def cell_month(value) -> Optional[str]:
@@ -115,6 +139,8 @@ def editable_fields(row: Row, pole: str, grid: Sequence[str]) -> List[str]:
         fields.append("proba")
     if row.kind not in ("Contrat", "TS", "Animation"):
         fields += ["start", "stop"]
+    if row.kind == "Contrat":
+        fields += ["health", "confirmed_until"]
     if pole == "Travaux":
         fields.append("mai")
     if row.kind == "Manuel":
@@ -133,7 +159,9 @@ def normalize_typed(field: str, value):
         return None
     if field in ("start", "stop"):
         return cell_month(value)
-    if field in ("cat", "label", "comment"):
+    if field == "confirmed_until":
+        return cell_day(value)
+    if field in ("cat", "label", "comment", "health"):
         return str(value).strip()
     x = _num(value)
     if field == "proba" and x is not None and x > 1:  # "30" typed for 30 %
@@ -172,7 +200,7 @@ def render_pole(pole: str, items: List[Tuple[Row, Shown]], grid: List[str], open
     labels = {ROW_SIGNED: "Signé (€)", ROW_PIPE: "Pipe pondéré par la proba (€)", ROW_TOTAL: "Total prévu (€)",
               ROW_COST: "Coût prévu, pipe pondéré (€)"}
     for r, text in labels.items():
-        values[r - 1][idx["label"]] = text
+        values[r - 1][0] = text  # merged over the frozen columns A to D
     values[ROW_HEADER - 1] = [c.title.replace("{year}", str(M.year_of(open_from))) for c in cols]
 
     cat_l, proba_l, kv_l = col_letter(idx["cat"]), col_letter(idx["proba"]), col_letter(idx["kv"])
@@ -225,6 +253,8 @@ def render_pole(pole: str, items: List[Tuple[Row, Shown]], grid: List[str], open
                 a, b = col_letter(idx[months[0]]), col_letter(idx[months[-1]])
                 formulas.append((f"{col_letter(idx[f])}{r}", f"=SUM({a}{r}:{b}{r})"))
         type_colors.append((r - 1, idx["type"], SIGNED_TEXT if s.category == "Signé" else PIPE_TEXT))
+        if row.extra.get("health") in HEALTH_TEXT and "health" in idx:
+            type_colors.append((r - 1, idx["health"], rgb(HEALTH_TEXT[row.extra["health"]])))
         formulas.append((f"{col_letter(idx['cost_next'])}{r}", f"=IFERROR(SUM({first_m}{r}:{last_m}{r})/{kv_l}{r};0)"))
         formulas.append((f"{col_letter(idx['margin_next'])}{r}",
                          f"=SUM({first_m}{r}:{last_m}{r})-{col_letter(idx['cost_next'])}{r}"))
@@ -245,7 +275,8 @@ def render_pole(pole: str, items: List[Tuple[Row, Shown]], grid: List[str], open
 
         shown = {}
         for f in editable:
-            shown[f] = cell_month(cells[f]) if f in ("start", "stop") else cells[f]
+            shown[f] = (cell_month(cells[f]) if f in ("start", "stop") else
+                        cell_day(cells[f]) if f == "confirmed_until" else cells[f])
         shown["label"] = s.label
         rendered[row.ref] = shown
         calc[row.ref] = {
@@ -309,7 +340,7 @@ class ForecastSheet:
 
     # ------------------------------------------------------------------ read
     def read_state(self) -> SheetState:
-        ranges = [f"{quote(p)}!A1:BZ1500" for p in POLES] + [
+        ranges = [f"{quote(p)}!A1:BZ1500" for p in POLE_TABS] + [
             f"{quote(TAB_PARAMS)}!A1:P60", f"{quote(TAB_ACTUALS)}!A1:AO2000",
             f"{quote(TAB_INPUTS)}!A1:B3000", f"{quote(TAB_RENDER)}!A1:B3000",
         ]
@@ -317,7 +348,8 @@ class ForecastSheet:
                                                        "dateTimeRenderOption": "SERIAL_NUMBER"})["valueRanges"]
         grids = [g.get("values", []) for g in got]
         visible: Dict[str, List[Dict[str, object]]] = {}
-        for pole, rows in zip(POLES, grids[:3]):
+        n_tabs = len(POLE_TABS)
+        for pole, rows in zip(POLE_TABS, grids[:n_tabs]):
             if len(rows) < ROW_FIELDS:
                 visible[pole] = []
                 continue
@@ -328,11 +360,13 @@ class ForecastSheet:
                 for f in ("start", "stop"):
                     if f in cells:
                         cells[f] = cell_month(cells[f])
+                if "confirmed_until" in cells:
+                    cells["confirmed_until"] = cell_day(cells["confirmed_until"])
                 if any(v not in (None, "") for v in cells.values()):
                     data.append(cells)
             visible[pole] = data
-        params = parse_params(grids[3])
-        pl, pl_costs, finance, pl_columns = parse_actuals(grids[4])
+        params = parse_params(grids[n_tabs])
+        pl, pl_costs, finance, pl_columns = parse_actuals(grids[n_tabs + 1])
         def json_rows(rows):
             out = {}
             for r in rows:
@@ -343,7 +377,7 @@ class ForecastSheet:
                         continue
             return out
 
-        inputs, rendered = json_rows(grids[5]), json_rows(grids[6])
+        inputs, rendered = json_rows(grids[n_tabs + 2]), json_rows(grids[n_tabs + 3])
         return SheetState(params, finance, pl, pl_costs, inputs, rendered, visible, pl_columns)
 
     # ------------------------------------------------------------------ write
@@ -357,7 +391,7 @@ class ForecastSheet:
             "colors": {"typed": TYPED_HEX, "input": INPUT_HEX},
             "updated_at": updated_at.isoformat(timespec="minutes")}}
         clears = []
-        for pole in POLES:
+        for pole in POLE_TABS:
             rend = render_pole(pole, output.rows.get(pole, []), output.grid, output.open_from, updated_at,
                                state.params.fallback_months)
             all_rendered.update(rend.rendered)
@@ -459,6 +493,7 @@ class ForecastSheet:
         run are deleted first (recognised by their shape: column A only, "text is exactly <pole>").
         """
         targets = {ids[TAB_ACTUALS]: ACT_PROD_FIRST - 1, ids[TAB_PARAMS]: P_OBJ_HEADER_ROW, ids[TAB_CHECKS]: 1}
+        names = list(POLES) + [t for t in POLE_TABS if t not in POLES]  # Contrôles names the tab
         meta = self.ss.fetch_sheet_metadata(params={"fields": "sheets(properties(sheetId),conditionalFormats)"})
         req: List[dict] = []
         for sh in meta["sheets"]:
@@ -468,11 +503,11 @@ class ForecastSheet:
             for i, rule in reversed(list(enumerate(sh.get("conditionalFormats", [])))):
                 cond = rule.get("booleanRule", {}).get("condition", {})
                 values = [v.get("userEnteredValue") for v in cond.get("values", [])]
-                if cond.get("type") == "TEXT_EQ" and values and values[0] in POLES and \
+                if cond.get("type") == "TEXT_EQ" and values and values[0] in names and \
                         all(r.get("startColumnIndex", 0) == 0 and r.get("endColumnIndex") == 1 for r in rule.get("ranges", [])):
                     req.append({"deleteConditionalFormatRule": {"sheetId": sid, "index": i}})
         for sid, first_row in targets.items():
-            for pole in POLES:
+            for pole in names:
                 req.append({"addConditionalFormatRule": {"index": 0, "rule": {
                     "ranges": [{"sheetId": sid, "startRowIndex": first_row, "endRowIndex": 2000, "startColumnIndex": 0, "endColumnIndex": 1}],
                     "booleanRule": {"condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": pole}]},
@@ -659,7 +694,7 @@ def render_home() -> List[List[object]]:
          "ce qui sera probablement signé (pipe pondéré) et ce qu'il manque pour l'objectif."],
         [""],
         ["Qui fait quoi"],
-        ["Chefs de projet", "Onglets Travaux, Conception, Maintenance : saisir un mois (le reste se répartit seul), "
+        ["Chefs de projet", "Onglets Travaux, Conception, Maintenance contrats, Maintenance TS : saisir un mois (le reste se répartit seul), "
                             "la date de fin, le KV ou le coût prévu, la proba d'un devis, un commentaire."],
         ["Finance", "Onglet Réalisé : production de la comptabilité par mois et production cumulée par projet à chaque clôture. "
                     "Onglet Paramètres : dernier mois clos, KV par défaut, objectifs."],
@@ -694,8 +729,10 @@ def render_home() -> List[List[object]]:
                            "après la date de Paramètres. Ils restent affichés même si tout leur reste tombe après la fenêtre."],
         ["Devis en attente", "Tous les devis Furious au statut Brief, En cours ou Envoyé (comme le pipe du dashboard), quelles "
                              "que soient leurs dates."],
-        ["Contrats", "Tous les sites de la base Notion Sites : actifs en haut, sans production restante en bas."],
-        ["TS et animations", "Projets Furious des 24 derniers mois qui ont encore de la production à partir du mois en cours."],
+        ["Contrats", "Onglet Maintenance contrats : tous les sites de la base Notion Sites, rangés par état (Safe, puis "
+                     "À risque, puis Mort), les sites sans production restante en bas."],
+        ["TS et animations", "Onglet Maintenance TS : projets Furious des 24 derniers mois qui ont encore de la production à "
+                             "partir du mois en cours, et les devis TS en attente."],
         ["Lignes manuelles", "Celles que vous tapez."],
         [""],
         ["Règles de calcul"],
@@ -715,6 +752,11 @@ def render_home() -> List[List[object]]:
                              "du reste à produire Travaux. Elle n'est ajoutée nulle part ailleurs : si elle doit compter en Maintenance, "
                              "ajouter une ligne manuelle dans l'onglet Maintenance."],
         ["Pipe", "Probabilité Furious ; 0 % compte 50 % comme dans le dashboard. Modifiable ligne par ligne."],
+        ["État d'un contrat", "Safe : confirmé par le responsable de pôle pour les 1 à 3 ans qui viennent (tapez « Safe » et la "
+                              "date « Confirmé jusqu'au »). À risque : pas encore confirmé, ou un signal (fin dépassée, pas de "
+                              "date de fin réelle comme les tacites 2050, fin dans moins de 3 mois, « À surveiller » dans Notion…), "
+                              "détaillé dans la colonne « Pourquoi ». Mort : perdu ou archivé dans Notion. Un Safe dont la date "
+                              "est passée redevient À risque."],
         ["Fenêtre", "18 mois à partir du mois en cours. Les mois clos viennent de la comptabilité (onglet Réalisé)."],
     ]
 
@@ -727,36 +769,8 @@ POLE_CHARTS_TOP_ROW = 31  # one chart per pole, side by side, rows 31 to 47
 YEARS_FIRST = 50  # first year block
 CHART_COL, CHART_ROW = 30, 4  # chart data from AE4 (hidden columns): Total, then one block per pole
 CHART_BLOCK = 6  # columns per chart: month, réalisé, signé, pipe, objectif, gap
+STATUS_COL = 10  # column K: maintenance contracts by status, next to "En bref"
 
-BRIEF_NOTES = [
-    "Production comptable de l'année jusqu'au dernier mois clos (Paramètres, B4). Janvier à août 2026 : chiffres de la "
-    "compta repris du fichier d'Arthur (« 2026 Pré septembre »). Ensuite, chaque mois que la finance saisit dans l'onglet Réalisé.",
-    "Ce qui reste à produire d'ici décembre sur le travail déjà signé : projets Furious signés, contrats d'entretien, TS et "
-    "lignes manuelles « Signé ». Seulement l'année en cours : les années suivantes sont dans leurs blocs « Année » plus bas.",
-    "Devis en attente multipliés par leur probabilité, pour la part placée dans l'année en cours.",
-    "Atterrissage : ce que l'année devrait faire au total = réalisé + signé à produire + pipe pondéré.",
-    "Objectif annuel de production (onglet Paramètres).",
-    "Total prévu fin d'année − objectif. Positif : au-dessus de l'objectif.",
-    "Total prévu fin d'année ÷ objectif.",
-    "Ce qu'il faudrait encore signer et produire cette année pour atteindre l'objectif, sans compter sur le pipe : "
-    "objectif − réalisé − signé à produire.",
-]
-LINE_NOTES = {
-    "Réalisé (compta)": "Production comptable des mois clos (onglet Réalisé, saisie par la finance à chaque clôture). "
-                        "Vide pour un mois pas encore clos.",
-    "Signé à produire": "Production attendue chaque mois du travail signé : projets Furious signés, contrats d'entretien, TS et "
-                        "lignes manuelles « Signé », comptés à 100 %. C'est la ligne « Signé » de l'onglet du pôle. Vide pour un "
-                        "mois clos (remplacé par le réalisé).",
-    "Pipe pondéré": "Devis en attente multipliés par leur probabilité. C'est la ligne « Pipe pondéré » de l'onglet du pôle.",
-    "Total prévu": "Réalisé + signé à produire + pipe pondéré.",
-    "Objectif": "Objectif du mois (onglet Paramètres : 1/12 de l'objectif annuel par défaut).",
-    "Écart au mois": "Total prévu − objectif du mois. Négatif : en dessous de l'objectif.",
-    "Coût prévu": "Mois à venir : pour chaque ligne de l'onglet du pôle, montant du mois ÷ KV de la ligne (devis pondérés par "
-                  "leur probabilité), additionnés : c'est la ligne « Coût prévu » de l'onglet. Le KV d'une ligne : celui tapé, "
-                  "sinon CA ÷ coût tapé, sinon celui de sa typologie (Paramètres). Mois clos : coût réel saisi dans Réalisé, "
-                  "sinon réalisé ÷ KV objectif. Cumul janvier à août 2026 : production ÷ KV réel du 1er semestre (fichier d'Arthur).",
-    "KV": "Total prévu ÷ coût prévu.",
-}
 TOT_COL = 18  # column S: yearly total, then objective (T), gap (U), left to sign (V)
 
 SUMMARY_LINES = ["Réalisé (compta)", "Signé à produire", "Pipe pondéré", "Total prévu", "Objectif", "Écart au mois",
@@ -774,7 +788,7 @@ def render_summary(output: Output, state: SheetState, updated_at: datetime):
                                   [f"Réalisé = chiffres de la comptabilité jusqu'à {M.label(params.last_closed)} inclus ; ensuite prévision : "
                                    f"signé + pipe pondéré par sa probabilité. Mis à jour le {updated_at:%d/%m/%Y à %H:%M}."], [""]]
     formulas: List[Tuple[str, str]] = []
-    styled: Dict[str, list] = {"header": [], "kv": [], "brief": [], "lines": [], "brief_rows": [], "notes": []}
+    styled: Dict[str, list] = {"header": [], "kv": [], "brief": [], "lines": [], "brief_rows": [], "notes": [], "status_rows": []}
     row = YEARS_FIRST
     width = 2 + 12 + 4 + 4  # label, report, 12 months, 4 quarters, total / objective / gap / to sign
     year_rows: Dict[int, Dict[str, Dict[str, int]]] = {}
@@ -786,16 +800,11 @@ def render_summary(output: Output, state: SheetState, updated_at: datetime):
         report_title = f"Cumul {short(folded[0])} à {short(folded[-1])}" if folded else ""
         header = [f"Année {year}", report_title] + [M.label(M.key(year, m)) for m in range(1, 13)] + \
                  [f"T{q} {year}" for q in range(1, 5)] + \
-                 [f"Total {year}", f"Objectif {year}", "Écart", "Reste à signer pour l'objectif"]
+                 [f"Total {year}", f"Objectif {year}", "Écart", "Manque pour l'objectif (pipe compris)"]
         while len(values) < row:
             values.append([""] * width)
         values[row - 1] = header
         styled["header"].append(row)
-        if folded:
-            styled["notes"].append((row, 1, (
-                f"Mois clos sans détail par mois : la comptabilité n'en donne que le cumul, de {M.label(M.key(year, folded[0]))} "
-                f"à {M.label(M.key(year, folded[-1]))} (onglet Réalisé, colonne « Report » ; pour 2026, le « 2026 Pré septembre » "
-                "du fichier d'Arthur). Un mois que la finance saisit dans Réalisé a sa propre colonne.")))
         year_header[year] = row
         block_rows: Dict[str, Dict[str, int]] = {}
         year_rows[year] = block_rows
@@ -808,7 +817,6 @@ def render_summary(output: Output, state: SheetState, updated_at: datetime):
                 values[r - 1] = [f"{pole} · {line}"] + [""] * (width - 1)
                 block_rows[pole][line] = r
                 styled["lines"].append((r, pole, line))
-                styled["notes"].append((r, 0, ("Somme des trois pôles. " if pole == "Total" else "") + LINE_NOTES[line]))
                 if line == "KV":
                     styled["kv"].append(r)
                 r += 1
@@ -854,9 +862,10 @@ def render_summary(output: Output, state: SheetState, updated_at: datetime):
                                                    f"N({col}{rows_['Réalisé (compta)']})/{kv_txt})")
                     elif month in grid_cols:
                         g = grid_cols[month]
-                        cells["Signé à produire"] = f"={quote(pole)}!{g}{ROW_SIGNED}"
-                        cells["Pipe pondéré"] = f"={quote(pole)}!{g}{ROW_PIPE}"
-                        cells["Coût prévu"] = f"={quote(pole)}!{g}{ROW_COST}"
+                        tabs = POLE_TAB_LIST[pole]  # Maintenance: contracts tab + TS tab
+                        cells["Signé à produire"] = "=" + "+".join(f"N({quote(t)}!{g}{ROW_SIGNED})" for t in tabs)
+                        cells["Pipe pondéré"] = "=" + "+".join(f"N({quote(t)}!{g}{ROW_PIPE})" for t in tabs)
+                        cells["Coût prévu"] = "=" + "+".join(f"N({quote(t)}!{g}{ROW_COST})" for t in tabs)
                     if j == 0 or j not in reported:
                         cells["Total prévu"] = (f"=N({col}{rows_['Réalisé (compta)']})+N({col}{rows_['Signé à produire']})"
                                                 f"+N({col}{rows_['Pipe pondéré']})")
@@ -912,9 +921,8 @@ def render_summary(output: Output, state: SheetState, updated_at: datetime):
                 else "Réalisé compta (aucun mois clos)")
         values[BRIEF_FIRST - 2] = [f"En bref · {year}", done, f"Signé, reste à produire en {year}", f"Pipe pondéré {year}",
                                    f"Total prévu fin {year} (atterrissage)", f"Objectif {year}", "Écart à l'objectif",
-                                   "% de l'objectif", "À signer et produire pour l'objectif (hors pipe)"] + [""] * (width - 9)
+                                   "% de l'objectif", "Manque pour l'objectif (sans compter le pipe)"] + [""] * (width - 9)
         styled["header"].append(BRIEF_FIRST - 1)
-        styled["notes"] += [(BRIEF_FIRST - 1, 1 + i, text) for i, text in enumerate(BRIEF_NOTES)]
         tot, obj = col_letter(TOT_COL), col_letter(TOT_COL + 1)
         for i, pole in enumerate(list(POLES) + ["Total"]):
             r = BRIEF_FIRST + i
@@ -931,6 +939,29 @@ def render_summary(output: Output, state: SheetState, updated_at: datetime):
                 (f"G{r}", f"=E{r}-F{r}"),
                 (f"H{r}", f'=IFERROR(E{r}/F{r};"")'),
                 (f"I{r}", f"=MAX(0;F{r}-B{r}-C{r})"),
+            ]
+        # Maintenance contracts by status (columns K to O, next to "En bref"), read from the contracts tab.
+        cols = {c.field: col_letter(i) for i, c in enumerate(pole_columns(output.grid))}
+        ct = quote(TAB_CONTRACTS)
+        rng = lambda field: f"{ct}!{cols[field]}{ROW_FIRST}:{cols[field]}2000"
+        next_q = [fid for fid, _, _ in quarters(output.grid) if fid.startswith(f"q:{year + 1}-")]
+        values[BRIEF_FIRST - 2][STATUS_COL:STATUS_COL + 5] = [
+            "Contrats d'entretien", "Nombre", "Valeur annuelle", f"Reste à produire {year}", f"Production {year + 1}"]
+        for i, status in enumerate(list(HEALTH) + ["Total"]):
+            r = BRIEF_FIRST + i
+            k = col_letter(STATUS_COL)
+            values[r - 1][STATUS_COL] = status
+            styled["status_rows"].append((r, status))
+            if status == "Total":  # the three statuses added up (devis and sites without amount have none)
+                formulas += [(f"{col_letter(STATUS_COL + j)}{r}", f"=SUM({col_letter(STATUS_COL + j)}{BRIEF_FIRST}:"
+                                                                   f"{col_letter(STATUS_COL + j)}{r - 1})") for j in range(1, 5)]
+                continue
+            cond = lambda f: f'SUMIFS({rng(f)};{rng("health")};"{status}")'
+            formulas += [
+                (f"{col_letter(STATUS_COL + 1)}{r}", f'=COUNTIF({rng("health")};"{status}")'),
+                (f"{col_letter(STATUS_COL + 2)}{r}", f"={cond('ca')}"),
+                (f"{col_letter(STATUS_COL + 3)}{r}", f"={cond('this_year')}"),
+                (f"{col_letter(STATUS_COL + 4)}{r}", "=" + ("+".join(cond(q) for q in next_q) if next_q else "0")),
             ]
         # Chart data (hidden columns from AE): one block of 5 columns per chart (Total, then each pole), every month
         # from the first one after the "Report" block to the end of the window, read from the year blocks. The
@@ -989,6 +1020,8 @@ def pole_format_requests(sheet_id: int, rend: Rendered, pole: str) -> List[dict]
     cols = rend.columns
     n_rows = len(rend.values)
     light, strong = rgb(POLE_COLORS[pole]["light"]), rgb(POLE_COLORS[pole]["strong"])
+    thin = {"style": "SOLID", "color": rgb("#d9d9d9")}
+    medium = {"style": "SOLID_MEDIUM", "color": rgb("#7f7f7f")}
     req: List[dict] = [
         {"updateSheetProperties": {"properties": {"sheetId": sheet_id, "gridProperties": {
             "frozenRowCount": ROW_HEADER, "frozenColumnCount": 4}}, "fields": "gridProperties(frozenRowCount,frozenColumnCount)"}},
@@ -998,9 +1031,20 @@ def pole_format_requests(sheet_id: int, rend: Rendered, pole: str) -> List[dict]
         _repeat(sheet_id, ROW_TITLE - 1, ROW_TITLE, 0, len(cols), {"backgroundColor": strong, "textFormat": {"bold": True, "fontSize": 13}},
                 "userEnteredFormat(backgroundColor,textFormat)"),
         _repeat(sheet_id, ROW_TITLE - 1, ROW_LEGEND, 0, len(cols), {"wrapStrategy": "OVERFLOW_CELL"}, "userEnteredFormat.wrapStrategy"),
-        _repeat(sheet_id, ROW_SIGNED - 1, ROW_COST, 0, len(cols), {"backgroundColor": light, "textFormat": {"bold": True}},
-                "userEnteredFormat(backgroundColor,textFormat)"),
-        _repeat(sheet_id, ROW_TOTAL - 1, ROW_TOTAL, 0, len(cols), {"backgroundColor": strong}, "userEnteredFormat.backgroundColor"),
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": n_rows + 200, "startColumnIndex": 0,
+                                  "endColumnIndex": len(cols)}, "cell": {"note": ""}, "fields": "note"}},
+        _repeat(sheet_id, ROW_SIGNED - 1, ROW_COST, 0, len(cols), {
+            "backgroundColor": WHITE, "textFormat": {"bold": False, "fontSize": 10, "foregroundColor": DARK_TEXT},
+            "verticalAlignment": "MIDDLE",
+            "borders": {"bottom": thin, "top": thin}}, "userEnteredFormat(backgroundColor,textFormat,verticalAlignment,borders)"),
+        _repeat(sheet_id, ROW_SIGNED - 1, ROW_COST, 0, 4, {
+            "backgroundColor": light, "textFormat": {"bold": True, "fontSize": 10, "foregroundColor": DARK_TEXT},
+            "horizontalAlignment": "LEFT"}, "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)"),
+        _repeat(sheet_id, ROW_TOTAL - 1, ROW_TOTAL, 0, len(cols), {
+            "backgroundColor": strong, "textFormat": {"bold": True, "fontSize": 11, "foregroundColor": DARK_TEXT},
+            "borders": {"top": medium, "bottom": medium}}, "userEnteredFormat(backgroundColor,textFormat,borders)"),
+        _repeat(sheet_id, ROW_COST - 1, ROW_COST, 0, len(cols), {
+            "textFormat": {"italic": True, "foregroundColor": GREY_TEXT}}, "userEnteredFormat.textFormat(italic,foregroundColor)"),
         _repeat(sheet_id, ROW_HEADER - 1, ROW_HEADER, 0, len(cols), {"backgroundColor": strong, "wrapStrategy": "WRAP",
                 "textFormat": {"bold": True, "foregroundColor": {"red": 0, "green": 0, "blue": 0}}, "verticalAlignment": "MIDDLE"},
                 "userEnteredFormat(backgroundColor,textFormat,wrapStrategy,verticalAlignment)"),
@@ -1034,6 +1078,14 @@ def pole_format_requests(sheet_id: int, rend: Rendered, pole: str) -> List[dict]
     label_i, owner_i = fields.index("label"), fields.index("owner")
     border = {"style": "SOLID", "color": {"red": 0.6, "green": 0.6, "blue": 0.6}}
     req += [
+        {"unmergeCells": {"range": {"sheetId": sheet_id, "startRowIndex": ROW_SIGNED - 1, "endRowIndex": ROW_COST,
+                                    "startColumnIndex": 0, "endColumnIndex": len(cols)}}},
+    ] + [
+        {"mergeCells": {"range": {"sheetId": sheet_id, "startRowIndex": r - 1, "endRowIndex": r, "startColumnIndex": 0,
+                                  "endColumnIndex": 4}, "mergeType": "MERGE_ALL"}} for r in range(ROW_SIGNED, ROW_COST + 1)
+    ] + [
+        {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": ROW_SIGNED - 1,
+                                                 "endIndex": ROW_COST}, "properties": {"pixelSize": 24}, "fields": "pixelSize"}},
         {"unmergeCells": {"range": {"sheetId": sheet_id, "startRowIndex": ROW_LEGEND - 1, "endRowIndex": ROW_LEGEND,
                                     "startColumnIndex": 0, "endColumnIndex": len(cols)}}},
         {"mergeCells": {"range": {"sheetId": sheet_id, "startRowIndex": ROW_LEGEND - 1, "endRowIndex": ROW_LEGEND,
@@ -1050,13 +1102,13 @@ def pole_format_requests(sheet_id: int, rend: Rendered, pole: str) -> List[dict]
                 "userEnteredFormat(backgroundColor,wrapStrategy,textFormat,verticalAlignment,borders)"),
         {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": ROW_LEGEND - 1,
                                                  "endIndex": ROW_LEGEND}, "properties": {"pixelSize": 38}, "fields": "pixelSize"}},
-        {"updateCells": {"range": {"sheetId": sheet_id, "startRowIndex": ROW_HEADER - 1, "endRowIndex": ROW_HEADER,
-                                   "startColumnIndex": 0, "endColumnIndex": len(cols)},
-                         "rows": [{"values": [{"note": HEADER_NOTES.get(c.field, "Mois : tapez un montant pour le figer ; le reste à "
-                                                                     "produire se répartit sur les autres mois." if M.is_key(c.field) else "")}
-                                              for c in cols]}],
-                         "fields": "note"}},
     ]
+    if "health" in [c.field for c in cols] and pole == TAB_CONTRACTS:
+        h_i = [c.field for c in cols].index("health")
+        req.append({"setDataValidation": {"range": {"sheetId": sheet_id, "startRowIndex": ROW_FIRST - 1, "endRowIndex": n_rows + 200,
+                                                    "startColumnIndex": h_i, "endColumnIndex": h_i + 1},
+                                          "rule": {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": v} for v in HEALTH]},
+                                                   "strict": False, "showCustomUi": True}}})
     cat_i = [c.field for c in cols].index("cat")
     req.append({"setDataValidation": {"range": {"sheetId": sheet_id, "startRowIndex": ROW_FIRST - 1, "endRowIndex": n_rows + 200,
                                                 "startColumnIndex": cat_i, "endColumnIndex": cat_i + 1},
@@ -1094,6 +1146,17 @@ def summary_format_requests(sheet_id: int, output: Output, layout_rows: Dict[str
                            "userEnteredFormat.backgroundColor"))
         req.append(_repeat(sheet_id, r - 1, r, 4, 5, {"backgroundColor": rgb(POLE_COLORS[pole]["strong"])},
                            "userEnteredFormat.backgroundColor"))
+    for r, status in layout_rows.get("status_rows", []):
+        total = status == "Total"
+        req.append(_repeat(sheet_id, r - 1, r, STATUS_COL, STATUS_COL + 5,
+                           {"backgroundColor": rgb(POLE_COLORS["Maintenance"]["strong" if total else "light"]),
+                            "textFormat": {"bold": total}}, "userEnteredFormat(backgroundColor,textFormat)"))
+        req.append(_repeat(sheet_id, r - 1, r, STATUS_COL + 1, STATUS_COL + 2, {"numberFormat": FORMATS["int"]},
+                           "userEnteredFormat.numberFormat"))
+        if status in HEALTH_TEXT:
+            req.append(_repeat(sheet_id, r - 1, r, STATUS_COL, STATUS_COL + 1,
+                               {"textFormat": {"bold": True, "foregroundColor": rgb(HEALTH_TEXT[status])}},
+                               "userEnteredFormat.textFormat"))
     for r, c, text in layout_rows.get("notes", []):
         req.append({"updateCells": {"range": {"sheetId": sheet_id, "startRowIndex": r - 1, "endRowIndex": r, "startColumnIndex": c,
                                               "endColumnIndex": c + 1}, "rows": [{"values": [{"note": text}]}], "fields": "note"}})
