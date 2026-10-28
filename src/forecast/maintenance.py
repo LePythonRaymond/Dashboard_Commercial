@@ -40,6 +40,8 @@ class Site:
     client: str = ""
     frequency: str = ""
     reconduction: str = ""  # Notion "Reconduction" options, joined
+    etat: str = ""  # Notion "État contrat": "Safe", "À risque" or "Mort" (anything else is kept as typed)
+    follow_up: str = ""  # Notion "Commentaire suivi contrat"
     dates: List[str] = field(default_factory=list)  # ISO day of every passage (one per day)
 
 
@@ -59,7 +61,7 @@ def passages_in_year(site: Site, year: int, before: Optional[date] = None) -> in
 def year_value(site: Site, year: int) -> float:
     """Contract value of ``year``: the rule of Notion's "Total HT Cette année".
 
-    - lost (Reconduction "Perdu") and ended before the year: 0;
+    - lost (État contrat "Mort" or Reconduction "Perdu") and ended before the year: 0;
     - lost and ending in the year: the months up to the end
       (from the start month if the contract started that year, else from January);
     - started in the year, with no end or a later one: the months from the start;
@@ -186,12 +188,12 @@ def passages_by_site(planning_pages: Iterable[dict]) -> Dict[str, Dict[str, int]
     return counts
 
 
-# --------------------------------------------------------------------------- contract status (Safe / À surveiller / Mort)
+# --------------------------------------------------------------------------- contract status (Safe / À risque / Mort)
 
 RISK_HORIZON_DAYS = 90  # an end date this close is worth a look
-# Notion "Reconduction" option -> contract status (decided by the user on 2026-10-27; Hugo asked for
-# "À surveiller" rather than "À risque", less alarming, so the sheet uses the Notion word itself)
-RECONDUCTION_HEALTH = {"Reconduction Tacite": "Safe", "À surveiller": "À surveiller", "Perdu": "Mort"}
+# The options of Notion's "État contrat", chosen by the account managers (filled for every site on 2026-10-28).
+# The sheet shows the Notion word itself.
+CONTRACT_STATES = ("Safe", "À risque", "Mort")
 
 
 def contract_signals(site: Site, today: date) -> List[str]:
@@ -207,27 +209,54 @@ def contract_signals(site: Site, today: date) -> List[str]:
     return []
 
 
-def contract_health(site: Site, today: date) -> Tuple[str, str]:
-    """Status of a maintenance contract and why: ("Safe" | "À surveiller" | "Mort" | "", reason).
+def _stop_text(site: Site) -> str:
+    """What the forecast does with a contract that does not renew (Mort, or Perdu in Reconduction)."""
+    return f"plus rien compté après le {site.end:%d/%m/%Y}" if site.end else "pas de date de fin dans Notion, donc encore compté"
 
-    The status is a person's decision, typed in Notion's "Reconduction" (a multi-select):
-    "Reconduction Tacite" = Safe, "À surveiller" = À surveiller, "Perdu" = Mort. The most cautious option
-    wins when several are ticked (Perdu, then À surveiller, then Reconduction Tacite). An archived site
-    is Mort. Any other value ("à suivre", "Relancé en attente de réponse") or none: À surveiller until
-    someone decides. The date signals (end passed, no end, end within 3 months) are added to the reason
-    but never change the status. A site without an annual amount gets no status (it produces nothing).
+
+def contract_health(site: Site, today: date) -> Tuple[str, str]:
+    """Status of a maintenance contract and why: ("Safe" | "À risque" | "Mort" | "", reason).
+
+    The status is the account manager's choice in Notion's "État contrat" (decided on 2026-10-28, it replaces
+    the reading of "Reconduction"). An archived site is Mort. An empty or unknown État contrat is À risque until
+    someone chooses. The reason starts with the follow-up comment written in Notion, then what the dates say
+    (end passed, no end, end within 3 months); the dates never change the status. A site without an annual
+    amount gets no status (it produces nothing).
+
+    Example: État contrat "Mort", comment "Ne se renouvelle pas", end 30/12/2026
+    -> ("Mort", "Ne se renouvelle pas · plus rien compté après le 30/12/2026").
     """
-    options = [o.strip() for o in site.reconduction.split(",") if o.strip()]
-    signals = contract_signals(site, today)
     if site.archived:
         return "Mort", "Site archivé dans Notion"
-    if "Perdu" in options:
-        return "Mort", "Perdu dans Notion"
     if site.annual <= 0:
         return "", "Pas de montant annuel dans Notion"
-    if "À surveiller" in options:
-        return "À surveiller", " · ".join(["À surveiller dans Notion"] + signals)
-    if "Reconduction Tacite" in options:
-        return "Safe", " · ".join(["Reconduction Tacite dans Notion"] + [f"à vérifier : {x}" for x in signals])
-    told = "Reconduction : " + ", ".join(options) if options else "Reconduction vide"
-    return "À surveiller", " · ".join([f"{told} (à décider dans Notion)"] + signals)
+    lines = [x.strip() for x in site.follow_up.splitlines() if x.strip()]
+    said = [" / ".join(lines)] if lines else []
+    if site.etat == "Mort":
+        return "Mort", " · ".join(said + [_stop_text(site)])
+    signals = contract_signals(site, today)
+    if site.lost:  # "Perdu" in Reconduction: the months stop at the end date whatever the État contrat says
+        signals.append("Reconduction « Perdu » : " + _stop_text(site))
+    if site.etat == "Safe":
+        return "Safe", " · ".join(said + [f"à vérifier : {x}" for x in signals])
+    if site.etat == "À risque":
+        return "À risque", " · ".join(said + signals)
+    told = f"État contrat « {site.etat} » inconnu" if site.etat else "État contrat vide"
+    return "À risque", " · ".join([f"{told} (à remplir dans Notion)"] + said + signals)
+
+
+def contract_checks(site: Site, health: str, today: date) -> List[str]:
+    """What to fix in Notion for one contract, listed in the Contrôles tab ([] when nothing)."""
+    if site.archived or not health:
+        return []
+    if site.etat not in CONTRACT_STATES:
+        return ["État contrat à choisir dans Notion : Safe, À risque ou Mort"]
+    if site.etat == "Mort":
+        return [] if site.end else ["Mort mais pas de date de fin dans Notion : le contrat reste compté, "
+                                    "mettre la date de fin"]
+    if site.lost:
+        return [f"{site.etat} mais Reconduction « Perdu » dans Notion : {_stop_text(site)}. Si le contrat continue, "
+                f"retirer « Perdu » et prolonger la date de fin ; sinon passer l'État contrat à Mort"]
+    if site.end is not None and site.end < today:
+        return [f"{site.etat} mais fin dépassée le {site.end:%d/%m/%Y} : mettre à jour la date de fin dans Notion"]
+    return []

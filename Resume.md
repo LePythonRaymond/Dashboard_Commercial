@@ -1237,11 +1237,14 @@ The script's functions mirror `engine.py` and `model.py` line for line. `tests/t
 - « Maintenance contrats »: Notion contracts and contract devis;
 - « Maintenance TS »: TS, animations and their devis.
 
-A contract's « État du contrat » (`maintenance.contract_health`) is read from Notion Sites' « Reconduction » (decided 2026-10-27; the pole heads set it there, the sheet is read only):
-- **Safe** = « Reconduction Tacite »;
-- **À surveiller** (called « À risque » until 2026-10-27, renamed at Hugo's request) = « À surveiller », or nothing decided yet (empty, « à suivre », « Relancé en attente de réponse »), listed in Contrôles as « Reconduction à choisir »;
-- **Mort** = « Perdu », or the site archived.
-The most cautious option wins when several are ticked. Date signals (end passed, no end, end within 90 days) go into « Pourquoi » without changing the status; a Safe contract past its end date is listed in Contrôles.
+A contract's « État du contrat » (`maintenance.contract_health`) is Notion Sites' « État contrat » (a select, filled for every site by the account managers on 2026-10-28; it replaces the reading of « Reconduction » used from 2026-10-27). The sheet shows the Notion word and is read only:
+- **Safe** = « Safe »;
+- **À risque** = « À risque », or « État contrat » empty or unknown (listed in Contrôles as « État contrat à choisir »);
+- **Mort** = « Mort », or the site archived.
+
+Case and accents are ignored when reading the option. « Pourquoi » shows the Notion « Commentaire suivi contrat » on one line, then the date signals (end passed, no end, end within 90 days), which never change the status. A site without an annual amount gets no status.
+
+Money: « Mort » or « Perdu » in « Reconduction » sets `Site.lost`, so the contract stops at its end date (`year_value`); Safe and À risque renew. On 2026-10-28 this took 80 705 € out of 2027 (Métal 57 −63 442 €, INSEE −16 043 €, Léonard de Vinci −1 220 €) and nothing out of 2026. Contrôles (`maintenance.contract_checks`) list: an État contrat to choose; Safe or À risque with « Perdu » in Reconduction (MGK, Europlaza that day: counted as lost until fixed); Mort without an end date (still counted); Safe or À risque past its end date.
 
 « Début » and « Fin » of a contract are its Notion dates and are display only: the months come from the planning, and a contract that is not Perdu keeps producing after its Fin (renewal rule).
 
@@ -1249,7 +1252,7 @@ The most cautious option wins when several are ticked. Date signals (end passed,
 
 **Run.** `python scripts/run_forecast.py --spreadsheet ID [--dry-run]` takes about 90 s: Furious, Notion, one read and a few batched writes. Formulas use the sheet's fr_FR syntax. It reads Furious and Notion only.
 
-**Tests.** 499 pass. The 49 new ones are in `test_forecast_engine.py`, `test_forecast_maintenance.py`, `test_forecast_inputs.py` and `test_forecast_js_parity.py`, with shared vectors in `forecast_vectors.json`.
+**Tests.** 500 pass. The 49 new ones are in `test_forecast_engine.py`, `test_forecast_maintenance.py`, `test_forecast_inputs.py` and `test_forecast_js_parity.py`, with shared vectors in `forecast_vectors.json`.
 
 ---
 

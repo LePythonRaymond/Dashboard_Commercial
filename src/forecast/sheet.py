@@ -634,7 +634,7 @@ HOME_SECTIONS: List[Tuple[str, List[Tuple[str, str]]]] = [
         ("Synthèse", "La vue d'ensemble par pôle et par mois : réalisé, signé à produire, pipe pondéré, objectif. Lecture seule."),
         ("Travaux, Conception", "Une ligne par projet signé non fermé et par devis en attente (Brief, En cours, Envoyé). "
                                 "Les chefs de projet y modifient les cellules bleues."),
-        ("Maintenance contrats", "Les contrats d'entretien de Notion Sites, avec leur état (Safe, À surveiller, Mort), "
+        ("Maintenance contrats", "Les contrats d'entretien de Notion Sites, avec leur état (Safe, À risque, Mort), "
                                  "et les devis de contrat en attente."),
         ("Maintenance TS", "Les TS et animations Furious qui ont encore de la production, et les devis TS en attente."),
         ("Réalisé, Paramètres", "Pour la finance : chiffres de la comptabilité à chaque clôture, dernier mois clos, "
@@ -651,13 +651,13 @@ HOME_SECTIONS: List[Tuple[str, List[Tuple[str, str]]]] = [
         ("Texte rouge", "Alerte à regarder : détail dans la colonne Alertes et l'onglet Contrôles."),
     ]),
     ("État d'un contrat", [
-        ("Safe", "« Reconduction Tacite » dans la colonne Reconduction de Notion Sites : le contrat est confirmé."),
-        ("À surveiller", "« À surveiller » dans Notion, ou rien de décidé encore (Reconduction vide, « à suivre », "
-                     "« Relancé en attente de réponse »)."),
-        ("Mort", "« Perdu » dans Notion, ou site archivé."),
-        ("Pourquoi", "Le choix lu dans Notion, puis ce que disent les dates : fin dépassée, pas de date de fin, fin dans "
-                     "moins de 3 mois. Ces signaux ne changent pas l'état : ils disent quoi vérifier. L'état se change "
-                     "dans Notion, la feuille le reprend la nuit suivante."),
+        ("Safe", "« Safe » dans la colonne État contrat de Notion Sites, choisi par le responsable du compte."),
+        ("À risque", "« À risque » dans Notion, ou État contrat vide (listé dans Contrôles). Le contrat reste compté "
+                     "en entier."),
+        ("Mort", "« Mort » dans Notion, ou site archivé. Plus rien n'est compté après la date de fin du contrat."),
+        ("Pourquoi", "Le commentaire de suivi écrit dans Notion, puis ce que disent les dates : fin dépassée, pas de date "
+                     "de fin, fin dans moins de 3 mois. Ces signaux ne changent pas l'état. L'état se change dans Notion, "
+                     "la feuille le reprend la nuit suivante."),
     ]),
     ("Les références (colonne Réf.)", [
         ("P1081", "Projet signé : n° de projet Furious."),

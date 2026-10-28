@@ -63,8 +63,8 @@ POLE_COLORS = {
 # The two Maintenance tabs share the pole's purple; the TS tab is a shade darker so the tabs stand apart.
 POLE_COLORS[TAB_CONTRACTS] = POLE_COLORS["Maintenance"]
 POLE_COLORS[TAB_TS] = {"light": "#e4dff0", "strong": "#8e7cc3", "chart": POLE_COLORS["Maintenance"]["chart"]}
-HEALTH = ("Safe", "À surveiller", "Mort")  # contract status, from Notion's "Reconduction"
-HEALTH_TEXT = {"Safe": "#1a6b3d", "À surveiller": "#b45309", "Mort": "#7f7f7f"}
+HEALTH = ("Safe", "À risque", "Mort")  # contract status: Notion's "État contrat" (maintenance.CONTRACT_STATES)
+HEALTH_TEXT = {"Safe": "#1a6b3d", "À risque": "#b45309", "Mort": "#7f7f7f"}
 OBJECTIVE_LINE = "#434343"
 INPUT_HEX = "#e8f2ff"
 TYPED_HEX = "#f9cb9c"  # orange: yellow is the Travaux colour
@@ -95,7 +95,7 @@ BEFORE: List[Col] = [
     Col("type", "Type", "text", width=132),
     Col("label", "Libellé", "text", "manual", 330),
     Col("owner", "Responsable", "text", width=120),
-    # Contract status (asked by Hugo): read from Notion's "Reconduction", set there by the pole heads
+    # Contract status (asked by Hugo): Notion's "État contrat", set there by the account managers
     Col("health", "État du contrat", "text", width=92, only=(TAB_CONTRACTS,)),
     Col("health_reason", "Pourquoi", "text", width=300, only=(TAB_CONTRACTS,)),
     # Maintenance portfolio (asked by Arthur): hidden in the other tabs
