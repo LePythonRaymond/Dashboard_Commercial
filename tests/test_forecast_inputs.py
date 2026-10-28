@@ -183,10 +183,11 @@ def test_summary_headers_notes_and_one_chart_per_pole():
     assert values[3][1] == "Réalisé compta (janv. à août 2026)" and values[3][4] == "Total prévu fin 2026 (atterrissage)"
     assert values[YEARS_FIRST - 1][1] == "Cumul janv. à août"  # was "Report"
     assert styled["notes"] == []  # no hover notes anywhere (asked on 2026-10-26)
+    assert values[1] == [""]  # no explanatory sentence under the title (asked on 2026-10-27)
     assert values[3][8] == "Manque pour l'objectif (sans compter le pipe)"  # column I, was "(hors pipe)"
     from src.forecast.sheet import STATUS_COL
     assert values[3][STATUS_COL:STATUS_COL + 2] == ["Contrats d'entretien", "Nombre"]
-    assert [values[4 + i][STATUS_COL] for i in range(4)] == ["Safe", "À risque", "Mort", "Total"]
+    assert [values[4 + i][STATUS_COL] for i in range(4)] == ["Safe", "À surveiller", "Mort", "Total"]
     assert f[f"{col_letter(STATUS_COL + 1)}5"].startswith("=COUNTIF('Maintenance contrats'!")
     for b, name in enumerate(["Total", "Travaux", "Conception", "Maintenance"]):
         c0 = CHART_COL + CHART_BLOCK * b
@@ -197,26 +198,27 @@ def test_summary_headers_notes_and_one_chart_per_pole():
 
 
 
-def test_contract_status_from_the_data_and_from_a_confirmation():
+def test_contract_status_from_notion_reconduction():
     from src.forecast.maintenance import Site, contract_health
 
     today = date(2026, 10, 27)
+    # The status is the Reconduction chosen in Notion (decided on 2026-10-27); dates only add signals.
     tacit = Site("p1", "Capital 8 - 721 (EXT)", 38800, start=date(2024, 7, 1), end=date(2050, 12, 31),
                  reconduction="Reconduction Tacite")
-    assert contract_health(tacit, today) == ("À risque", "fin 2050 : pas de date de fin réelle (tacite)")
-    passed = Site("p2", "Adyen - 179 (INT)", 4420, end=date(2024, 12, 6), reconduction="Relancé en attente de réponse",
-                  dates=["2026-10-30", "2026-11-27"])
-    status, why = contract_health(passed, today)
-    assert status == "À risque" and "fin dépassée le 06/12/2024, encore 2 passages au planning après" in why
-    assert "Notion : Relancé en attente de réponse" in why
-    plain = Site("p3", "Neuf - 1350 (INT)", 4576, start=date(2026, 11, 2), end=date(2027, 11, 2))
-    assert contract_health(plain, today) == ("À risque", "non confirmé")
-    assert contract_health(Site("p4", "x", 1000, lost=True), today)[0] == "Mort"
-    assert contract_health(Site("p5", "x", 0), today) == ("", "Pas de montant annuel dans Notion")
-    # A confirmation wins; a Safe whose date has passed falls back to À risque.
-    assert contract_health(tacit, today, {"health": "Safe", "confirmed_until": "2028-12-31"})[0] == "Safe"
-    status, why = contract_health(plain, today, {"health": "Safe", "confirmed_until": "2026-09-30"})
-    assert status == "À risque" and why.startswith("confirmation expirée le 30/09/2026")
+    assert contract_health(tacit, today) == ("Safe", "Reconduction Tacite dans Notion")
+    tacit_passed = Site("p2", "Adyen - 179 (INT)", 4420, end=date(2024, 12, 6), reconduction="Reconduction Tacite",
+                        dates=["2026-10-30", "2026-11-27"])
+    assert contract_health(tacit_passed, today) == (
+        "Safe", "Reconduction Tacite dans Notion · à vérifier : fin dépassée le 06/12/2024, encore 2 passages au planning après")
+    watched = Site("p3", "x", 1000, end=date(2026, 12, 1), reconduction="Reconduction Tacite, À surveiller")
+    assert contract_health(watched, today) == ("À surveiller", "À surveiller dans Notion · fin le 01/12/2026, dans moins de 3 mois")
+    pending = Site("p4", "x", 1000, end=date(2027, 11, 2), reconduction="Relancé en attente de réponse")
+    assert contract_health(pending, today) == ("À surveiller", "Reconduction : Relancé en attente de réponse (à décider dans Notion)")
+    assert contract_health(Site("p5", "x", 1000, end=date(2027, 1, 1)), today)[1].startswith("Reconduction vide")
+    assert contract_health(Site("p6", "x", 1000, lost=True, reconduction="Perdu, Reconduction Tacite"), today) == (
+        "Mort", "Perdu dans Notion")
+    assert contract_health(Site("p7", "x", 1000, archived=True, reconduction="Reconduction Tacite"), today)[0] == "Mort"
+    assert contract_health(Site("p8", "x", 0, reconduction="Reconduction Tacite"), today) == ("", "Pas de montant annuel dans Notion")
 
 
 def test_maintenance_rows_split_between_contracts_and_ts_tabs():
@@ -228,10 +230,35 @@ def test_maintenance_rows_split_between_contracts_and_ts_tabs():
          "created_at": "2026-10-01", "project_manager": "luana", "cf_bu": "MAINTENANCE", "typologies": ["Maintenance TS"]},
     ])
     sites = [Site("aaaa-1", "Capital 8 - 721 (EXT)", 12000, start=date(2024, 7, 1), end=date(2050, 12, 31), furious_id="721",
-                  passages={"2026-11": 1, "2026-12": 1})]
+                  passages={"2026-11": 1, "2026-12": 1}),
+             Site("bbbb-2", "Neuf - 1350 (INT)", 4576, start=date(2026, 11, 2), end=date(2027, 11, 2), furious_id="1350",
+                  passages={"2026-11": 1}, reconduction="à suivre")]
     params = Params("2026-09", 2, None, {}, {})
-    out = assemble(SheetState(params, [], {}, {}, {"S721": {"health": "Safe", "confirmed_until": "2028-06-30"}}, {}, {}),
-                   projects, pd.DataFrame(), sites, date(2026, 10, 27))
+    sites[0].reconduction = "Reconduction Tacite"
+    out = assemble(SheetState(params, [], {}, {}, {}, {}, {}), projects, pd.DataFrame(), sites, date(2026, 10, 27))
     contracts = {r.ref: r for r, _ in out.rows[TAB_CONTRACTS]}
-    assert list(contracts) == ["S721"] and [r.ref for r, _ in out.rows[TAB_TS]] == ["T1270"]
-    assert contracts["S721"].extra["health"] == "Safe" and contracts["S721"].extra["confirmed_until"] == date(2028, 6, 30)
+    assert list(contracts) == ["S721", "S1350"] and [r.ref for r, _ in out.rows[TAB_TS]] == ["T1270"]  # Safe first
+    assert contracts["S721"].extra["health"] == "Safe" and contracts["S1350"].extra["health"] == "À surveiller"
+    # Wednesday's to-do: every contract whose Reconduction is not one of the three choices is listed in Contrôles
+    assert [c[1] for c in out.checks if c[3].startswith("Reconduction à choisir")] == ["S1350"]
+    # Début and Fin of a contract are its Notion dates, even when it renews (asked on 2026-10-27: Fin was empty)
+    assert contracts["S721"].start == "2024-07" and contracts["S721"].stop == "2050-12"
+    assert "contract_end" not in contracts["S721"].extra
+
+
+def test_pole_tab_without_legend_and_home_page_without_preamble():
+    from datetime import datetime
+
+    from src.forecast.layout import ROW_LEGEND, TAB_CONTRACTS
+    from src.forecast.sheet import HOME_UPDATED, render_home, render_pole
+
+    rend = render_pole(TAB_CONTRACTS, [], ["2026-10", "2026-11"], "2026-10", datetime(2026, 10, 27, 7, 30), 2)
+    assert all(v == "" for v in rend.values[ROW_LEGEND - 1])  # the colour legend lives in the Accueil only
+    values, styles = render_home(datetime(2026, 10, 27, 7, 30))
+    assert values[0] == [HOME_UPDATED, "27/10/2026 à 07:30, automatique chaque nuit"]
+    texts = " ".join(str(c) for line in values for c in line)
+    assert "À quoi sert ce fichier" not in texts and "Prévision de production · Merci Raymond" not in texts
+    sections = [label for _, kind, label in styles if kind == "section"]
+    assert sections == ["Les onglets", "Les couleurs", "État d'un contrat", "Les références (colonne Réf.)",
+                        "Comment les chiffres sont calculés"]
+    assert all(values[r0][0] == label for r0, kind, label in styles if kind in ("section", "line"))

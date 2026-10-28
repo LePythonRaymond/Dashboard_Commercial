@@ -1,10 +1,10 @@
 """
 Layout of the forecast spreadsheet: tabs, columns, fixed cells.
 
-Every pole tab (Travaux, Conception, Maintenance) has the same shape:
+Every pole tab (Travaux, Conception, Maintenance contrats, Maintenance TS) has the same shape:
 
     row 1  title and last update
-    row 2  how to read the colours
+    row 2  empty, a thin spacer (the colour legend lives in the Accueil tab)
     row 3  field ids (hidden): the server and the Apps Script find columns by these ids
     row 4  "Signé" subtotal per month (formula)
     row 5  "Pipe pondéré" subtotal per month (formula: amount x probability)
@@ -63,8 +63,8 @@ POLE_COLORS = {
 # The two Maintenance tabs share the pole's purple; the TS tab is a shade darker so the tabs stand apart.
 POLE_COLORS[TAB_CONTRACTS] = POLE_COLORS["Maintenance"]
 POLE_COLORS[TAB_TS] = {"light": "#e4dff0", "strong": "#8e7cc3", "chart": POLE_COLORS["Maintenance"]["chart"]}
-HEALTH = ("Safe", "À risque", "Mort")  # contract status, set by hand once confirmed
-HEALTH_TEXT = {"Safe": "#1a6b3d", "À risque": "#b45309", "Mort": "#7f7f7f"}
+HEALTH = ("Safe", "À surveiller", "Mort")  # contract status, from Notion's "Reconduction"
+HEALTH_TEXT = {"Safe": "#1a6b3d", "À surveiller": "#b45309", "Mort": "#7f7f7f"}
 OBJECTIVE_LINE = "#434343"
 INPUT_HEX = "#e8f2ff"
 TYPED_HEX = "#f9cb9c"  # orange: yellow is the Travaux colour
@@ -95,16 +95,14 @@ BEFORE: List[Col] = [
     Col("type", "Type", "text", width=132),
     Col("label", "Libellé", "text", "manual", 330),
     Col("owner", "Responsable", "text", width=120),
-    # Contract status (asked by Hugo): automatic proposal, confirmed by typing it
-    Col("health", "État du contrat", "text", "contract", 92, only=(TAB_CONTRACTS,)),
-    Col("confirmed_until", "Confirmé jusqu'au", "day", "contract", 92, only=(TAB_CONTRACTS,)),
+    # Contract status (asked by Hugo): read from Notion's "Reconduction", set there by the pole heads
+    Col("health", "État du contrat", "text", width=92, only=(TAB_CONTRACTS,)),
     Col("health_reason", "Pourquoi", "text", width=300, only=(TAB_CONTRACTS,)),
     # Maintenance portfolio (asked by Arthur): hidden in the other tabs
     Col("client", "Client", "text", width=150, only=(TAB_CONTRACTS,)),
     Col("furious_no", "N° Furious", "text", width=72, only=(TAB_CONTRACTS,)),
     Col("status", "Statut Notion", "text", width=78, only=(TAB_CONTRACTS,)),
     Col("renewal", "Reconduction (Notion)", "text", width=150, only=(TAB_CONTRACTS,)),
-    Col("contract_end", "Fin du contrat", "date", width=88, only=(TAB_CONTRACTS,)),
     Col("frequency", "Fréquence", "text", width=190, only=(TAB_CONTRACTS,)),
     Col("passages_year", "Passages prévus {year}", "int", width=82, only=(TAB_CONTRACTS,)),
     Col("passages_done", "Passages faits à date", "int", width=82, only=(TAB_CONTRACTS,)),
@@ -115,7 +113,7 @@ BEFORE: List[Col] = [
     Col("remaining", "Reste à produire (€)", "money", width=120),
     Col("this_year", "dont {year} (€)", "money", width=110),
     Col("start", "Début", "date", "all", 84),
-    Col("stop", "Fin", "date", "all", 84),
+    Col("stop", "Fin", "date", "all", 84),  # contracts: Notion's end date (they renew unless "Perdu")
     Col("kv", "KV", "kv", "all", 56),
     # Collapsible group "détails" (contiguous on purpose: a column group needs one block)
     Col("typo", "Typologie", "text", width=130, detail=True),
@@ -125,7 +123,6 @@ BEFORE: List[Col] = [
 ]
 AFTER: List[Col] = [
     Col("beyond", "Après la fenêtre (€)", "money", width=110),
-    Col("gap", "Écart (€)", "money", width=88),
     Col("cost_next", "Coût sur la fenêtre (€)", "money", width=120),
     Col("margin_next", "Marge sur la fenêtre (€)", "money", width=120),
     Col("alerts", "Alertes", "text", width=260),

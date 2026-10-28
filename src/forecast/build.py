@@ -25,7 +25,7 @@ from .sources import Legacy, norm
 
 KIND_ORDER = {"Projet": 0, "Contrat": 1, "TS": 2, "Animation": 3, "Devis": 4, "Manuel": 5}
 CATEGORY_ORDER = {"Signé": 0, "Pipe": 1}
-HEALTH_ORDER = {"Safe": 0, "À risque": 1, "Mort": 2}
+HEALTH_ORDER = {"Safe": 0, "À surveiller": 1, "Mort": 2}
 
 
 @dataclass
@@ -392,11 +392,11 @@ def assemble(
         row = Row(
             ref=refs[s.page_id], pole="Maintenance", category="Signé", kind="Contrat", label=s.name, owner=s.owner,
             typologie="Entretien" + (f" ({s.int_ext})" if s.int_ext else ""), ca=s.annual,
-            start=_month(s.start), stop=_month(s.end) if s.lost else None, rule="MAINTENANCE",
+            start=_month(s.start), stop=_month(s.end), rule="MAINTENANCE",  # dates shown only: months come from the planning
             kv_default=kv.get("Maintenance", 2.3), fixed=fixed, inactive=not fixed,
             extra={
                 "client": s.client, "furious_no": s.furious_id, "status": status, "renewal": s.reconduction,
-                "contract_end": s.end, "frequency": s.frequency, "passages_year": planned,
+                "frequency": s.frequency, "passages_year": planned,
                 "passages_done": passages_in_year(s, year, before=today), "year_value": value,
                 "per_passage": value / planned if planned else "",
             },
@@ -507,10 +507,15 @@ def assemble(
             typed = {k: v for k, v in inputs.get(row.ref, {}).items() if not k.startswith("_")}
             s = compute_row(row, typed, grid, open_from, params.fallback_months, pending_from)
             if row.ref in site_of:
-                health, why = contract_health(site_of[row.ref], today, typed)
-                until = typed.get("confirmed_until")
-                row.extra.update({"health": health, "health_reason": why,
-                                  "confirmed_until": date.fromisoformat(str(until)[:10]) if until else ""})
+                site = site_of[row.ref]
+                health, why = contract_health(site, today)
+                row.extra.update({"health": health, "health_reason": why})
+                if health and "(à décider dans Notion)" in why:
+                    checks.append((TAB_CONTRACTS, row.ref, row.label, "Reconduction à choisir dans Notion : Reconduction Tacite "
+                                                                       "(Safe), À surveiller ou Perdu (Mort)"))
+                elif health == "Safe" and site.end is not None and site.end < today:
+                    checks.append((TAB_CONTRACTS, row.ref, row.label, f"Reconduction Tacite mais fin dépassée le "
+                                                                       f"{site.end:%d/%m/%Y} : mettre à jour la date de fin dans Notion"))
             if row.kind in ("Projet", "Devis", "Manuel", "Contrat") or abs(s.remaining) > EPS or s.pinned:
                 shown.append((row, s))
             for a in s.alerts:
@@ -518,8 +523,8 @@ def assemble(
                     checks.append((pole, row.ref, s.label, a))
         shown.sort(key=lambda rs: (
             rs[0].inactive, CATEGORY_ORDER.get(rs[1].category, 9), KIND_ORDER.get(rs[0].kind, 9),
-            HEALTH_ORDER.get(rs[0].extra.get("health"), 3),  # contracts: Safe, then À risque, then Mort
-            rs[0].extra.get("health_reason") == "non confirmé",  # within À risque, real warning signs first
+            HEALTH_ORDER.get(rs[0].extra.get("health"), 3),  # contracts: Safe, then À surveiller, then Mort
+            "(à décider dans Notion)" in str(rs[0].extra.get("health_reason")),  # within À surveiller, the decided ones first
             rs[0].owner.lower(), rs[1].label.lower(),
         ))
         out_rows[pole] = shown

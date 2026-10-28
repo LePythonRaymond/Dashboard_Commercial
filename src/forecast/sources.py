@@ -8,12 +8,14 @@ Readers for the production forecast. All of them only read.
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import pandas as pd
 import requests
@@ -22,6 +24,8 @@ from config.settings import STATUS_WAITING, get_secret
 
 from . import months as M
 from .maintenance import Site, passage_dates_by_site, passages_by_site
+
+logger = logging.getLogger(__name__)
 
 NOTION_VERSION = "2025-09-03"
 SITES_DATA_SOURCE = "285d9278-02d7-808a-9395-000b04dfc654"
@@ -82,6 +86,28 @@ def fetch_pipe(auth, project_root: Path) -> pd.DataFrame:
 
 # --------------------------------------------------------------------------- Notion
 
+NOTION_RETRY_WAITS = (2, 5, 15)  # seconds before the 2nd, 3rd and 4th attempt
+
+
+def _post_with_retry(url: str, body: dict, headers: dict, waits: Sequence[float] = NOTION_RETRY_WAITS) -> dict:
+    """One Notion query page. A dropped connection, a timeout, a 429 or a 5xx is retried: the Planning
+    takes many pages, and one network hiccup used to cost the whole night's refresh (2026-10-27)."""
+    for attempt in range(len(waits) + 1):
+        try:
+            resp = requests.post(url, json=body, headers=headers, timeout=90)
+            if resp.status_code != 429 and resp.status_code < 500:
+                resp.raise_for_status()
+                return resp.json()
+            error: Exception = requests.HTTPError(f"Notion {resp.status_code}", response=resp)
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            error = exc
+        if attempt == len(waits):
+            raise error
+        logger.warning("Notion query failed (%s), new attempt in %ss", error, waits[attempt])
+        time.sleep(waits[attempt])
+    raise AssertionError("unreachable")
+
+
 def _notion_query_all(data_source_id: str, api_key: str) -> List[dict]:
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -94,9 +120,7 @@ def _notion_query_all(data_source_id: str, api_key: str) -> List[dict]:
         body = {"page_size": 100}
         if cursor:
             body["start_cursor"] = cursor
-        resp = requests.post(url, json=body, headers=headers, timeout=90)
-        resp.raise_for_status()
-        data = resp.json()
+        data = _post_with_retry(url, body, headers)
         pages.extend(data.get("results", []))
         cursor = data.get("next_cursor")
         if not cursor:
