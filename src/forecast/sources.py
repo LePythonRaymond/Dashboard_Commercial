@@ -23,7 +23,7 @@ import requests
 from config.settings import STATUS_WAITING, get_secret
 
 from . import months as M
-from .maintenance import Site, passage_dates_by_site, passages_by_site
+from .maintenance import CONTRACT_STATES, Site, passage_dates_by_site, passages_by_site
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +150,8 @@ def fetch_sites(api_key: Optional[str] = None) -> List[Site]:
         if "TEST-SOLIDITE" in reconduction:
             continue
         page_id = page["id"].replace("-", "")
+        typed = (((p.get("État contrat") or {}).get("select") or {}).get("name") or "").strip()
+        etat = next((x for x in CONTRACT_STATES if norm(x) == norm(typed)), typed)  # "safe" or "A risque" match too
         sites.append(
             Site(
                 page_id=page_id,
@@ -157,7 +159,7 @@ def fetch_sites(api_key: Optional[str] = None) -> List[Site]:
                 annual=float((p.get("Total HT Annuel") or {}).get("number") or 0.0),
                 start=_date(p.get("Date debut contrat")),
                 end=_date(p.get("Date fin Contrat")),
-                lost="Perdu" in reconduction,
+                lost="Perdu" in reconduction or etat == "Mort",  # either way the contract stops at its end date
                 archived=bool((p.get("Archivé") or {}).get("checkbox")),
                 furious_id=_text(p.get("ID furious")),
                 int_ext=((p.get("INT EXT ?") or {}).get("select") or {}).get("name", "") or "",
@@ -166,6 +168,8 @@ def fetch_sites(api_key: Optional[str] = None) -> List[Site]:
                 client=_text(p.get("Client")),
                 frequency=", ".join(o["name"] for o in (p.get("Fréquence") or {}).get("multi_select", [])),
                 reconduction=", ".join(reconduction),
+                etat=etat,
+                follow_up=_text(p.get("Commentaire suivi contrat")),
                 dates=dates.get(page_id, []),
             )
         )
