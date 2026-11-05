@@ -436,6 +436,7 @@ def assemble(
                 owner=_owner(p.get("project_manager")), typologie=typ, ca=float(p["total_amount"] or 0),
                 start=_month(start), stop=_month(stop), rule="TRAVAUX",
                 kv_default=kv.get("Maintenance TS", 1.7) if kind == "TS" else kv.get("Maintenance", 2.3), fixed=fixed,
+                extra={"furious_no": str(p["id"])},  # the Furious project, as in Arthur's TS file (« Code projet »)
             ))
 
     if not pipe.empty:
@@ -456,6 +457,8 @@ def assemble(
                 proposal_date=_month(d.get("date")), rule=str(rule).upper(),
                 kv_default=kv_default(pole, typ, amount, kv),
             )
+            if tab == TAB_TS:
+                row.extra["furious_no"] = f"D{d['id']}"  # a TS devis: its Furious devis number
             raw = d.get("probability")
             if pd.notna(raw) and float(raw) == 0:
                 row.proba = 0.0

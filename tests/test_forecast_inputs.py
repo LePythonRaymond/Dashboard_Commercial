@@ -283,6 +283,14 @@ def test_maintenance_rows_split_between_contracts_and_ts_tabs():
     # Début and Fin of a contract are its Notion dates, even when it renews (asked on 2026-10-27: Fin was empty)
     assert contracts["S721"].start == "2024-07" and contracts["S721"].stop == "2050-12"
     assert "contract_end" not in contracts["S721"].extra
+    # the TS tab shows the Furious project number, like the contracts tab (asked by Arthur on 2026-11-05)
+    from datetime import datetime
+
+    from src.forecast.sheet import render_pole
+    from src.forecast.layout import ROW_FIELDS, ROW_FIRST
+    rend = render_pole(TAB_TS, out.rows[TAB_TS], out.grid, out.open_from, datetime(2026, 10, 27, 7, 30), 2)
+    fields = rend.values[ROW_FIELDS - 1]
+    assert rend.values[ROW_FIRST - 1][fields.index("furious_no")] == "1270"
 
 
 def test_pole_tab_without_legend_and_home_page_without_preamble():
