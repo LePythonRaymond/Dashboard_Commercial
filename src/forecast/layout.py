@@ -98,9 +98,9 @@ BEFORE: List[Col] = [
     # Contract status (asked by Hugo): Notion's "État contrat", set there by the account managers
     Col("health", "État du contrat", "text", width=92, only=(TAB_CONTRACTS,)),
     Col("health_reason", "Pourquoi", "text", width=300, only=(TAB_CONTRACTS,)),
-    # Maintenance portfolio (asked by Arthur): hidden in the other tabs
+    # Maintenance portfolio (asked by Arthur): hidden in the other tabs; N° Furious also on the TS tab (2026-11-05)
     Col("client", "Client", "text", width=150, only=(TAB_CONTRACTS,)),
-    Col("furious_no", "N° Furious", "text", width=72, only=(TAB_CONTRACTS,)),
+    Col("furious_no", "N° Furious", "text", width=72, only=(TAB_CONTRACTS, TAB_TS)),
     Col("status", "Statut Notion", "text", width=78, only=(TAB_CONTRACTS,)),
     Col("renewal", "Reconduction (Notion)", "text", width=150, only=(TAB_CONTRACTS,)),
     Col("frequency", "Fréquence", "text", width=190, only=(TAB_CONTRACTS,)),
