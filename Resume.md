@@ -1248,11 +1248,53 @@ Money: « Mort » or « Perdu » in « Reconduction » sets `Site.lost`, so the 
 
 « Début » and « Fin » of a contract are its Notion dates and are display only: the months come from the planning, and a contract that is not Perdu keeps producing after its Fin (renewal rule).
 
+« N° Furious » (`furious_no`) shows on both Maintenance tabs: Notion « ID furious » for a contract; for a TS (since 2026-11-05, asked by Arthur, PR #36) the Furious project number, i.e. the « Code projet » of Arthur's TS file; « D » + id for a TS devis. Every column exists in every pole tab and `Col.only` (`layout.BEFORE`) hides it where it does not belong. Typed values are read back through the hidden field-name row (`ROW_FIELDS`), so showing a column never shifts what was typed.
+
 **Sheet hygiene.** There are no cell notes and no « Écart » column. Notion queries retry 3 times on network errors. The colour legend is only in the Accueil, which is a page: sections, no gridlines. Every run re-hides `_saisies`, `_rendu` and `_calcul`.
 
-**Run.** `python scripts/run_forecast.py --spreadsheet ID [--dry-run]` takes about 90 s: Furious, Notion, one read and a few batched writes. Formulas use the sheet's fr_FR syntax. It reads Furious and Notion only.
+**Run and deploy.** `python scripts/run_forecast.py --spreadsheet ID [--dry-run]` takes about 90 s: Furious, Notion, one read and a few batched writes. Formulas use the sheet's fr_FR syntax. It reads Furious and Notion only. On the VPS (`/root/Customs/Dashboard_Commercial`, branch main) the cron `30 6 * * *` runs it with `--spreadsheet 1YeKI_nkKLTDNn2LpBwlEuDUI-LQKnY8paSwjUJE2MOA` into `logs/forecast_YYYYMMDD.log`; a manual run needs the same `--spreadsheet` (no env variable holds it there). Deploy = merge the PR, `git pull` on the VPS, then wait for the cron or run the cron command by hand. Merged so far: PRs #31 to #36 (#35 « État contrat », #36 TS « N° Furious »).
 
 **Tests.** 500 pass. The 49 new ones are in `test_forecast_engine.py`, `test_forecast_maintenance.py`, `test_forecast_inputs.py` and `test_forecast_js_parity.py`, with shared vectors in `forecast_vectors.json`.
+
+
+### 18.27 Suivi de production: the accounting closing rebuilt from Furious (started October 2026)
+
+**Goal.** Replace the accounting's monthly Excel « Suivi production - MMYYYY vASL.xlsx » with a Google Sheet « Suivi de production » that the server rebuilds every night from Furious, next to « Copie de Forecast 2 » in the same My Drive (the server's Google login, Taddeo's, owns both). Nobody pastes exports any more. A « Clôture » button freezes a month per project and per BU; the next month = cumulative at its end − the frozen cumulative, so an entry dated in a closed month lands in the next open month (a control lists it). Today the accountant does this by hand with « M-1 en brut ». Page for Arthur and the accountant (rules, controls, findings, per-pole questions): https://claude.ai/artifact/RKm3HMGvw6RWqMxZKAdPUa (version 6, private: share it from its menu).
+
+**What the Excel does today** (September 2026 file). Five Furious exports are pasted into tabs (`1)details_projects`, `2)export_achats`, `3)export_factures`, `4)time_export`, `5)export_rate_card_projet`). « Suivi par projet » has one row per followed project (568): invoicing P/Q/R, budget U (quote cost lines) + V (sum of « CJM piloté » of the budget lines) = W, KV prévu X = CA ÷ W (typed on 94 rows), production Z (= invoiced R on 432 rows, = min(CA, X × costs AC) on 125, typed or CA on 11), costs AA (purchases marked « Utiliser », summing column N « montant HT TOTAL ») + AB (time cost), year production AX = Z − (typed production at end of 2024 + typed 2025). « Synthese par BU » (no accent; a hidden older « Synthèse par BU » exists) sums AX/AY by BU, compares with the annual budget ÷ 12 × month, and gets the month as cumulative − « M-1 en brut » (last month's cumulative pasted as values).
+
+**Errors found in « Synthese par BU »** (September file): margin gap V = T + U instead of T − U (V11, V37, V38); monthly budget = annual ÷ 9 (the month number) instead of ÷ 12 (L36); the « M-1 en brut » total (row 26) is a typed 2 406 337 € while its lines sum to 3 221 554 € (no formula uses it); BU totals use H (origin BU), not I (« BU revu »); « A clôturer » says « terminé » whenever invoiced = produced. With T − U and ÷ 12, September's margin against budget is +50 767 € instead of −251 395 €.
+
+**Furious reads** (`src/suivi/furious.py`). Invoices `/stand-alone-invoice/` « Invoices »; purchases `/purchase/` « Purchase » (`cost` before tax); time `/sprint/` « Sprint » (`time` in days, `cjm_sprint` = cost of the entry, already multiplied: 0.357 day gives 89.29 €); budget lines `/project-rate-card/` « ProjectRateCard » (active lines only). `fetch_all` raises on HTTP errors after 3 retries, on GraphQL errors, on a missing result and on a page that repeats ids. A purchase received in parts keeps the whole order in `cost`; the parts are `PurchasePartial` (linked by `bc_number` = purchase id; 4 rows in all Furious on 2026-10-30, read through the claude.ai connector, Myrium's token not tried). `invoice-milestone` is refused (« search non autorisée ») and not needed: planned invoices (statut 0) carry the invoicing schedule. `CjmHistory` (per-BU average) is not what the file uses.
+
+**Run checks** (`src/run_checks.py`, tests `tests/test_run_checks.py`), for every nightly job, so no error is silent. A source with no rows, or 20 % fewer than at the last good run, blocks the write (the sheet keeps yesterday's version and an email says why); totals that must agree are blocking or warning checks; the counts of a good run are stored in `logs/state/<job>.json`. A job that does not run at all is caught by the last good run's date in the sheet plus a watcher (26 h, to build). The Forecast does not use it yet: today an empty Notion or Furious answer would give an emptied tab with no alert.
+
+**Reconciliation** (`scripts/suivi_check_file.py --xlsx FILE --closing YYYY-MM-DD [--cache DIR] [--csv OUT]`): compares the workbook with Furious project by project (invoicing, purchases, time, budget) and purchases row by row by « ID achat ». It is the proof that the server can rebuild the file, and becomes the parallel-run check of the October closing. Unmarked rows are added with column N, as AA would count them.
+
+**Findings on the September 2026 file** (2026-10-28 and 2026-10-30; Furious: 3 798 invoices, 14 752 purchases, 53 602 time entries, 3 504 budget lines, 1 093 projects).
+- Invoicing: year 568 / 568 projects equal, history 564 / 568.
+- Purchases, rows: 13 493 of the file's 13 500 found by id, 13 464 with the same amount. Counted in 2026 (rows « Utiliser »): payé 844 661 €, reçu non payé 329 303 €, ok pour paiement 28 526 €, accepté non reçu 1 666 €, non validé 60 290 €. Per project, AA + unmarked rows = Furious on 428 / 568; the rest to explain.
+- Purchases, unmarked: rows 12 748 to 13 501 of « 2)export_achats » (754, no mark and no Année; 753 by creation date). 247 are on followed projects: 149 083 € of costs, +53 349 € of production on 9 cost-method projects (Travaux 107 625 € / +44 731 €). Two of them (row 13498 Covivio order 71822, row 13499 AP House order 73901) are partial invoices: column N holds the whole order (49 122 €), column O « montant HT (avec partiel) » the received part (11 311 €), and Furious agrees (one part each, received 24/08, the rest « accepté non reçu »). The 186 894 € / +106 221 € quoted before 2026-10-30 used N.
+- Purchases, non validated: two are marked « Utiliser » and counted (64967, 58 750 € on 1084 Treilhard, cost method, +84 611 € of production; 76760, 1 540 € on 1307). The 659 k€ of status 0 left out of the export (Travaux 559 467 €, Maintenance 91 199 €) have no date at all (`0000-00-00`) and sit on sites in progress (Covivio 1171 176 134 €, Treilhard 1084 118 167 €, AP House 1269 60 000 €): orders waiting for validation.
+- Time: same cost per entry (Farman 44 542 / 44 848, Adyen 15 959 / 15 985). The file's time export stops at 28/08/2026: September is missing, 122 670 € of costs on followed projects (TRX 51 212, MAI 47 768, CON 23 690), +52 012 € of production on cost-method projects. There is no time-cost rule to decide (the earlier "Farman 115 006 €" multiplied the cost by the days twice).
+- Budget: U = project `total_cost` on 421 / 568, CA = `total_amount` on 466 / 568; V against budget lines still to pin down. 116 projects have KV prévu > 10 and 115 of them have no budgeted time (V = 0): no time line in the Furious budget (90), time lines in days without « CJM piloté » (24), no active budget line (2). Only 8 are cost-method, all at 100 % of CA, 6 already fully invoiced: only 1210 Trait d'axe (CON, 14 875 € produced, 4 007 € of costs, nothing invoiced) is changed by it. « CJM piloté » is empty on 4 319 of 7 138 export lines: −48 026 € of 2026 production (TRX −46 185 €) if budgeted time were valued.
+- Method among projects not fully invoiced: Travaux costs 25 / invoicing 16; Conception invoicing 45 / costs 21 / other 3; Maintenance invoicing 117 / costs 21 / other 2.
+
+**Rules** (Arthur's answers, 2026-10-30).
+1. Purchases, decided: a « non validé » purchase (status 0) never counts; a validated one counts with or without the « Utiliser » mark (in 2026 the mark only meant "project followed"). Open: Arthur wrote « pas encore déboursés », i.e. paid. Proposal: count from reception (payé, reçu non payé, ok pour paiement), not « accepté non reçu » except its received parts; the supplier invoice date (`document_date`) up to the closing day.
+2. Time cost: nothing to decide. Arthur adds that the Forecast follows the pole heads' view, sometimes far from accounting and Furious: control C will show those gaps every month.
+3. Production method, not decided (pole heads look at invoicing, accounting at costs, neither realistic before the end). Interim: each project keeps its September method as an orange cell, the sheet shows both measures side by side, and a new project takes the most frequent method of its pole among projects not fully invoiced (Travaux costs, Conception and Maintenance invoicing), listed in Contrôles « méthode à confirmer ».
+4. Budgeted time, not decided (Arthur has no experience of it). W = U + V already includes it: the data is missing. To ask the file's author and the pole heads, who fill the budgets in Furious.
+Also open with the accountant: correct September before freezing it (time 122 670 €, purchases 149 083 €, Treilhard 58 750 € counted) or let October absorb it; budgets 3,0 / 1,3 M€ (Suivi) against 3,4 / 1,4 M€ (Forecast); which projects are followed (13 open projects missing, Saguez 141 118 € open since 2023).
+
+**State on 2026-11-09.** Branch `feat/suivi-production` (pushed, not merged, no PR), on main 0e45dfd: `src/suivi/`, `src/run_checks.py`, `tests/test_run_checks.py`, `scripts/suivi_check_file.py`; 502 tests pass. The Google Sheet is not created yet. The September workbook is on Drive (owner Arthur), not in git.
+
+**Plan.**
+1. Reads, run checks and reconciliation with the September file (done 2026-10-28); Arthur's answers (2026-10-30).
+2. The sheet: tabs « Clôture » (first), « Synthese par BU » (formulas fixed), « Suivi par projet », « Contrôles », then the raw rows (factures, achats, temps, budgets). Purchases per rule 1; read `PurchasePartial` for orders received in parts. Until rules 3 and 4 are decided, each project keeps the September file's choices (method, typed KV, typed history) as orange cells.
+3. Closing: menu « Clôture » (Apps Script, like the Forecast's « Prévision »), allowed to the accountant and Arthur only. It freezes the month per project and per BU in a hidden « Clôtures » tab (who, when); the next night the server fills the Forecast's Réalisé and « Dernier mois clos ». « Rouvrir » keeps the history.
+4. Controls A (Furious to Suivi: everything counted once), B (Suivi coherent), C (Suivi against Forecast); `run_checks` in the Forecast too; the 26 h watcher.
+5. Parallel run on the October closing (mid-November), then switch.
 
 ---
 
@@ -1269,7 +1311,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.51
-**Last Updated**: October 2026
+**Document Version**: 1.52
+**Last Updated**: November 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System
