@@ -244,6 +244,12 @@ BU_CONCEPTION_KEYWORDS = ["CONCEPTION", "ETUDE"]
 CONCEPTION_THRESHOLD_LOW = 15000
 CONCEPTION_THRESHOLD_HIGH = 30000
 
+# Revenue Engine window: the current year plus the next REVENUE_YEARS_AHEAD years.
+# A sheet written in year Y therefore carries production columns Y..Y+3, so the
+# production of year P is spread over the sheets of years P-3..P (a CONCEPTION
+# above 30k lasts 30 months and can start after its signature).
+REVENUE_YEARS_AHEAD = 3
+
 # Alert Configuration
 # ALERT_AMOUNT_THRESHOLD = 1000  # DEPRECATED: Amount threshold rule removed (no longer used)
 ALERT_FOLLOWUP_DAYS_FORWARD = 60  # Look ahead window

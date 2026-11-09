@@ -11,7 +11,7 @@ from typing import List, Tuple, Dict, Any
 from datetime import datetime
 from dataclasses import dataclass
 
-from config.settings import CONCEPTION_THRESHOLD_LOW, CONCEPTION_THRESHOLD_HIGH
+from config.settings import CONCEPTION_THRESHOLD_LOW, CONCEPTION_THRESHOLD_HIGH, REVENUE_YEARS_AHEAD
 
 
 @dataclass
@@ -43,7 +43,7 @@ class RevenueEngine:
         """
         if years_to_track is None:
             current_year = datetime.now().year
-            self.years_to_track = [current_year, current_year + 1, current_year + 2, current_year + 3]
+            self.years_to_track = [current_year + k for k in range(REVENUE_YEARS_AHEAD + 1)]
         else:
             self.years_to_track = sorted(years_to_track)
 
@@ -262,6 +262,9 @@ class RevenueEngine:
           - TRAVAUX: start = date, end = start + 5 months
           - CONCEPTION: start = date (existing phasing rules)
 
+        The devis date is only required by the rules that read it: Rule 2 and
+        MAINTENANCE Rule 1 work without it.
+
         Args:
             row: DataFrame row with projet_start, projet_stop, date, final_bu
 
@@ -285,8 +288,11 @@ class RevenueEngine:
             start_missing = True
             stop_missing = True
 
-        # If proposal_date is also missing, we can't apply any rule
-        if not proposal_date_valid:
+        # Only the rules that fall back on the devis date need it: Rule 2 (end
+        # missing) starts from projet_start, and MAINTENANCE Rule 1 (start
+        # missing) counts back from projet_stop.
+        uses_proposal_date = start_missing and (stop_missing or bu != 'MAINTENANCE')
+        if uses_proposal_date and not proposal_date_valid:
             return pd.NaT, pd.NaT, False, "missing_all_dates"
 
         rule_applied = True
@@ -445,7 +451,7 @@ class RevenueEngine:
 
         # Get window bounds for clamping (Rule 4)
         first_year = min(self.years_to_track) if self.years_to_track else datetime.now().year
-        last_year = max(self.years_to_track) if self.years_to_track else datetime.now().year + 3
+        last_year = max(self.years_to_track) if self.years_to_track else datetime.now().year + REVENUE_YEARS_AHEAD
 
         # Calculate monthly allocations based on BU
         if bu == 'CONCEPTION':

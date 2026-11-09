@@ -11,7 +11,7 @@ from typing import Dict, List, Any, Tuple
 from datetime import datetime
 from dataclasses import dataclass, field
 
-from config.settings import STATUS_WON, STATUS_WAITING, MONTH_MAP
+from config.settings import STATUS_WON, STATUS_WAITING, MONTH_MAP, REVENUE_YEARS_AHEAD
 from .revenue_engine import RevenueEngine
 from .typologie_allocation import allocate_typologie_for_row
 
@@ -73,7 +73,7 @@ class ViewGenerator:
         # not the machine's current year. This matters for backfills (e.g. "Mars 2025")
         # where we still want summaries to include 2025.
         self.revenue_engine = RevenueEngine(
-            years_to_track=[self.current_year, self.current_year + 1, self.current_year + 2, self.current_year + 3]
+            years_to_track=[self.current_year + k for k in range(REVENUE_YEARS_AHEAD + 1)]
         )
         self.financial_cols = self.revenue_engine.get_financial_columns()
 

@@ -58,7 +58,7 @@ def increment_run():
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from config.settings import settings, MONTH_MAP, get_secret, MYRIUM_ROOT, STATUS_WON
+from config.settings import settings, MONTH_MAP, get_secret, MYRIUM_ROOT, STATUS_WON, REVENUE_YEARS_AHEAD
 from src.integrations.google_sheets import GoogleSheetsClient
 from src.integrations.notion_entretien_start import fetch_maintenance_entretien_start_2026
 from src.integrations.budget_export import build_budget_workbook
@@ -3005,9 +3005,8 @@ def load_aggregated_production_data(production_year: int, sheet_type: str) -> pd
     """
     Load data from all relevant years for a production target.
 
-    For "À produire 2026", this aggregates:
-    - Data from SPREADSHEET_SIGNE_2025 with Montant Total 2026 > 0
-    - Data from SPREADSHEET_SIGNE_2026 with Montant Total 2026 > 0
+    For "À produire 2028", this aggregates the sheets of signing years 2025..2028
+    (e.g. SPREADSHEET_SIGNE_2025 rows with Montant Total 2028 > 0).
 
     Args:
         production_year: Target production year (e.g., 2026)
@@ -3019,8 +3018,9 @@ def load_aggregated_production_data(production_year: int, sheet_type: str) -> pd
     all_data = []
 
     # Determine which years might have data for this production year
-    # Revenue engine tracks Y, Y+1, Y+2, so we need to check Y, Y-1, Y-2
-    years_to_check = [production_year - 2, production_year - 1, production_year]
+    # A sheet of year Y carries production columns Y..Y+REVENUE_YEARS_AHEAD,
+    # so production year P can come from the sheets of years P-3..P
+    years_to_check = list(range(production_year - REVENUE_YEARS_AHEAD, production_year + 1))
 
     total_col = f'Montant Total {production_year}'
 

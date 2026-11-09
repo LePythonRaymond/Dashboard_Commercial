@@ -194,6 +194,87 @@ def test_rule3_both_missing_travaux():
     assert "rule3_both_missing_travaux" in res["dates_rule"]
 
 
+def test_conception_start_only_without_devis_date():
+    """
+    Regression: a CONCEPTION with projet_start but no devis date used to get 0€,
+    because the devis date was checked before Rule 2, which does not need it.
+    """
+    engine = RevenueEngine(years_to_track=[2025, 2026, 2027, 2028])
+    row = pd.Series(
+        {
+            "amount": 12000.0,
+            "probability_factor": 1.0,
+            "final_bu": "CONCEPTION",
+            "projet_start": pd.Timestamp("2025-01-01"),
+            "projet_stop": pd.NaT,  # missing
+            "date": pd.NaT,  # missing
+        }
+    )
+
+    res = engine.calculate_revenue(row)
+    assert res["Montant Total Q1_2025"] == 12000.0
+    assert res["dates_effective_start"] == pd.Timestamp("2025-01-01")
+
+
+def test_rule2_end_missing_travaux_without_devis_date():
+    """Rule 2 only reads projet_start, so a missing devis date must not block it."""
+    engine = RevenueEngine(years_to_track=[2025, 2026, 2027, 2028])
+    row = pd.Series(
+        {
+            "amount": 6000.0,
+            "probability_factor": 1.0,
+            "final_bu": "TRAVAUX",
+            "projet_start": pd.Timestamp("2025-01-01"),
+            "projet_stop": pd.NaT,  # missing
+            "date": pd.NaT,  # missing
+        }
+    )
+
+    res = engine.calculate_revenue(row)
+    # Jan to Jun 2025 = 1000€/month
+    assert res["Montant Total 2025"] == 6000.0
+    assert res["dates_rule"] == "rule2_end_missing_travaux"
+
+
+def test_rule1_start_missing_maintenance_without_devis_date():
+    """MAINTENANCE Rule 1 counts back from projet_stop, so it needs no devis date."""
+    engine = RevenueEngine(years_to_track=[2025, 2026, 2027, 2028])
+    row = pd.Series(
+        {
+            "amount": 12000.0,
+            "probability_factor": 1.0,
+            "final_bu": "MAINTENANCE",
+            "projet_start": pd.NaT,  # missing
+            "projet_stop": pd.Timestamp("2025-12-31"),
+            "date": pd.NaT,  # missing
+        }
+    )
+
+    res = engine.calculate_revenue(row)
+    assert res["Montant Total 2025"] == 12000.0
+    assert res["dates_rule"] == "rule1_start_missing_maintenance"
+
+
+def test_rules_reading_devis_date_still_require_it():
+    """Without projet_start, CONCEPTION and TRAVAUX start from the devis date: none means 0€."""
+    engine = RevenueEngine(years_to_track=[2025, 2026, 2027, 2028])
+    for bu in ("CONCEPTION", "TRAVAUX"):
+        row = pd.Series(
+            {
+                "amount": 6000.0,
+                "probability_factor": 1.0,
+                "final_bu": bu,
+                "projet_start": pd.NaT,  # missing
+                "projet_stop": pd.Timestamp("2025-06-30"),
+                "date": pd.NaT,  # missing
+            }
+        )
+
+        res = engine.calculate_revenue(row)
+        assert res["dates_rule"] == "missing_all_dates"
+        assert res["Montant Total 2025"] == 0.0
+
+
 def test_rule4_clamp_before_window():
     """Rule 4: Allocations before tracked window -> clamp to first month."""
     engine = RevenueEngine(years_to_track=[2025, 2026, 2027, 2028])

@@ -121,7 +121,7 @@ def _sum_production_by_bu(df: pd.DataFrame, year: int, bu: str, weighted: bool =
     Sum a production column (`Montant Total {Y}` or `Montant Pondéré {Y}`) for one BU.
 
     Used with production-aggregated data (``load_aggregated_production_data``), which
-    already pulls the Signé/Envoyé sheets across signing years Y-2..Y and keeps only
+    already pulls the Signé/Envoyé sheets across signing years Y-3..Y and keeps only
     rows producing in {Y}. This is how prior-year signatures cascade into year {Y}.
     No status filter is needed: Signé sheets are all won, Envoyé sheets all waiting.
     """

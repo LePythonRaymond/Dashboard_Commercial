@@ -10,7 +10,7 @@ from email.mime.multipart import MIMEMultipart
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 
-from config.settings import settings, OWNER_EMAIL_MAP, MONTH_MAP, TRAVAUX_PROJECTION_PROBABILITY_THRESHOLD
+from config.settings import settings, OWNER_EMAIL_MAP, MONTH_MAP, TRAVAUX_PROJECTION_PROBABILITY_THRESHOLD, REVENUE_YEARS_AHEAD
 from src.processing.alerts import AlertsOutput
 from src.processing.objectives import (
     objective_for_month, objective_for_quarter, objective_for_year,
@@ -1011,14 +1011,14 @@ class EmailSender:
         """
         Load aggregated data across years to capture carryover (like dashboard load_aggregated_production_data).
 
-        years_to_check: production_year-2 .. production_year
+        years_to_check: production_year-3 .. production_year (the Revenue Engine window)
         Filters to rows where Montant Total {production_year} > 0 (or pondéré column existence not required).
         Adds signed_year and keeps source_sheet.
         """
         from src.integrations.google_sheets import GoogleSheetsClient
 
         total_col = f"Montant Total {production_year}"
-        years_to_check = [production_year - 2, production_year - 1, production_year]
+        years_to_check = list(range(production_year - REVENUE_YEARS_AHEAD, production_year + 1))
 
         sheets_client = GoogleSheetsClient()
         all_parts: List[pd.DataFrame] = []
