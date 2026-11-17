@@ -29,6 +29,12 @@ from typing import Any, Dict, List, Optional
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# Shared by every run that writes (06:00 cron, dashboard refresh via scripts/refresh_watch.py)
+from src.run_lock import FileLock, LockTimeout, pipeline_lock_path
+
+PIPELINE_LOCK_PATH = pipeline_lock_path(PROJECT_ROOT)
+PIPELINE_LOCK_WAIT_SECONDS = 30 * 60  # a full run takes about 8 minutes
+
 from config.settings import get_secret, settings, MONTH_MAP, STATUS_WON
 from src.api.auth import FuriousAuth, AuthenticationError
 from src.api.proposals import ProposalsClient, ProposalsAPIError
@@ -44,6 +50,7 @@ from src.integrations.entretien_start_store import (
     read_entretien_start_2026_file_snapshot,
 )
 from src.integrations.google_sheets import GoogleSheetsClient
+from src.integrations.refresh_request import write_data_as_of
 from src.integrations.email_sender import EmailSender
 from src.integrations.notion_alerts_sync import NotionAlertsSync
 from src.integrations.notion_maintenance_won_sync import NotionMaintenanceWonSync
@@ -220,11 +227,36 @@ class PipelineRunner:
 
     def run(self) -> Dict[str, Any]:
         """
-        Execute the complete pipeline.
+        Execute the complete pipeline, one run at a time.
+
+        A run that writes waits for the one in progress (the 06:00 cron or a refresh
+        asked from the dashboard): two runs rewriting the same tabs together can
+        leave one empty. Dry runs write nothing and never wait.
 
         Returns:
             Results dictionary with status and step details
         """
+        if self.dry_run:
+            return self._run_unlocked()
+        lock = FileLock(PIPELINE_LOCK_PATH)
+        try:
+            lock.acquire(
+                wait_seconds=PIPELINE_LOCK_WAIT_SECONDS,
+                on_wait=lambda: logger.info("Another pipeline run is in progress, waiting for it to finish..."),
+            )
+        except LockTimeout as e:
+            logger.error(f"Pipeline not started: {e}")
+            self.results["status"] = "failed"
+            self.results["error"] = f"Another pipeline run is still in progress: {e}"
+            self._send_run_alert()
+            return self.results
+        try:
+            return self._run_unlocked()
+        finally:
+            lock.release()
+
+    def _run_unlocked(self) -> Dict[str, Any]:
+        """The pipeline itself (run() holds the lock around it)."""
         logger.info("="*60)
         logger.info("MYRIUM PIPELINE STARTED")
         logger.info(f"Dry run: {self.dry_run}")
@@ -433,6 +465,11 @@ class PipelineRunner:
                     sheets_client = GoogleSheetsClient()
                     sheet_counts = sheets_client.write_all_views(views, prev_month_won=prev_month_won)
                     self._log_step("google_sheets", "success", sheet_counts)
+                    try:
+                        # Shown by the dashboard as the time of its data
+                        write_data_as_of(sheets_client, self.furious_read_at)
+                    except Exception as e:
+                        logger.warning(f"  Could not record the data time in the Actualisation tab: {e}")
                 except Exception as e:
                     import traceback
                     error_details = {

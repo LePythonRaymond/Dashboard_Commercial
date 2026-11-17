@@ -647,13 +647,6 @@ class GoogleSheetsClient:
         if not summary_data:
             return start_row, []
 
-        # Add title row
-        self._with_sheets_write_retry(
-            "summary title",
-            lambda: worksheet.update(range_name=f"A{start_row}", values=[[title]]),
-        )
-        current_row = start_row + 1
-
         # Convert to DataFrame
         summary_df = pd.DataFrame(summary_data)
         headers = summary_df.columns.tolist()
@@ -677,25 +670,15 @@ class GoogleSheetsClient:
         # Insert year separators
         new_headers, new_data_rows, separator_indices = self._insert_year_separators(headers, data_rows)
 
-        # Write header with separators
+        # Title, header and rows in one call, from A{start_row} down: the same cells
+        # as one call per row, which spent most of the per-minute write quota (~19
+        # calls per view, 429 pauses of 65 s on every daily run).
+        block = [[title], new_headers] + new_data_rows
         self._with_sheets_write_retry(
-            "summary header",
-            lambda r=current_row, h=new_headers: worksheet.update(
-                range_name=f"A{r}", values=[h]
-            ),
+            "summary",
+            lambda: worksheet.update(range_name=f"A{start_row}", values=block),
         )
-        current_row += 1
-
-        # Write data rows with separators
-        for row_values in new_data_rows:
-            row_num = current_row
-            self._with_sheets_write_retry(
-                f"summary row {row_num}",
-                lambda rv=row_values, r=row_num: worksheet.update(
-                    range_name=f"A{r}", values=[rv]
-                ),
-            )
-            current_row += 1
+        current_row = start_row + len(block)
 
         return current_row + 1, separator_indices  # Add blank row after summary
 

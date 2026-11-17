@@ -1254,6 +1254,31 @@ Money: « Mort » or « Perdu » in « Reconduction » sets `Site.lost`, so the 
 
 **Tests.** 500 pass. The 49 new ones are in `test_forecast_engine.py`, `test_forecast_maintenance.py`, `test_forecast_inputs.py` and `test_forecast_js_parity.py`, with shared vectors in `forecast_vectors.json`.
 
+### 18.27 "Actualiser les données" in the dashboard: refresh on demand (November 2026)
+
+**Need (Guillaume, 2026-11-17)**: after half a day of updating devis in Furious, see the figures in the dashboard without waiting for the 06:00 run. The former sidebar button only emptied the dashboard's cache, so it re-read the same sheets. The "Dernière mise à jour" under it showed the current time, not the time of the data.
+
+**Why through the server**: the dashboard runs on Streamlit Cloud. Running the pipeline there would use different overrides (its own `data/`), another pandas version and no log. It would race with the 06:00 cron on another machine, and a restart mid-write leaves a tab empty. So the server keeps doing every run.
+
+**How it works**:
+1. The button writes `demande_le` in the **"Actualisation"** tab of the **état 2026** spreadsheet (`src/integrations/refresh_request.py`). The spreadsheet is fixed rather than the current year's, so the dashboard and the server always find the same tab.
+2. `scripts/refresh_watch.py` runs every minute from cron. It reads that tab once, and prints nothing when there is nothing to do. When the request is newer than the last start, it runs `run_pipeline.py --skip-emails --skip-notion --live-snapshot` (Sheets only, like a manual rerun) into `logs/pipeline_manual_*.log`. Progress goes to rows 3 to 6: `statut` (attente, en_cours, termine, echec), `debut`, `fin`, `message`.
+3. While its request is open, the dashboard re-reads the tab every 10 s (`st.fragment(run_every=10)`, `src/dashboard/components/refresh_panel.py`). When a run started after the click ends, it empties `st.cache_data` and reloads the page. The run must have *started* after the click: a run already in progress when the click happened does not count.
+4. Every run that rewrites the sheets, the cron included, writes `donnees_du`, the time Furious was read. The dashboard shows it as "Données Furious du …" in place of the old clock.
+
+**One run at a time**: `PipelineRunner.run()` takes `logs/.pipeline.lock` (`src/run_lock.py`, fcntl, released if the process dies). Every run that writes waits for the one in progress, up to 30 min, then fails with the alert email. Two runs clearing and writing the same tabs together could leave one empty. If a request comes in during the 06:00 run, the watcher writes `attente` and starts once that run ends. A `en_cours` left with the lock free (process killed) is marked `echec`.
+
+**Faster Sheets step**: `write_summary` wrote each summary row in its own call (about 19 calls per tab). It now writes title, header and rows in one call, to the same cells. On the data of 2026-11-17, the Sheets step goes from 287 write calls to 102. Google allows 60 per minute: the step goes from at least 4 min 50 s (plus three or four 65 s pauses every morning) to about 1 min 45 s. Both the 06:00 run and the button benefit. A refresh takes about 2 to 4 minutes from the click: up to 1 minute to be picked up, about 20 s of Furious and engine, then the Sheets step.
+
+**Deploy**: the server needs the cron line (documented at the top of `scripts/refresh_watch.py`). The dashboard needs `SPREADSHEET_ETAT_2026` and a Google credential allowed to write that spreadsheet. Notion is not refreshed by the button: its tables keep their own daily run and the status webhook.
+
+**Tests**: 528 pass.
+- `tests/test_refresh_request.py`: protocol, watcher, and a lock held by another process.
+- `tests/test_refresh_panel.py`: the sidebar block driven by Streamlit's AppTest (click, waiting, running, done, failure, Google error).
+- `tests/test_sheets_summary_batch.py`: same cells as the row-by-row writer, in one call.
+
+The lock was also replayed through `PipelineRunner.run()` in three cases: free (completes), held throughout (fails after the wait, one alert), held 3 s (waits, then completes).
+
 ---
 
 ## 17. Conclusion
@@ -1269,7 +1294,7 @@ Myrium is a comprehensive, production-ready commercial tracking system. The syst
 
 ---
 
-**Document Version**: 1.51
-**Last Updated**: October 2026
+**Document Version**: 1.52
+**Last Updated**: November 2026
 **Maintained By**: Development Team
 **Project**: Myrium - Commercial Tracking & BI System

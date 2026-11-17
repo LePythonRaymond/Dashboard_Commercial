@@ -118,6 +118,7 @@ from src.processing.overrides_store import ProjectOverride
 from src.dashboard.components.pending_links_panel import (
     render_pending_links_sidebar,
 )
+from src.dashboard.components.refresh_panel import render_refresh_panel
 
 # Project root used to locate data/ JSON stores.
 DASHBOARD_PROJECT_ROOT = MYRIUM_ROOT
@@ -5618,16 +5619,8 @@ def main():
 
         st.markdown("---")
 
-        # Refresh button
-        if st.button("🔄 Actualiser les données"):
-            # Clear all cached data
-            st.cache_data.clear()
-            st.cache_resource.clear()
-            st.rerun()
-
-        st.markdown("---")
-        st.markdown("##### Dernière mise à jour")
-        st.markdown(f"*{datetime.now().strftime('%d/%m/%Y %H:%M')}*")
+        # Refresh: the server re-reads Furious and rewrites the sheets, then the page reloads
+        render_refresh_panel(get_sheets_client)
 
     # Determine view configuration
     is_signed = "Signé" in view_type
