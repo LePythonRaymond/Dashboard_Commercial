@@ -4,6 +4,7 @@ server (src/integrations/refresh_request.py) and the watcher (scripts/refresh_wa
 """
 
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -316,3 +317,17 @@ def test_the_lock_is_exclusive_between_processes(tmp_path):
     assert is_locked(path)
     lock.release()
     assert not is_locked(path)
+
+
+def test_taking_the_lock_refreshes_its_date(tmp_path):
+    """The weekly cleanup deletes logs/ files 7 to 14 days old: a lock in use must never look old."""
+    path = tmp_path / "logs" / ".pipeline.lock"
+    path.parent.mkdir()
+    path.touch()
+    ten_days_ago = (datetime.now() - timedelta(days=10)).timestamp()
+    os.utime(path, (ten_days_ago, ten_days_ago))
+
+    lock = FileLock(path)
+    assert lock.try_acquire()
+    lock.release()
+    assert datetime.now().timestamp() - path.stat().st_mtime < 60

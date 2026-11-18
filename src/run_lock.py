@@ -6,9 +6,15 @@ both run scripts/run_pipeline.py. Two runs writing the same Google Sheets tabs a
 same time can leave a tab empty: each write clears the tab before writing it. An
 exclusive lock on a file (fcntl, released by the system if the process dies) makes
 the second run wait for the first.
+
+Taking a lock also touches the file. The server's weekly cleanup deletes the files of
+logs/ that are 7 to 14 days old; a lock file deleted while held would let the next
+run lock a new file of the same name and run alongside. Touched on every use (each
+minute for the watcher, each morning for the pipeline), a lock file never gets old.
 """
 
 import fcntl
+import os
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -34,6 +40,7 @@ class FileLock:
         except BlockingIOError:
             handle.close()
             return False
+        os.utime(self.path)  # see the module docstring: keeps the weekly log cleanup away
         self._file = handle
         return True
 
