@@ -154,7 +154,7 @@ def test_pending_and_served():
      T0 + timedelta(minutes=2), "running", "en cours depuis 15:00"),
     (_state(requested_at=T0, status=rr.STATUS_RUNNING, started_at=T0), T0 + timedelta(minutes=30), "stuck", "bloquée"),
     (_state(requested_at=T0, status=rr.STATUS_DONE, started_at=T0, finished_at=T0 + timedelta(minutes=3)),
-     T0 + timedelta(minutes=5), "done", "17/11 à 15:03"),
+     T0 + timedelta(minutes=5), "done", "terminée le 17/11 à 15:03"),
     (_state(requested_at=T0, status=rr.STATUS_FAILED, started_at=T0, finished_at=T0 + timedelta(minutes=3),
             message="APIError: [500]"), T0 + timedelta(minutes=5), "failed", "APIError: [500]"),
 ])
