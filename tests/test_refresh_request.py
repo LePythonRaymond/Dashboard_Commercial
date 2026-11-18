@@ -154,7 +154,7 @@ def test_pending_and_served():
      T0 + timedelta(minutes=2), "running", "en cours depuis 15:00"),
     (_state(requested_at=T0, status=rr.STATUS_RUNNING, started_at=T0), T0 + timedelta(minutes=30), "stuck", "bloquée"),
     (_state(requested_at=T0, status=rr.STATUS_DONE, started_at=T0, finished_at=T0 + timedelta(minutes=3)),
-     T0 + timedelta(minutes=5), "done", "17/11 à 15:03"),
+     T0 + timedelta(minutes=5), "done", "terminée le 17/11 à 15:03"),
     (_state(requested_at=T0, status=rr.STATUS_FAILED, started_at=T0, finished_at=T0 + timedelta(minutes=3),
             message="APIError: [500]"), T0 + timedelta(minutes=5), "failed", "APIError: [500]"),
 ])
@@ -331,3 +331,18 @@ def test_taking_the_lock_refreshes_its_date(tmp_path):
     assert lock.try_acquire()
     lock.release()
     assert datetime.now().timestamp() - path.stat().st_mtime < 60
+
+
+def test_the_watcher_prints_nothing_when_loaded():
+    """Run every minute, anything printed while loading would fill its log."""
+    script = PROJECT_ROOT / "scripts" / "refresh_watch.py"
+    code = textwrap.dedent(f"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("refresh_watch", {str(script)!r})
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        from src.integrations.google_sheets import GoogleSheetsClient  # what main() loads
+    """)
+    result = subprocess.run([sys.executable, "-c", code], cwd=PROJECT_ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "" and result.stderr == ""

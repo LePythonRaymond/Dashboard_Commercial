@@ -144,7 +144,7 @@ def describe(state: RefreshState, now: datetime) -> Tuple[str, str]:
         when = paris_time(state.finished_at or state.started_at) if (state.finished_at or state.started_at) else "?"
         return "failed", f"La dernière actualisation ({when}) a échoué : {state.message or 'voir le journal du serveur'}"
     if state.status == STATUS_DONE and state.finished_at is not None:
-        return "done", f"Dernière actualisation terminée à {paris_time(state.finished_at, with_date=True)}."
+        return "done", f"Dernière actualisation terminée le {paris_time(state.finished_at, with_date=True)}."
     return "idle", ""
 
 
