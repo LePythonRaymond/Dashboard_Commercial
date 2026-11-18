@@ -19,12 +19,19 @@ import re
 import subprocess
 import sys
 import time
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+# Importing anything under src.integrations loads src/processing/objectives.py, which
+# checks the objectives and warns on import. Run every minute, the watcher would copy
+# that warning into its log 1440 times a day. The pipeline it starts is a separate
+# process and still prints it in its own log.
+warnings.filterwarnings("ignore", message="Objectives validation issues found", category=UserWarning)
 
 from src.integrations import refresh_request as rr
 from src.run_lock import FileLock, is_locked, pipeline_lock_path
